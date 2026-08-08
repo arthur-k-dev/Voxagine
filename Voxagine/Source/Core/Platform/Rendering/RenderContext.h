@@ -259,7 +259,7 @@ public:
 	}
 
 	void UpdateWorld() { m_bWorldUpdated = true; }
-	uint32_t GetVoxelDataSize() { return m_pVoxelMapper->GetInfo().m_uiElementCount; }
+	uint32_t GetVoxelDataSize() const { return m_pVoxelMapper->GetInfo().m_uiElementCount; }
 
 	/* Bumped every time the voxel buffer stops holding what was stamped into
 	   it - a clear or a resize. A baker records it alongside the positions it

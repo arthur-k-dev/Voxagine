@@ -143,7 +143,12 @@ bool JsonSerializer::DeserializeWorld(World& world, Document& worldDoc)
 			chunks.reserve(chunkGridSize.x * chunkGridSize.y);
 
 			// Set the entity id counter to count from the highest value
-			// As an 64 bit integer it would practically never run out of unique id's this way
+			// As an 64 bit integer it would practically never run out of unique id's this way.
+			// This has to happen before any chunk is loaded: loading deserializes
+			// entities, which restore their stored id over the one the constructor
+			// handed out, and anything constructed afterwards takes the next counter
+			// value - so a counter still sitting below the stored ids hands out
+			// duplicates, and FindEntity returns whichever it reaches first.
 			uint64_t highestId = 0;
 			Value& chunksVal = worldVal["ChunkData"]["Chunks"];
 			for (SizeType i = 0; i < chunksVal.Size(); i++)
@@ -151,7 +156,13 @@ bool JsonSerializer::DeserializeWorld(World& world, Document& worldDoc)
 				uint64_t chunkHighestId = GetHighestEntityID(chunksVal[i]["RootEntities"]);
 				if (chunkHighestId > highestId)
 					highestId = chunkHighestId;
+			}
 
+			if (highestId + 1 > Entity::EntityIdCounter)
+				Entity::EntityIdCounter = highestId + 1;
+
+			for (SizeType i = 0; i < chunksVal.Size(); i++)
+			{
 				//Create the chunks for the chunk system
 				UVector2 chunkId(floor(i / chunkGridSize.y), i % chunkGridSize.y);
 				Chunk* pNewChunk = new Chunk(world.GetApplication(), &world, chunkId, UVector3(chunkSize.x, voxelGridSize.y, chunkSize.y), chunksVal[i]["RootEntities"]);
@@ -162,9 +173,6 @@ bool JsonSerializer::DeserializeWorld(World& world, Document& worldDoc)
 				}
 				chunks[chunkId.x + chunkId.y * chunkGridSize.x] = pNewChunk;
 			}
-			
-			if (highestId + 1 > Entity::EntityIdCounter)
-				Entity::EntityIdCounter = highestId;
 
 			ChunkSystem* pChunkSystem = new ChunkSystem(&world, chunks, chunkSize, chunkGridSize * chunkSize);
 			world.SetChunkSystem(pChunkSystem);

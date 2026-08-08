@@ -350,7 +350,7 @@ void EntityHierarchy::ProcessEntityDragAndDrop(Entity * pTargetEntity)
 	if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
 		ImGui::SetDragDropPayload("Entity_Drag-And-Drop", &pTargetEntity, sizeof(Entity*), ImGuiCond_Once);
 
-		ImGui::Text((char*)pTargetEntity->GetName().c_str());
+		ImGui::TextUnformatted(pTargetEntity->GetName().c_str());
 
 		ImGui::EndDragDropSource();
 	}

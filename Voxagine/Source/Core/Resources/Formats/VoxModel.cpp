@@ -666,13 +666,29 @@ bool VoxModel::Read(FH fileHandle)
 			m_Frames.push_back(frame);
 		}
 		else if (Sub.id == ID_XYZI) {
+			/* Every XYZI belongs to the SIZE chunk before it. A file that opens
+			   with XYZI has no frame to attach to, and back() on an empty
+			   vector is undefined rather than empty. */
+			if (m_Frames.empty()) {
+				Error("voxel data chunk before any size chunk");
+				return false;
+			}
+
 			VoxFrame& frame = m_Frames.back();
 
 			/* Voxel count */
 			frame.m_uiVoxelCount = ReadInt(fileHandle);
 
-			if (frame.m_uiVoxelCount < 0) {
-				Error("negative number of voxels");
+			/* The count is unsigned, so it cannot be tested against zero - what
+			   bounds it is the chunk it came from: the content is the 4-byte
+			   count followed by that many 4-byte voxels. Without this a corrupt
+			   count is a multi-gigabyte allocation. */
+			const uint32_t uiMaxVoxels = (Sub.contentSize >= 4)
+				? static_cast<uint32_t>((Sub.contentSize - 4) / static_cast<int>(sizeof(VoxFrame::Data)))
+				: 0u;
+
+			if (frame.m_uiVoxelCount > uiMaxVoxels) {
+				Error("voxel count does not fit in its chunk");
 				return false;
 			}
 

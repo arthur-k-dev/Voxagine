@@ -1559,7 +1559,7 @@ void Editor::RenderWindowWorldSettings()
 			if (texturePath.empty())
 				texturePath = "No file selected";
 
-			ImGui::Text(texturePath.c_str());
+			ImGui::TextUnformatted(texturePath.c_str());
 
 			if (ImGui::Button(std::string("Set Ground Texture").c_str()))
 			{

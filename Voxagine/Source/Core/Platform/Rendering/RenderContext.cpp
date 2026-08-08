@@ -331,6 +331,13 @@ void RenderContext::BuildFarField(World* pWorld)
 
 uint32_t RenderContext::GetVoxel(uint32_t uiID) const
 {
+	/* Same guard the two write paths already carry. Callers arrive here with
+	   ids derived from world positions and from baked position data, neither of
+	   which is clamped on the way in, and an empty voxel reads as zero anyway -
+	   so out of range answers "nothing here" rather than reading past the map. */
+	if (uiID >= GetVoxelDataSize())
+		return 0;
+
 	return m_pVoxelData[uiID];
 }
 

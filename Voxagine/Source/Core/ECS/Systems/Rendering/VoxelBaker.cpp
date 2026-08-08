@@ -308,6 +308,55 @@ uint32_t* VoxelBaker::Occupy(VoxRenderer* pRenderer, VoxRenderer::BakeData* pBak
 	return pBaked;
 }
 
+/* A static renderer that moves takes other renderers' voxels with it, and this
+ * is what puts them back.
+ *
+ * Occupy only consults the physics grid for a *static* renderer
+ * (`if (bIsStatic)`), and only a static renderer writes to it. A dynamic
+ * renderer's voxels therefore exist in the render buffer and nowhere else, so
+ * when a static one is stamped over them its `bForceVoxel` test - "is this cell
+ * free of an owner and inactive?" - answers yes. It overwrites them *and
+ * records them in its own Positions*, and the next Clear erases them. The
+ * dynamic renderer has not changed, so nothing re-stamps it, and the hole stays
+ * until something else moves it: drag a wall across a character in the editor
+ * and the character loses its middle.
+ *
+ * Rather than stop the overwrite, which is load-bearing - the wall needs those
+ * voxels once the character walks away, or it grows a character-shaped hole -
+ * tell whoever might have been erased to stamp again. `Generation = 0` is what
+ * marks them: it means exactly "the buffer no longer holds what you stamped",
+ * which is the truth here, and it is what stops Bake's stamp-key check from
+ * skipping a renderer whose stamp is unchanged but whose voxels are gone.
+ *
+ * Static renderers are deliberately not notified. They cannot be damaged this
+ * way - the physics grid makes them visible to each other's bForceVoxel test -
+ * and notifying them would let two overlapping renderers mark each other every
+ * frame, forever.
+ */
+void VoxelBaker::NotifyClearedRegion(VoxRenderer* pCleared, const Vector3& v3GridMin, const Vector3& v3GridMax)
+{
+	VoxelGrid& grid = m_pPhysicsSystem->m_VoxelGrid;
+
+	Box cleared;
+	cleared.Min = grid.GridToWorld(v3GridMin);
+	cleared.Max = grid.GridToWorld(v3GridMax + Vector3(1.f));
+
+	for (VoxRenderer* pRenderer : m_pRenderSystem->m_VoxRenderers)
+	{
+		if (pRenderer == pCleared || !pRenderer->IsEnabled() || pRenderer->GetOwner()->IsStatic())
+			continue;
+
+		if (!pRenderer->m_BakeData.Positions)
+			continue;
+
+		if (!pRenderer->GetBounds().Intersects(cleared))
+			continue;
+
+		pRenderer->m_BakeData.Generation = 0;
+		pRenderer->RequestUpdate();
+	}
+}
+
 void VoxelBaker::Clear(VoxRenderer* pRenderer, VoxRenderer::BakeData* pBakeData)
 {
 	if (pRenderer->GetWorld()->GetApplication()->IsShuttingDown())
@@ -325,6 +374,11 @@ void VoxelBaker::Clear(VoxRenderer* pRenderer, VoxRenderer::BakeData* pBakeData)
 		uint32_t arrSize = pBakeData->Size;
 		bool bStatic = pBakeData->IsStatic;
 		Vector3 voxelPos(0);
+
+		/* Grid-space bounds of what this actually erased, gathered only for a
+		   static renderer - see the notify pass after the loop. */
+		Vector3 clearedMin(FLT_MAX);
+		Vector3 clearedMax(-FLT_MAX);
 
 		for (uint32_t i = 0; i < arrSize; ++i)
 		{
@@ -350,8 +404,14 @@ void VoxelBaker::Clear(VoxRenderer* pRenderer, VoxRenderer::BakeData* pBakeData)
 				pVoxel->Active = false;
 				pVoxel->UserPointer = 0;
 				pVoxel->Color = 0;
+
+				clearedMin = glm::min(clearedMin, voxelPos);
+				clearedMax = glm::max(clearedMax, voxelPos);
 			}
 		}
+
+		if (bStatic && clearedMin.x <= clearedMax.x)
+			NotifyClearedRegion(pRenderer, clearedMin, clearedMax);
 
 		delete[] pBakeData->Positions;
 		pBakeData->Positions = nullptr;

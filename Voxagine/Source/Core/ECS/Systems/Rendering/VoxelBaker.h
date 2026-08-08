@@ -34,6 +34,11 @@ public:
 	   not walk the model. */
 	VoxRenderer::BakeData::StampKey ComputeStampKey(VoxRenderer* pRenderer);
 
+	/* Marks the dynamic renderers a static renderer's Clear may have erased, so
+	   they stamp themselves again. See the definition - the asymmetry between
+	   static and dynamic is the whole reason this is needed. */
+	void NotifyClearedRegion(VoxRenderer* pCleared, const Vector3& v3GridMin, const Vector3& v3GridMax);
+
 protected:
 	RenderContext* m_pRenderContext = nullptr;
 	RenderSystem* m_pRenderSystem = nullptr;

@@ -1,0 +1,161 @@
+{
+    "schema_version":  1,
+    "generated_at_utc":  "2026-08-08T22:59:38.5489288Z",
+    "repository":  {
+                       "root_name":  "Voxagine",
+                       "head_revision":  "743c4c67331b10bf7b7d732f78dedc9c9e2215d4",
+                       "review_baseline_revision":  "743c4c67331b10bf7b7d732f78dedc9c9e2215d4",
+                       "baseline_matches_head":  true
+                   },
+    "review":  {
+                   "name":  "Voxagine engine full static review",
+                   "reviewed_at":  "2026-08-09",
+                   "reviewer":  "Codex",
+                   "baseline_revision":  "743c4c67331b10bf7b7d732f78dedc9c9e2215d4",
+                   "baseline_commit_time":  "2026-08-08T23:44:00+02:00",
+                   "baseline_subject":  "Phase 4d: shrink the CPU voxel from 16 B to 4 B, owner beside it (#15)",
+                   "working_tree_note":  "The worktree remained active during the review. User/IDE-owned modifications observed outside the review artifacts include CMakeLists.txt, CMakePresets.json, README.md, Voxagine/Source/Core/Utils/DateTime.h, and Rider .idea run configurations. Untracked runtime settings files also appeared under Voxagine/Source. All were preserved and were not authored or reverted by this review; index hashes identify the exact final source snapshot while the Git review baseline remains revision 743c4c6."
+               },
+    "scope":  {
+                  "included":  [
+                                   "Voxagine/Source/Core",
+                                   "Voxagine/Source/Editor",
+                                   "Voxagine/Source/Bringup",
+                                   "Game/Source",
+                                   "UnitTesting/UnitTests/Source",
+                                   "cmake",
+                                   ".github/workflows",
+                                   "root CMake and repository documentation"
+                               ],
+                  "excluded":  [
+                                   "Voxagine/Source/External vendored implementation",
+                                   "binary assets and content",
+                                   "generated Build products",
+                                   "IDE metadata",
+                                   "compressed distributables"
+                               ],
+                  "methods":  [
+                                  "repository and build-graph inventory",
+                                  "application lifecycle and ownership tracing",
+                                  "ECS and world-state tracing",
+                                  "job/callback lifetime and concurrency review",
+                                  "serialization and asset-parser boundary review",
+                                  "rendering, voxel, physics, chunk, pathfinding, input, audio, editor, allocator, filesystem, and timing review",
+                                  "targeted dangerous-pattern searches",
+                                  "build and test topology review",
+                                  "Release compile verification"
+                              ]
+              },
+    "verification":  [
+                         {
+                             "name":  "game-release",
+                             "command":  "cmake --build Build/rider-2025-game-release --config Release --parallel 4",
+                             "status":  "passed",
+                             "notes":  "Verified revision 743c4c6; produced voxagine_vulkan.lib, voxagine.lib, rttr_core.dll, and BitBuster.exe."
+                         },
+                         {
+                             "name":  "editor-release",
+                             "command":  "cmake --build Build/review-editor-release --config Release --parallel 4",
+                             "status":  "passed-with-warnings",
+                             "notes":  "Fresh VOXAGINE_BUILD_EDITOR=ON configure compiled and linked the Vulkan library, full editor engine library, RTTR, shaders, and BitBuster.exe. First-party warnings are indexed as VX-BUILD-005; the missing VoxFrame return is VX-VOX-006."
+                         },
+                         {
+                             "name":  "automated-tests",
+                             "command":  null,
+                             "status":  "not-integrated",
+                             "notes":  "Legacy GoogleTest sources exist but root CMake does not enable or register them with CTest."
+                         },
+                         {
+                             "name":  "runtime-smoke",
+                             "command":  null,
+                             "status":  "not-run",
+                             "notes":  "No graphical/audio session was launched during this static review."
+                         },
+                         {
+                             "name":  "human-report-docx",
+                             "command":  "documents render_docx.py plus structural document audits",
+                             "status":  "structural-audit-passed-render-unavailable",
+                             "notes":  "The DOCX contains all 88 finding headings; accessibility, section, inline-image, placeholder, and exact table-geometry audits passed. LibreOffice and Microsoft Word were not installed, so page PNG rendering and visual page-by-page inspection could not be completed."
+                         }
+                     ],
+    "findings":  {
+                     "count":  88,
+                     "by_priority":  {
+                                         "P0":  20,
+                                         "P1":  51,
+                                         "P2":  16,
+                                         "P3":  1
+                                     },
+                     "by_severity":  {
+                                         "critical":  19,
+                                         "high":  50,
+                                         "info":  2,
+                                         "low":  1,
+                                         "medium":  16
+                                     },
+                     "by_status":  {
+                                       "concurrency-risk":  11,
+                                       "confirmed":  67,
+                                       "coverage-gap":  3,
+                                       "limitation":  5,
+                                       "needs-runtime-validation":  2
+                                   },
+                     "by_subsystem":  {
+                                          "audio":  5,
+                                          "build":  3,
+                                          "chunks":  5,
+                                          "configuration":  1,
+                                          "ecs":  3,
+                                          "editor":  6,
+                                          "events":  1,
+                                          "filesystem":  2,
+                                          "input":  6,
+                                          "job-system":  4,
+                                          "lifecycle":  2,
+                                          "logging":  1,
+                                          "memory":  5,
+                                          "pathfinding":  6,
+                                          "physics":  6,
+                                          "platform":  1,
+                                          "player-prefs":  2,
+                                          "rendering":  7,
+                                          "resources":  8,
+                                          "serialization":  6,
+                                          "tests":  2,
+                                          "time":  3,
+                                          "world":  3
+                                      },
+                     "sha256":  "d85a7b2c4d803fdaf7a8442bb2d69202f9de4166329b6610c37350f828563835",
+                     "canonical_path":  "Docs/AI_ENGINE_INDEX/findings.jsonl"
+                 },
+    "sources":  {
+                    "count":  597,
+                    "total_lines":  67105,
+                    "sha256":  "d817f0dadda922ebcee494f5eb3fb3466fe809bc9c70108536a29dc64c925a59",
+                    "canonical_path":  "Docs/AI_ENGINE_INDEX/source-manifest.jsonl",
+                    "summary_path":  "Docs/AI_ENGINE_INDEX/manifest-summary.json"
+                },
+    "human_report":  {
+                         "canonical_path":  "Docs/AI_ENGINE_INDEX/Voxagine_Engine_Review.docx",
+                         "exists":  true,
+                         "bytes":  150551,
+                         "sha256":  "7ef8e24d373018c5308b3ce87b796e9a5718cd87d450e598fd99e35e26123c7a"
+                     },
+    "routes":  {
+                   "human_entry":  "Docs/AI_ENGINE_INDEX/README.md",
+                   "architecture":  "Docs/AI_ENGINE_INDEX/ARCHITECTURE.md",
+                   "source_map":  "Docs/AI_ENGINE_INDEX/SOURCE_MAP.md",
+                   "findings_explained":  "Docs/AI_ENGINE_INDEX/FINDINGS.md",
+                   "findings_machine":  "Docs/AI_ENGINE_INDEX/findings.jsonl",
+                   "source_manifest":  "Docs/AI_ENGINE_INDEX/source-manifest.jsonl",
+                   "human_report_docx":  "Docs/AI_ENGINE_INDEX/Voxagine_Engine_Review.docx",
+                   "human_report_builder":  "Docs/AI_ENGINE_INDEX/build-human-report.py",
+                   "refresh_script":  "Docs/AI_ENGINE_INDEX/refresh-index.ps1"
+               },
+    "lookup_hints":  [
+                         "Filter findings.jsonl by stable id, subsystem, priority, severity, status, evidence path, or symbol.",
+                         "Filter source-manifest.jsonl by path, subsystem, kind, symbol, or include.",
+                         "Treat paths and symbols as durable evidence keys; reviewed line numbers can drift.",
+                         "Open current source before applying a fix because this review is revision-bound."
+                     ]
+}

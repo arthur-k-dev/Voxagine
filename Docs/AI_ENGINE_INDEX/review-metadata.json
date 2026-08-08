@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "review": {
+    "name": "Voxagine engine full static review",
+    "reviewed_at": "2026-08-09",
+    "reviewer": "Codex",
+    "baseline_revision": "743c4c67331b10bf7b7d732f78dedc9c9e2215d4",
+    "baseline_commit_time": "2026-08-08T23:44:00+02:00",
+    "baseline_subject": "Phase 4d: shrink the CPU voxel from 16 B to 4 B, owner beside it (#15)",
+    "working_tree_note": "The worktree remained active during the review. User/IDE-owned modifications observed outside the review artifacts include CMakeLists.txt, CMakePresets.json, README.md, Voxagine/Source/Core/Utils/DateTime.h, and Rider .idea run configurations. Untracked runtime settings files also appeared under Voxagine/Source. All were preserved and were not authored or reverted by this review; index hashes identify the exact final source snapshot while the Git review baseline remains revision 743c4c6."
+  },
+  "scope": {
+    "included": [
+      "Voxagine/Source/Core",
+      "Voxagine/Source/Editor",
+      "Voxagine/Source/Bringup",
+      "Game/Source",
+      "UnitTesting/UnitTests/Source",
+      "cmake",
+      ".github/workflows",
+      "root CMake and repository documentation"
+    ],
+    "excluded": [
+      "Voxagine/Source/External vendored implementation",
+      "binary assets and content",
+      "generated Build products",
+      "IDE metadata",
+      "compressed distributables"
+    ],
+    "methods": [
+      "repository and build-graph inventory",
+      "application lifecycle and ownership tracing",
+      "ECS and world-state tracing",
+      "job/callback lifetime and concurrency review",
+      "serialization and asset-parser boundary review",
+      "rendering, voxel, physics, chunk, pathfinding, input, audio, editor, allocator, filesystem, and timing review",
+      "targeted dangerous-pattern searches",
+      "build and test topology review",
+      "Release compile verification"
+    ]
+  },
+  "verification": [
+    {
+      "name": "game-release",
+      "command": "cmake --build Build/rider-2025-game-release --config Release --parallel 4",
+      "status": "passed",
+      "notes": "Verified revision 743c4c6; produced voxagine_vulkan.lib, voxagine.lib, rttr_core.dll, and BitBuster.exe."
+    },
+    {
+      "name": "editor-release",
+      "command": "cmake --build Build/review-editor-release --config Release --parallel 4",
+      "status": "passed-with-warnings",
+      "notes": "Fresh VOXAGINE_BUILD_EDITOR=ON configure compiled and linked the Vulkan library, full editor engine library, RTTR, shaders, and BitBuster.exe. First-party warnings are indexed as VX-BUILD-005; the missing VoxFrame return is VX-VOX-006."
+    },
+    {
+      "name": "automated-tests",
+      "command": null,
+      "status": "not-integrated",
+      "notes": "Legacy GoogleTest sources exist but root CMake does not enable or register them with CTest."
+    },
+    {
+      "name": "runtime-smoke",
+      "command": null,
+      "status": "not-run",
+      "notes": "No graphical/audio session was launched during this static review."
+    },
+    {
+      "name": "human-report-docx",
+      "command": "documents render_docx.py plus structural document audits",
+      "status": "structural-audit-passed-render-unavailable",
+      "notes": "The DOCX contains all 88 finding headings; accessibility, section, inline-image, placeholder, and exact table-geometry audits passed. LibreOffice and Microsoft Word were not installed, so page PNG rendering and visual page-by-page inspection could not be completed."
+    }
+  ]
+}

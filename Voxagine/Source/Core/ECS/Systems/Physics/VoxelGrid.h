@@ -175,6 +175,15 @@ public:
 	   65534 available are a cap, not a budget. */
 	uint16_t AcquireOwnerSlot(uint64_t uiEntityID);
 
+	/* The slot an entity already holds, without handing out a new one. For the
+	   readers - "is this voxel still mine?" - which have no business consuming
+	   a slot for an entity that has never stamped anything. */
+	uint16_t FindOwnerSlot(uint64_t uiEntityID) const
+	{
+		std::unordered_map<uint64_t, uint16_t>::const_iterator it = m_EntityToSlot.find(uiEntityID);
+		return it == m_EntityToSlot.end() ? VoxelOwnerVolume::k_uiNoOwnerSlot : it->second;
+	}
+
 	/* The entity id behind a slot, or 0 for "no owner" and for a particle
 	   claim - which is what FindEntity would have made of a particle pointer
 	   anyway. */

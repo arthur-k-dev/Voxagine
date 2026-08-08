@@ -125,6 +125,65 @@ inline bool ComputeVoxelStampTransform(
 	return true;
 }
 
+/* The grid-space box ForEachStampedVoxel below writes into, without walking a
+ * voxel to find it: the model's own extent, scaled the way the walk scales it,
+ * rotated by the same quantized rotation, placed at the same origin.
+ *
+ * This exists because the AABB proxy the voxel pass rasterizes has to *contain*
+ * the stamp. The proxy used to be derived from the transform matrix instead
+ * (VoxRenderer::GetBounds), which is a different quantity: it uses the true
+ * rotation where the stamp uses one rounded to a multiple of the renderer's
+ * limit, and it is centred on the transform where the stamp is placed by two
+ * floors. Where the two disagree the proxy is *short*, and a voxel outside every
+ * proxy is never rasterized - so it is missing from the image at the angles
+ * where no other model's proxy happens to cover it, and comes back at the
+ * angles where one does. See RenderSystem::PostTick.
+ *
+ * Bounds are inclusive of the last voxel's index; the caller adds the voxel's
+ * own extent if it needs the far face.
+ */
+inline bool ComputeStampedGridBounds(
+	VoxRenderer* pRenderer, const VoxelStampTransform& stamp,
+	Vector3& v3Min, Vector3& v3Max)
+{
+	const VoxFrame* pFrame = pRenderer->GetFrame();
+
+	if (!pFrame)
+		return false;
+
+	/* Exactly the range of `modelPosition` in the walk below: model coordinates
+	   run over [0, fittedSize - 1], multiplied by the scale - which may be
+	   negative, hence the min/max rather than an assumption about which end is
+	   which - and then offset by up to RoundedScale - 1 by the scale fill. */
+	const Vector3 v3Scaled = (pFrame->GetFittedSize() - Vector3(1.f)) * stamp.Scale;
+
+	const Vector3 v3ModelMin = glm::min(Vector3(0.f), v3Scaled);
+	const Vector3 v3ModelMax = glm::max(Vector3(0.f), v3Scaled) + glm::max(stamp.RoundedScale - Vector3(1.f), Vector3(0.f));
+
+	v3Min = Vector3(FLT_MAX);
+	v3Max = Vector3(-FLT_MAX);
+
+	for (uint32_t i = 0; i < 8; ++i)
+	{
+		const Vector3 corner(
+			(i & 1) ? v3ModelMax.x : v3ModelMin.x,
+			(i & 2) ? v3ModelMax.y : v3ModelMin.y,
+			(i & 4) ? v3ModelMax.z : v3ModelMin.z);
+
+		const Vector3 rotated = glm::rotate(stamp.Rotation, corner);
+
+		v3Min = glm::min(v3Min, rotated);
+		v3Max = glm::max(v3Max, rotated);
+	}
+
+	/* The walk rounds, and rounding is monotonic, so rounding the extremes of
+	   the box bounds the rounded voxel set. */
+	v3Min = glm::round(stamp.Origin + v3Min);
+	v3Max = glm::round(stamp.Origin + v3Max);
+
+	return true;
+}
+
 /* Calls fn(const Vector3& v3GridPosition, uint32_t uiColor) once per voxel the
  * model puts into the grid. Positions are grid-space and already rounded, but
  * are neither bounds checked nor checked for being finite - the caller knows

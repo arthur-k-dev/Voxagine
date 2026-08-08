@@ -89,6 +89,15 @@ public:
 		   BakeData that has never been through Occupy never matches. */
 		StampKey Stamp;
 
+		/* The grid-space box Occupy actually stamped into, in the grid the
+		   WorldOffset above names. Recorded because VoxelBaker's repair pass
+		   asks every renderer in the world "could this clear have erased any of
+		   yours?" every time one of them clears, and deriving a box from the
+		   transform matrix for that answer is eight matrix-vector products for
+		   something the bake already knew. Empty - Min > Max - until a bake. */
+		Vector3 StampMin = Vector3(1.f);
+		Vector3 StampMax = Vector3(0.f);
+
 		Vector3 LastLocation = Vector3(0.f, 0.f, 0.f);
 		Vector3 LastScale = Vector3(1.f, 1.f, 1.f);
 		Quaternion LastRotation;
@@ -96,6 +105,11 @@ public:
 		bool IsEnabled = true;
 		bool IsStatic = false;
 		bool Updated = false;
+
+		/* Set by VoxelBaker::NotifyClearedRegion: this bake exists only to put
+		   back voxels somebody else erased, so its own clear must not send a
+		   third renderer round the same loop. Cleared by the bake it triggers. */
+		bool RepairOnly = false;
 	};
 
 	Event<VoxRenderer*> FrameChanged;

@@ -1334,6 +1334,17 @@ void PhysicsSystem::SimulateParticles(float fDeltaTime)
 									aliveParticle->Live.VoxelColor.inst.Color
 								);
 
+								/* This voxel belongs to no renderer, so nothing
+								   would submit an AABB proxy covering it and the
+								   voxel pass - which rasterizes proxies and
+								   nothing else - would never start a ray at it.
+								   It would still appear whenever some other
+								   model's box happened to cover the pixel, which
+								   is why debris that has settled flickers as the
+								   camera moves rather than being plainly
+								   missing. See RenderSystem::AddLooseVoxel. */
+								m_pRenderSystem->AddLooseVoxel(bakeVoxelPos);
+
 								/* Live.UserPointer is never assigned anywhere, so
 								   this has always cleared the owner rather than
 								   set one. Kept as a clear. */

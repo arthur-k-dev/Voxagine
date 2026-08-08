@@ -61,6 +61,18 @@ public:
 	uint32_t GetVoxel(uint32_t uiVolumeId) const;
 	uint32_t GetVoxel(int32_t x, int32_t y, int32_t z) const;
 
+	/* Registers a voxel written into the world by something that is not a
+	   VoxRenderer, so that the voxel pass has a proxy to rasterize for it.
+	   Grid space, i.e. the same coordinates ModifyVoxel takes.
+
+	   Only a renderer submits an AABB proxy, and the voxel pass rasterizes
+	   nothing else, so a voxel from any other writer is drawn only when some
+	   unrelated model's box happens to cover the pixel - which is a flicker
+	   that comes and goes with the camera, not a steady absence. A particle
+	   baking itself into the world where it landed is the writer this exists
+	   for: PhysicsSystem, bake-on-impact. */
+	void AddLooseVoxel(const Vector3& v3GridPosition);
+
 	void Reveal() { m_bFaded = false; };
 	void Fade() { m_bFaded = true; };
 
@@ -91,6 +103,38 @@ protected:
 
 private:
 	void CheckRendererChange(VoxRenderer* pRenderer);
+
+	/* VOXAGINE_BOUNDS_AUDIT=1: reports how far the transform-derived AABB proxy
+	   falls short of the voxels VoxelBaker actually stamps. Off - and free but
+	   for one branch - unless the variable is set. See PostTick. */
+	void AuditProxyBounds(VoxRenderer* pRenderer,
+		const Vector3& v3ProxyMin, const Vector3& v3ProxyMax,
+		const Vector3& v3StampMin, const Vector3& v3StampMax);
+
+	/* VOXAGINE_COVERAGE_AUDIT=<seconds>: every that many seconds, counts the
+	   occupied bricks of the resident window that no AABB proxy contains. A
+	   voxel outside every proxy is never rasterized by the voxel pass, so it is
+	   drawn only when some unrelated model's box happens to cover the pixel -
+	   which is a flicker that comes and goes with the camera. Zero is the
+	   invariant; see the definition. */
+	void AuditProxyCoverage(float fDeltaTime);
+
+	/* Grid-space proxy boxes submitted this frame, gathered only while the
+	   coverage audit is on. */
+	std::vector<Box> m_AuditProxies;
+
+	/* One proxy per cell of loose voxels that overlaps the resident window. */
+	void SubmitLooseVoxelProxies(bool bAudit);
+
+	/* Loose voxels, bucketed into cells of this many voxels a side and stored
+	   as the tight box of what actually landed in each. Kept in *level* space,
+	   not window space, so the registry survives the window sliding and a chunk
+	   unloading and coming back - debris lives in the chunk's voxels and
+	   returns with it, and a window-space registry would have had to be shifted
+	   and would have lost anything that left and came back. */
+	static const uint32_t k_uiLooseCellShift = 5;
+
+	std::unordered_map<uint32_t, Box> m_LooseVoxelCells;
 
 	/* False until Start() has wiped and sized the voxel buffer. See
 	   OnComponentAdded. */

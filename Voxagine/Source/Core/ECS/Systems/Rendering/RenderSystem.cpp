@@ -22,6 +22,7 @@
 #include "Core/Application.h"
 
 #include "Core/ECS/Systems/Rendering/Buffers/RenderData.h"
+#include "Core/ECS/Systems/Rendering/VoxelStamp.h"
 
 #include "Core/Platform/Rendering/RenderContext.h"
 #include "Core/Platform/Rendering/FrameProfiler.h"
@@ -122,6 +123,11 @@ void RenderSystem::PostTick(float fDeltaTime)
 		RenderDataType::VOXEL
 	));
 
+	static const bool s_bCoverageAudit = std::getenv("VOXAGINE_COVERAGE_AUDIT") != nullptr;
+
+	if (s_bCoverageAudit)
+		m_AuditProxies.clear();
+
 	for (VoxRenderer* pRenderer : m_VoxRenderers) {
 		CheckRendererChange(pRenderer);
 
@@ -144,11 +150,54 @@ void RenderSystem::PostTick(float fDeltaTime)
 		}
 
 		StructuredVoxelBuffer buffer;
-		buffer.Position = m_pPhysicsSystem->m_VoxelGrid.WorldToGrid(pRenderer->GetTransform()->GetPosition()-offset, true);
-		buffer.Extents = bounds.GetSize() * 0.5f + Vector3(1.f);
+
+		/* The proxy has to contain what VoxelBaker stamps, so it is derived from
+		   the stamp rather than from the transform - see
+		   ComputeStampedGridBounds. The transform-derived box below it is what
+		   shipped, and it is short wherever the two quantizations disagree: the
+		   stamp rotates by a multiple of the renderer's angle limit and is
+		   placed by two floors, neither of which the matrix knows about. A voxel
+		   outside every proxy is simply not rasterized, which reads on screen as
+		   part of a model missing from some angles and present from others.
+
+		   Both are computed here and the proxy is their union: the stamp box is
+		   the geometry that exists, and keeping the old box in the union means
+		   no view that renders today can lose anything. */
+		const VoxelGrid& grid = m_pPhysicsSystem->m_VoxelGrid;
+
+		Vector3 v3ProxyMin = grid.WorldToGrid(pRenderer->GetTransform()->GetPosition() - offset, true) - (bounds.GetSize() * 0.5f + Vector3(1.f));
+		Vector3 v3ProxyMax = grid.WorldToGrid(pRenderer->GetTransform()->GetPosition() - offset, true) + (bounds.GetSize() * 0.5f + Vector3(1.f));
+
+		VoxelStampTransform stamp;
+		Vector3 v3StampMin(0.f);
+		Vector3 v3StampMax(0.f);
+
+		if (ComputeVoxelStampTransform(pRenderer, grid.GetWorldOffset(), 1.f / static_cast<float>(grid.GetVoxelSize()), stamp) &&
+			ComputeStampedGridBounds(pRenderer, stamp, v3StampMin, v3StampMax))
+		{
+			/* A voxel at index v occupies [v, v + 1), so the far face is one
+			   voxel past the last index, and a voxel of slack either side keeps
+			   the ray's entry point off the geometry itself. */
+			AuditProxyBounds(pRenderer, v3ProxyMin, v3ProxyMax, v3StampMin, v3StampMax);
+
+			v3ProxyMin = glm::min(v3ProxyMin, v3StampMin - Vector3(1.f));
+			v3ProxyMax = glm::max(v3ProxyMax, v3StampMax + Vector3(2.f));
+		}
+
+		buffer.Position = (v3ProxyMin + v3ProxyMax) * 0.5f;
+		buffer.Extents = (v3ProxyMax - v3ProxyMin) * 0.5f;
 		buffer.MapperID = pRenderer->GetFrame()->GetMapperID();
 
 		m_pRenderContext->Submit(buffer);
+
+		if (s_bCoverageAudit)
+		{
+			Box proxy;
+			proxy.Min = Vector3(buffer.Position) - Vector3(buffer.Extents);
+			proxy.Max = Vector3(buffer.Position) + Vector3(buffer.Extents);
+
+			m_AuditProxies.push_back(proxy);
+		}
 
 #if defined(EDITOR) || defined(_DEBUG)
 		if (!pRenderer->DrawBoundsEnabled())
@@ -164,6 +213,11 @@ void RenderSystem::PostTick(float fDeltaTime)
 		);
 #endif
 	}
+
+	SubmitLooseVoxelProxies(s_bCoverageAudit);
+
+	if (s_bCoverageAudit)
+		AuditProxyCoverage(fDeltaTime);
 
 #ifndef _ORBIS
 	/* Render text data */
@@ -766,6 +820,252 @@ void RenderSystem::EnableDebugLines(bool bEnabled)
 void RenderSystem::SetFadeTime(float fFadeTime)
 {
 	m_pRenderContext->m_fFadeTime = fFadeTime <= 0.0f ? 1.0f : fFadeTime;
+}
+
+void RenderSystem::AddLooseVoxel(const Vector3& v3GridPosition)
+{
+	/* Level space: grid space plus the window's own offset. */
+	const Vector3 v3Level = v3GridPosition + m_pPhysicsSystem->m_VoxelGrid.GetWorldOffset();
+
+	if (v3Level.x < 0.f || v3Level.y < 0.f || v3Level.z < 0.f)
+		return;
+
+	const UVector3 v3Cell(
+		static_cast<uint32_t>(v3Level.x) >> k_uiLooseCellShift,
+		static_cast<uint32_t>(v3Level.y) >> k_uiLooseCellShift,
+		static_cast<uint32_t>(v3Level.z) >> k_uiLooseCellShift);
+
+	/* Ten bits an axis is a level of 32768 voxels a side at this cell size,
+	   which is 21 times the largest one here. */
+	if (v3Cell.x > 1023 || v3Cell.y > 1023 || v3Cell.z > 1023)
+		return;
+
+	const uint32_t uiKey = v3Cell.x | (v3Cell.y << 10) | (v3Cell.z << 20);
+
+	std::unordered_map<uint32_t, Box>::iterator it = m_LooseVoxelCells.find(uiKey);
+
+	if (it == m_LooseVoxelCells.end())
+	{
+		Box box;
+		box.Min = v3Level;
+		box.Max = v3Level;
+
+		m_LooseVoxelCells.emplace(uiKey, box);
+
+		return;
+	}
+
+	it->second.Min = glm::min(it->second.Min, v3Level);
+	it->second.Max = glm::max(it->second.Max, v3Level);
+}
+
+/* A proxy for each cell of loose voxels the resident window can see.
+ *
+ * Boxed per cell rather than one box for all of them because debris ends up
+ * scattered across a level: a single box around all of it would enclose most of
+ * the window, and a proxy is not only what gets rasterized, it is where the
+ * ray starts - a box that big would hand every pixel it covers a march from its
+ * own front face. Cells keep each box near the voxels that need it.
+ */
+void RenderSystem::SubmitLooseVoxelProxies(bool bAudit)
+{
+	if (m_LooseVoxelCells.empty())
+		return;
+
+	const Vector3 v3Offset = m_pPhysicsSystem->m_VoxelGrid.GetWorldOffset();
+	const Vector3 v3WindowMax = Vector3(m_v3WorldSize) - Vector3(1.f);
+
+	for (const std::pair<const uint32_t, Box>& cell : m_LooseVoxelCells)
+	{
+		/* Level space back to the window's grid space. */
+		Vector3 v3Min = cell.second.Min - v3Offset;
+		Vector3 v3Max = cell.second.Max - v3Offset;
+
+		if (v3Max.x < 0.f || v3Max.y < 0.f || v3Max.z < 0.f ||
+			v3Min.x > v3WindowMax.x || v3Min.y > v3WindowMax.y || v3Min.z > v3WindowMax.z)
+			continue;
+
+		/* Same one-voxel slack the renderer proxies carry: a voxel at index v
+		   occupies [v, v + 1), and the ray wants to enter off the geometry. */
+		v3Min = glm::max(v3Min - Vector3(1.f), Vector3(0.f));
+		v3Max = glm::min(v3Max + Vector3(2.f), Vector3(m_v3WorldSize));
+
+		StructuredVoxelBuffer buffer;
+		buffer.Position = (v3Min + v3Max) * 0.5f;
+		buffer.Extents = (v3Max - v3Min) * 0.5f;
+		buffer.MapperID = 0;
+
+		m_pRenderContext->Submit(buffer);
+
+		if (bAudit)
+		{
+			Box proxy;
+			proxy.Min = v3Min;
+			proxy.Max = v3Max;
+
+			m_AuditProxies.push_back(proxy);
+		}
+	}
+}
+
+/* Occupied bricks of the resident window that no AABB proxy contains.
+ *
+ * The voxel pass rasterizes proxy cubes and nothing else, so a voxel outside
+ * every proxy is only ever drawn when some *other* model's box happens to cover
+ * the pixel and the ray from that box's face runs into it. Whether one does
+ * changes with the camera, which is what makes an uncovered voxel flicker
+ * rather than simply disappear.
+ *
+ * Every voxel a VoxRenderer stamps is covered by construction now (see
+ * PostTick). What is not is everything written into the window by something
+ * that is not a renderer, and the brick grid is the cheapest place to see it:
+ * it already knows which 8^3 blocks hold something, in ordinary cached memory.
+ *
+ * The y = 0 brick row is reported separately because the ground layer lives
+ * there and is deliberately uncovered - PostProcessing composites it
+ * analytically as an endless plane rather than marching it from a proxy.
+ */
+void RenderSystem::AuditProxyCoverage(float fDeltaTime)
+{
+	static const double s_fInterval =
+		std::getenv("VOXAGINE_COVERAGE_AUDIT") ? atof(std::getenv("VOXAGINE_COVERAGE_AUDIT")) : 0.0;
+
+	if (s_fInterval <= 0.0)
+		return;
+
+	static double s_fElapsed = 0.0;
+
+	s_fElapsed += fDeltaTime;
+
+	if (s_fElapsed < s_fInterval)
+		return;
+
+	s_fElapsed = 0.0;
+
+	VoxelBrickGrid& brickGrid = m_pRenderContext->GetBrickGrid();
+
+	const UVector3 v3Grid = brickGrid.GetGridSize();
+	const uint32_t uiBricks = brickGrid.GetBrickCount();
+
+	if (uiBricks == 0)
+		return;
+
+	std::vector<uint8_t> covered(uiBricks, 0);
+
+	const uint32_t uiShift = VoxelBrickGrid::k_uiBrickShift;
+
+	for (const Box& proxy : m_AuditProxies)
+	{
+		const IVector3 v3Min = glm::max(IVector3(glm::floor(proxy.Min)), IVector3(0));
+		const IVector3 v3Max = glm::min(IVector3(glm::floor(proxy.Max)),
+			IVector3(m_v3WorldSize) - IVector3(1));
+
+		if (v3Min.x > v3Max.x || v3Min.y > v3Max.y || v3Min.z > v3Max.z)
+			continue;
+
+		for (int32_t z = v3Min.z >> uiShift; z <= (v3Max.z >> uiShift); ++z)
+			for (int32_t y = v3Min.y >> uiShift; y <= (v3Max.y >> uiShift); ++y)
+				for (int32_t x = v3Min.x >> uiShift; x <= (v3Max.x >> uiShift); ++x)
+					covered[x + y * v3Grid.x + z * v3Grid.x * v3Grid.y] = 1;
+	}
+
+	uint32_t uiOccupied = 0;
+	uint32_t uiUncovered = 0;
+	uint32_t uiUncoveredAboveGround = 0;
+	uint64_t uiUncoveredVoxels = 0;
+	UVector3 v3Sample(0, 0, 0);
+
+	for (uint32_t z = 0; z < v3Grid.z; ++z)
+	{
+		for (uint32_t y = 0; y < v3Grid.y; ++y)
+		{
+			for (uint32_t x = 0; x < v3Grid.x; ++x)
+			{
+				const uint32_t uiBrick = x + y * v3Grid.x + z * v3Grid.x * v3Grid.y;
+				const uint32_t uiCount = brickGrid.GetCount(false, uiBrick);
+
+				if (uiCount == 0)
+					continue;
+
+				++uiOccupied;
+
+				if (covered[uiBrick])
+					continue;
+
+				++uiUncovered;
+				uiUncoveredVoxels += uiCount;
+
+				if (y > 0)
+				{
+					if (uiUncoveredAboveGround == 0)
+						v3Sample = UVector3(x << uiShift, y << uiShift, z << uiShift);
+
+					++uiUncoveredAboveGround;
+				}
+			}
+		}
+	}
+
+	fprintf(stderr, "[coverage] %u of %u occupied bricks outside every proxy (%u above the ground row, %llu voxels total), %zu proxies; first uncovered at (%u %u %u)\n",
+		uiUncovered, uiOccupied, uiUncoveredAboveGround,
+		static_cast<unsigned long long>(uiUncoveredVoxels),
+		m_AuditProxies.size(),
+		v3Sample.x, v3Sample.y, v3Sample.z);
+}
+
+/* How far the box that shipped falls short of the voxels that exist, measured
+ * rather than argued: the union in PostTick makes the shortfall invisible on
+ * screen, and this is what says whether it was there.
+ *
+ * Reports the running worst offender every 600 renderers that fail, plus a
+ * running rate, because the interesting cases are rotation- and
+ * scale-dependent and a single frame's worst is not representative.
+ */
+void RenderSystem::AuditProxyBounds(VoxRenderer* pRenderer,
+	const Vector3& v3ProxyMin, const Vector3& v3ProxyMax,
+	const Vector3& v3StampMin, const Vector3& v3StampMax)
+{
+	static const bool s_bEnabled = std::getenv("VOXAGINE_BOUNDS_AUDIT") != nullptr;
+
+	if (!s_bEnabled)
+		return;
+
+	static uint64_t s_uiChecked = 0;
+	static uint64_t s_uiShort = 0;
+	static float s_fWorst = 0.f;
+
+	++s_uiChecked;
+
+	if ((s_uiChecked % 200000) == 0)
+		fprintf(stderr, "[bounds] %llu of %llu proxy submissions short of the stamp (%.1f%%), worst %.1f voxels\n",
+			static_cast<unsigned long long>(s_uiShort),
+			static_cast<unsigned long long>(s_uiChecked),
+			100.0 * static_cast<double>(s_uiShort) / static_cast<double>(s_uiChecked),
+			s_fWorst);
+
+	const Vector3 v3Under = glm::max(v3ProxyMin - v3StampMin, v3StampMax + Vector3(1.f) - v3ProxyMax);
+	const float fWorst = glm::max(v3Under.x, glm::max(v3Under.y, v3Under.z));
+
+	if (fWorst <= 0.f)
+		return;
+
+	++s_uiShort;
+
+	if (fWorst <= s_fWorst)
+		return;
+
+	s_fWorst = fWorst;
+
+	fprintf(stderr, "[bounds] '%s' (%s): proxy short by %.1f voxels - proxy [%.0f %.0f %.0f]..[%.0f %.0f %.0f] stamp [%.0f %.0f %.0f]..[%.0f %.0f %.0f] (%llu of %llu submissions short)\n",
+		pRenderer->GetOwner()->GetName().c_str(),
+		pRenderer->GetModelFilePath().c_str(),
+		fWorst,
+		v3ProxyMin.x, v3ProxyMin.y, v3ProxyMin.z,
+		v3ProxyMax.x, v3ProxyMax.y, v3ProxyMax.z,
+		v3StampMin.x, v3StampMin.y, v3StampMin.z,
+		v3StampMax.x, v3StampMax.y, v3StampMax.z,
+		static_cast<unsigned long long>(s_uiShort),
+		static_cast<unsigned long long>(s_uiChecked));
 }
 
 void RenderSystem::CheckRendererChange(VoxRenderer* pRenderer)

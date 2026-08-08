@@ -208,7 +208,7 @@ namespace pathfinding
 
 			sperationVelocity /= (float)agentCount;
 			pathfinder.m_flockVelocityX.store(sperationVelocity.x + cohesionVelocity.x);
-			pathfinder.m_flockVelocityX.store(sperationVelocity.z + cohesionVelocity.z);
+			pathfinder.m_flockVelocityY.store(sperationVelocity.z + cohesionVelocity.z);
 		}
 	}
 

@@ -136,7 +136,7 @@ void ConsoleLog::OnRender(float fDeltaTime)
 		ImVec2 textSize = ImGui::CalcTextSize(fpsString.c_str());
 
 		ImGui::SameLine(m_uiWindowWidth - textSize.x - 7.0f);
-		ImGui::Text(fpsString.c_str());
+		ImGui::TextUnformatted(fpsString.c_str());
 
 		ImGui::PopStyleVar();
 	}

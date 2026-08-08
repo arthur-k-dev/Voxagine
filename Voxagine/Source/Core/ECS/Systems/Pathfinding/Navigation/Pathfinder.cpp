@@ -154,7 +154,8 @@ namespace pathfinding
 			// Clamp velocity
 			if (m_bClampVelocity && !m_applyVelocity)
 			{
-				physicsBody->SetVelocity(desiredVelocity);
+				if (physicsBody != nullptr)
+					physicsBody->SetVelocity(desiredVelocity);
 			}
 
 			// Set velocity
@@ -264,15 +265,11 @@ namespace pathfinding
 
 			// Get velocity
 			PhysicsBody* physicsBody = GetOwner()->GetComponentAll<PhysicsBody>();
-			if (physicsBody == nullptr)
-				m_velocity = Vector3(0.f);
-			m_velocity = physicsBody->GetVelocity();
+			m_velocity = (physicsBody != nullptr) ? physicsBody->GetVelocity() : Vector3(0.f);
 
 			// Get half box size
 			BoxCollider* collider = GetOwner()->GetComponentAll<BoxCollider>();
-			if (collider == nullptr)
-				m_halfBoxSize = Vector3(0.f);
-			m_halfBoxSize =  collider->GetHalfBoxSize();
+			m_halfBoxSize = (collider != nullptr) ? collider->GetHalfBoxSize() : Vector3(0.f);
 		}
 	}
 

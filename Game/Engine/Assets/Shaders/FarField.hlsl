@@ -34,6 +34,13 @@ struct FarFieldResult
 	float3 Normal;
 };
 
+/* The same per-pixel safety budget SDFMarcher.hlsl keeps, with its own counter
+   because the two marchers live in different passes and never share an
+   invocation. This one fires a single ray per pixel rather than two, but it
+   runs over the *whole* screen instead of only the pixels an AABB proxy covers,
+   so an unbounded worst case here costs as much as an unbounded one there. */
+static uint numFarFieldStepsTaken = 0;
+
 inline uint3 GetFarFieldBrickGridSize() {
 	return (farFieldSize.xyz + (BRICK_SIZE - 1)) >> BRICK_SHIFT;
 }
@@ -100,6 +107,11 @@ FarFieldResult MarchFarField(float3 v3Origin, float3 v3Direction, int iMaxBrickS
 		if (!IsFarFieldBrickInWorld(v3Brick))
 			break;
 
+		/* Out of budget - reported as a miss, the same as running out of brick
+		   steps, which hands the pixel to the ground plane or the sky. */
+		if (numFarFieldStepsTaken >= MARCH_STEP_BUDGET)
+			break;
+
 		if (IsFarFieldBrickOccupied(v3Brick)) {
 			int3 v3Position;
 			float3 v3Mask;
@@ -151,10 +163,17 @@ FarFieldResult MarchFarField(float3 v3Origin, float3 v3Direction, int iMaxBrickS
 				v3Distance += v3Mask * v3SignedRayDirection * v3InvDirection;
 				v3Position += int3(v3Mask * v3SignedRayDirection);
 
+				numFarFieldStepsTaken++;
+
 				if (any((v3Position >> BRICK_SHIFT) != v3Brick))
+					break;
+
+				if (numFarFieldStepsTaken >= MARCH_STEP_BUDGET)
 					break;
 			}
 		}
+
+		numFarFieldStepsTaken++;
 
 		v3BrickMask = step(v3BrickDistance.xyz, v3BrickDistance.yxy) * step(v3BrickDistance.xyz, v3BrickDistance.zzx);
 		fBrickEntry = min(v3BrickDistance.x, min(v3BrickDistance.y, v3BrickDistance.z)) * BRICK_SIZE_F;

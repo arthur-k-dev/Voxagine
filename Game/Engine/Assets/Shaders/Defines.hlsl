@@ -28,6 +28,37 @@
    leaves the brick, so this only bounds the pathological case. */
 #define BRICK_MAX_VOXEL_STEPS 24
 
+/* Safety ceiling on how much marching one pixel may do, counted in DDA
+   crossings - brick-level and voxel-level alike - and shared by every ray the
+   pixel fires (RENDERING_PLAN.md phase 6.0).
+
+   Without it the worst case is the product of the two loop bounds above and
+   the ray count: ~137 brick steps on a 768x128x768 window, 24 voxel steps in
+   every occupied brick entered, twice over for the shadow ray. About 6,600
+   voxel steps per pixel, at 2732x2048, with nothing capping the frame. That
+   has reached the driver as `NVRM: Xid 109 CTX SWITCH TIMEOUT` - a draw it
+   could not preempt - and the user as a window that stops updating.
+
+   Note this is a *safety* bound, not the quality bound phase 2 deleted. That
+   one was 700 voxel steps on the primary ray alone, and it cut every long
+   sightline. This is a budget an ordinary pixel never approaches. Swept
+   against the voxel pass's own GPU time at the phase 0 baseline vantage
+   (game-release, Valley_Path_To_Castle_Beat1, camera still):
+
+     budget    1e9    1024    512    256    192    128     64     32
+     voxel ms  2.50   2.58    2.58   2.58   2.58   2.50   2.10   1.61
+
+   The pass stops responding somewhere between 64 and 128, so by 128 there is
+   effectively no pixel left to clip, and 1024 is eight times that. What it
+   does bound is the ceiling: the marginal cost measured between 32 and 64 is
+   ~0.015 ms per step of the average, which puts a whole screen of pixels all
+   spending the full 1024 at roughly 16 ms of voxel pass - a bad frame, but
+   three orders of magnitude away from a frame the driver kills.
+
+   Running out of it ends the march exactly as running out of brick steps
+   already does - alpha 0, which the caller reads as a miss. */
+#define MARCH_STEP_BUDGET 1024
+
 /* Sky colour for rays that leave the world without hitting anything or the
    ground plane. Becomes fog input in RENDERING_PLAN.md phase 6.1. */
 #define SKY_COLOR float4(150.0 / 255.0, 230.0 / 255.0, 255.0 / 255.0, 1.0)

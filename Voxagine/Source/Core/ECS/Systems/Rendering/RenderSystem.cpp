@@ -228,7 +228,9 @@ void RenderSystem::PostTick(float fDeltaTime)
 		}
 		else
 		{
-			ImGui::Text(pTextRenderer->GetText().c_str());
+			/* Unformatted: the text is world data and a '%' in it would otherwise
+			   be read as a conversion against arguments that were never passed. */
+			ImGui::TextUnformatted(pTextRenderer->GetText().c_str());
 		}
 
 		ImGui::SetWindowPos(windowPosition);
@@ -568,7 +570,14 @@ void RenderSystem::OnComponentDestroyed(Component* pComponent)
 
 uint32_t RenderSystem::GetVoxel(int32_t x, int32_t y, int32_t z) const
 {
+	/* Per axis, not against the flat count: an x past the row width would
+	   otherwise fold into the next row and read a real but wrong voxel. */
 	if (x < 0 || y < 0 || z < 0)
+		return 0;
+
+	if (static_cast<uint32_t>(x) >= m_v3WorldSize.x ||
+		static_cast<uint32_t>(y) >= m_v3WorldSize.y ||
+		static_cast<uint32_t>(z) >= m_v3WorldSize.z)
 		return 0;
 
 	return m_pRenderContext->GetVoxel(static_cast<uint32_t>(x + y * m_v3WorldSize.x + z * m_v3WorldSize.x * m_v3WorldSize.y));

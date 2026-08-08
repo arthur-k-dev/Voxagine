@@ -55,7 +55,7 @@ set(VOXAGINE_ENGINE_SOURCES
     ${VOXAGINE_SOURCE_DIR}/Core/ECS/Systems/Pathfinding/Navigation/PathfinderGoal.cpp
     ${VOXAGINE_SOURCE_DIR}/Core/ECS/Systems/Pathfinding/Navigation/PathfinderGroup.cpp
     ${VOXAGINE_SOURCE_DIR}/Core/ECS/Systems/Physics/Box.cpp
-    ${VOXAGINE_SOURCE_DIR}/Core/ECS/Systems/Physics/IntegrityJob.cpp
+    ${VOXAGINE_SOURCE_DIR}/Core/ECS/Systems/Physics/IntegrityChecker.cpp
     ${VOXAGINE_SOURCE_DIR}/Core/ECS/Systems/Physics/ParticleLinkedList.cpp
     ${VOXAGINE_SOURCE_DIR}/Core/ECS/Systems/Physics/PhysicsSystem.cpp
     ${VOXAGINE_SOURCE_DIR}/Core/ECS/Systems/Physics/Sphere.cpp

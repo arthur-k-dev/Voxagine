@@ -16,7 +16,7 @@
 #include "Core/ECS/Systems/Rendering/RenderSystem.h"
 #include "Core/ECS/Entities/Camera.h"
 #include "Core/ECS/Components/VoxRenderer.h"
-#include "Core/ECS/Systems/Physics/IntegrityJob.h"
+#include "Core/ECS/Systems/Physics/IntegrityChecker.h"
 #include "Core/ECS/Components/Particles/ParticleSystem.h"
 #include "Core/ECS/Components/Particles/ParticlePool.h"
 #include <iostream>
@@ -39,7 +39,6 @@ PhysicsSystem::PhysicsSystem(World* pWorld, Vector3 gridSize, uint32_t voxelSize
 
 {
 	m_uiMaxParticleCount = uiMaxParticles;
-	m_pIntegrityJob = nullptr;
 	m_pStaticEntityBody = new Entity(m_pWorld);
 	m_pStaticBody = m_pStaticEntityBody->AddComponent<PhysicsBody>();
 	m_pStaticBody->SetInvMass(0);
@@ -60,20 +59,13 @@ PhysicsSystem::~PhysicsSystem()
 {
 	delete m_pStaticEntityBody;
 
-	if (m_pIntegrityJob)
-	{
-		m_pIntegrityJob->Stop();
-	}
+	/* Nothing to stop or join: the checker is a value member driven from this
+	   thread. The job this replaced was still reading m_VoxelGrid here. */
 }
 
 void PhysicsSystem::Start()
 {
-	m_pIntegrityJob = new IntegrityJob();
-	m_pIntegrityJob->SetVoxelGrid(&m_VoxelGrid);
-	m_pIntegrityJob->Stopped += Event<IntegrityJob*>::Subscriber(std::bind(&PhysicsSystem::OnIntegrityJobStopped, this, std::placeholders::_1), this);
-	JobQueue* pJobQueue = m_pWorld->GetJobQueue();
-	if (pJobQueue)
-		pJobQueue->EnqueueWithType(m_pIntegrityJob, JT_PHYSICS);
+	m_IntegrityChecker.SetVoxelGrid(&m_VoxelGrid);
 }
 
 bool PhysicsSystem::CanProcessComponent(Component* pComponent)
@@ -84,7 +76,7 @@ bool PhysicsSystem::CanProcessComponent(Component* pComponent)
 void PhysicsSystem::FixedTick(const GameTimer& fixedTimer)
 {
 	OPTICK_CATEGORY("Physics", Optick::Category::Physics);
-	SyncIntegrityJob();
+	ProcessIntegrityChecks();
 
 	/* Update particles */
 	m_uiActiveParticleCount = 0;
@@ -171,25 +163,13 @@ void PhysicsSystem::OnComponentDestroyed(Component* pComponent)
 
 void PhysicsSystem::OnWorldPaused(World* pWorld)
 {
-	if (m_pIntegrityJob)
-	{
-		m_pIntegrityJob->Stop();
-	}
+	/* Positions queued against the paused world are not worth resuming. */
+	m_IntegrityChecker.Reset();
 }
 
 void PhysicsSystem::OnWorldResumed(World* pWorld)
 {
-	m_pIntegrityJob = new IntegrityJob();
-	m_pIntegrityJob->SetVoxelGrid(&m_VoxelGrid);
-	m_pIntegrityJob->Stopped += Event<IntegrityJob*>::Subscriber(std::bind(&PhysicsSystem::OnIntegrityJobStopped, this, std::placeholders::_1), this);
-	JobQueue* pJobQueue = m_pWorld->GetJobQueue();
-	if (pJobQueue)
-		pJobQueue->EnqueueWithType(m_pIntegrityJob, JT_PHYSICS);
-}
-
-void PhysicsSystem::OnIntegrityJobStopped(IntegrityJob* pJob)
-{
-	m_pIntegrityJob = nullptr;
+	m_IntegrityChecker.SetVoxelGrid(&m_VoxelGrid);
 }
 
 void PhysicsSystem::TickBodies(const GameTimer& fixedTimer)
@@ -259,55 +239,53 @@ void PhysicsSystem::TickParticleSystems(const GameTimer& fixedTimer)
 	}
 }
 
-void PhysicsSystem::SyncIntegrityJob()
+void PhysicsSystem::ProcessIntegrityChecks()
 {
 	OPTICK_EVENT();
-	if (m_pIntegrityJob)
+
+	/* Runs the flood fill inline, for a bounded number of voxel visits, and
+	   consumes whatever islands completed in the same tick. */
+	std::vector<std::vector<uint64_t>> results;
+	m_IntegrityChecker.Process(IntegrityChecker::VISIT_BUDGET_PER_TICK, results);
+
+	for (std::vector<uint64_t>& checkedVoxels : results)
 	{
-		moodycamel::ReaderWriterQueue<std::vector<uint64_t>>& results = m_pIntegrityJob->GetResults();
-		std::vector<uint64_t> checkedVoxels;
-		while (results.try_dequeue(checkedVoxels))
+		for (uint64_t& vecHash : checkedVoxels)
 		{
-			for (uint64_t& vecHash : checkedVoxels) 
+			const Vector3 vec = IntegrityChecker::HashToPosition(vecHash);
+
+			const VoxelCell cell = m_VoxelGrid.GetCell(
+				static_cast<uint32_t>(vec.x),
+				static_cast<uint32_t>(vec.y),
+				static_cast<uint32_t>(vec.z));
+
+			//If the voxel is not active we don't make it into a particle
+			if (!cell.IsActive()) continue;
+
+			Particle* pParticle = m_ParticlePool.SpawnParticle();
+			if (pParticle)
 			{
-				Vector3 vec;
-				vec.x = ((uint16_t*)&vecHash)[2];
-				vec.y = ((uint16_t*)&vecHash)[1];
-				vec.z = ((uint16_t*)&vecHash)[0];
-
-				const VoxelCell cell = m_VoxelGrid.GetCell(
-					static_cast<uint32_t>(vec.x),
-					static_cast<uint32_t>(vec.y),
-					static_cast<uint32_t>(vec.z));
-
-				//If the voxel is not active we don't make it into a particle
-				if (!cell.IsActive()) continue;
-
-				Particle* pParticle = m_ParticlePool.SpawnParticle();
-				if (pParticle)
-				{
-					pParticle->Live.BakeOnImpact = true;
-					pParticle->Live.GridPosition = vec;
-					pParticle->Live.Position = m_VoxelGrid.GridToWorld(vec);;
-					pParticle->Live.VoxelColor = cell.GetColor();
-					cell.SetParticleOwner((uintptr_t)pParticle);
-				}
-
-				/* Clearing the colour is what makes the voxel inactive now -
-				   there is no separate flag to clear afterwards. */
-				m_VoxelGrid.ModifyVoxel(
-					static_cast<int>(vec.x),
-					static_cast<int>(vec.y),
-					static_cast<int>(vec.z),
-					0
-				);
-				m_pRenderSystem->ModifyVoxel(
-					static_cast<uint32_t>(vec.x),
-					static_cast<uint32_t>(vec.y),
-					static_cast<uint32_t>(vec.z),
-					0
-				);
+				pParticle->Live.BakeOnImpact = true;
+				pParticle->Live.GridPosition = vec;
+				pParticle->Live.Position = m_VoxelGrid.GridToWorld(vec);
+				pParticle->Live.VoxelColor = cell.GetColor();
+				cell.SetParticleOwner((uintptr_t)pParticle);
 			}
+
+			/* Clearing the colour is what makes the voxel inactive now -
+			   there is no separate flag to clear afterwards. */
+			m_VoxelGrid.ModifyVoxel(
+				static_cast<int>(vec.x),
+				static_cast<int>(vec.y),
+				static_cast<int>(vec.z),
+				0
+			);
+			m_pRenderSystem->ModifyVoxel(
+				static_cast<uint32_t>(vec.x),
+				static_cast<uint32_t>(vec.y),
+				static_cast<uint32_t>(vec.z),
+				0
+			);
 		}
 	}
 }
@@ -556,7 +534,7 @@ void PhysicsSystem::ApplySphericalDestruction(const Vector3& position, float fRa
 		}
 	}
 
-	m_pIntegrityJob->EnqueueBulk(integrityChecks);
+	m_IntegrityChecker.EnqueueBulk(integrityChecks);
 
 	delete[] voxels;
 	delete[] ownerSlots;

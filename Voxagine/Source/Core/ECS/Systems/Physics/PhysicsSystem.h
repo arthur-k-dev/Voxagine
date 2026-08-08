@@ -2,6 +2,7 @@
 #include <unordered_map>
 #include "Core/ECS/ComponentSystem.h"
 #include "Core/ECS/Systems/Physics/ParticleLinkedList.h"
+#include "Core/ECS/Systems/Physics/IntegrityChecker.h"
 #include "Core/ECS/Systems/Chunk/Chunk.h"
 
 #define PHYSICS_EPSILON 0.000797
@@ -14,7 +15,6 @@ struct HitResult;
 class Box;
 class RenderSystem;
 class ParticleSystem;
-class IntegrityJob;
 class Mapper;
 
 class PhysicsSystem : public ComponentSystem
@@ -72,11 +72,10 @@ protected:
 
 	void OnWorldPaused(World* pWorld);
 	void OnWorldResumed(World* pWorld);
-	void OnIntegrityJobStopped(IntegrityJob* pJob);
 
 	void TickBodies(const GameTimer& fixedTimer);
 	void TickParticleSystems(const GameTimer& fixedTimer);
-	void SyncIntegrityJob();
+	void ProcessIntegrityChecks();
 
 	void ResolveContinousCollision(const float deltaTime);
 	void AccumulateManifolds();
@@ -112,7 +111,11 @@ protected:
 private:
 	VoxelGrid m_VoxelGrid;
 	RenderSystem* m_pRenderSystem;
-	IntegrityJob* m_pIntegrityJob;
+
+	/* Owned by value and driven from FixedTick. It used to be a Job on a worker
+	   thread holding a raw pointer to m_VoxelGrid above, which nothing joined
+	   before this object was destroyed - see IntegrityChecker.h. */
+	IntegrityChecker m_IntegrityChecker;
 
 	Entity* m_pStaticEntityBody;
 	PhysicsBody* m_pStaticBody;

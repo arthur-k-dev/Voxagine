@@ -46,7 +46,7 @@ public:
 	/* Clear all exited collision and call appropriate event */
 	void CleanCollisions();
 
-	void OnVoxelCollision(Voxel** voxels, uint32_t uiSize, bool& isHandled);
+	void OnVoxelCollision(Voxel** voxels, const uint16_t* pOwnerSlots, uint32_t uiSize, bool& isHandled);
 
 	void SetTrigger(bool bTrigger) { m_bTrigger = bTrigger; }
 	void SetLayer(CollisionLayer layer) { m_Layer = layer; }

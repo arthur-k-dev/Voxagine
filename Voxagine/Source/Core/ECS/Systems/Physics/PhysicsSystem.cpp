@@ -275,13 +275,13 @@ void PhysicsSystem::SyncIntegrityJob()
 				vec.y = ((uint16_t*)&vecHash)[1];
 				vec.z = ((uint16_t*)&vecHash)[0];
 
-				Voxel* pVoxel = m_VoxelGrid.GetVoxel(
+				const VoxelCell cell = m_VoxelGrid.GetCell(
 					static_cast<uint32_t>(vec.x),
 					static_cast<uint32_t>(vec.y),
 					static_cast<uint32_t>(vec.z));
 
 				//If the voxel is not active we don't make it into a particle
-				if (!pVoxel->Active) continue;
+				if (!cell.IsActive()) continue;
 
 				Particle* pParticle = m_ParticlePool.SpawnParticle();
 				if (pParticle)
@@ -289,10 +289,12 @@ void PhysicsSystem::SyncIntegrityJob()
 					pParticle->Live.BakeOnImpact = true;
 					pParticle->Live.GridPosition = vec;
 					pParticle->Live.Position = m_VoxelGrid.GridToWorld(vec);;
-					pParticle->Live.VoxelColor = pVoxel->Color;
-					pVoxel->UserPointer = (uintptr_t)pParticle;
+					pParticle->Live.VoxelColor = cell.GetColor();
+					cell.SetParticleOwner((uintptr_t)pParticle);
 				}
 
+				/* Clearing the colour is what makes the voxel inactive now -
+				   there is no separate flag to clear afterwards. */
 				m_VoxelGrid.ModifyVoxel(
 					static_cast<int>(vec.x),
 					static_cast<int>(vec.y),
@@ -305,8 +307,6 @@ void PhysicsSystem::SyncIntegrityJob()
 					static_cast<uint32_t>(vec.z),
 					0
 				);
-
-				pVoxel->Active = false;
 			}
 		}
 	}
@@ -455,9 +455,10 @@ void PhysicsSystem::ApplySphericalDestruction(const Vector3& position, float fRa
 	std::vector<uint64_t> integrityChecks;
 	uint32_t numVoxels = diameter * diameter * diameter;
 	Voxel** voxels = new Voxel*[numVoxels];
+	uint16_t* ownerSlots = new uint16_t[numVoxels];
 
 	float fDiameter = static_cast<float>(diameter);
-	bool isValid = m_VoxelGrid.GetChunk(voxels, clampedGridPos - Vector3(fRadius), Vector3(fDiameter), true);
+	bool isValid = m_VoxelGrid.GetChunk(voxels, clampedGridPos - Vector3(fRadius), Vector3(fDiameter), true, ownerSlots);
 
 	if (!isValid) return;
 
@@ -483,14 +484,19 @@ void PhysicsSystem::ApplySphericalDestruction(const Vector3& position, float fRa
 			++volumePos.z;
 		}
 
-		if (!voxels[i] || !voxels[i]->Active || volumePos.y < 1) continue;
+		if (!voxels[i] || !voxels[i]->IsActive() || volumePos.y < 1) continue;
 
 		Vector3 diff = volumePos - clampedGridPos;
 		if (glm::length(diff) <= fRadius)
 		{
-			if (pCachedEntity == nullptr || voxels[i]->UserPointer != pCachedEntity->GetId())
+			/* A particle claim resolves to 0, so FindEntity gets nothing and
+			   the voxel counts as destructible - which is what it did when the
+			   field held a raw Particle* and FindEntity failed to match it. */
+			const uint64_t uiOwnerID = m_VoxelGrid.ResolveOwnerSlot(ownerSlots[i]);
+
+			if (pCachedEntity == nullptr || uiOwnerID != pCachedEntity->GetId())
 			{
-				pCachedEntity = m_pWorld->FindEntity(voxels[i]->UserPointer);
+				pCachedEntity = m_pWorld->FindEntity(uiOwnerID);
 			}
 
 			if (pCachedEntity == nullptr || pCachedEntity->IsDestructible())
@@ -514,12 +520,17 @@ void PhysicsSystem::ApplySphericalDestruction(const Vector3& position, float fRa
 						pParticle->Live.Velocity = diff * glm::linearRand(fForceMin, fForceMax);
 						pParticle->Live.VoxelColor = color;
 
-						voxels[i]->UserPointer = (uintptr_t)pParticle;
+						/* volumePos is pre-incremented at the top of the loop,
+						   so voxels[i] is the cell at volumePos.x - 1 - the
+						   same one ModifyVoxel clears below. */
+						m_VoxelGrid.SetParticleOwner(
+							static_cast<uint32_t>(volumePos.x - 1),
+							static_cast<uint32_t>(volumePos.y),
+							static_cast<uint32_t>(volumePos.z),
+							(uintptr_t)pParticle);
 					}
 				}
 				++particlesSpawned;
-
-				voxels[i]->Active = false;
 
 				int32_t volX, volY, volZ;
 				volX = static_cast<int32_t>(volumePos.x - 1);
@@ -548,6 +559,7 @@ void PhysicsSystem::ApplySphericalDestruction(const Vector3& position, float fRa
 	m_pIntegrityJob->EnqueueBulk(integrityChecks);
 
 	delete[] voxels;
+	delete[] ownerSlots;
 }
 
 bool PhysicsSystem::OverlapSphere(std::vector<BoxCollider*>& colliders, Vector3 center, float fRadius, uint32_t uiLayer /*= -1*/, bool queryTriggers /*= false*/) const
@@ -773,10 +785,16 @@ void PhysicsSystem::SolveVoxelPreciseCollision(Collider* pColliderA, const Colli
 	UVector3 chunkSize = static_cast<UVector3>(max - min);
 	uint32_t numVoxels = chunkSize.x * chunkSize.y * chunkSize.z;
 	Voxel** voxels = new Voxel*[numVoxels];
-	m_VoxelGrid.GetChunk(voxels, colliderGridPos, chunkSize, true);
-		
+
+	/* Owner slots come along because a callback receives no coordinates and so
+	   cannot look ownership up for itself - Bullet's combo streak asks "is this
+	   a different model than the last one I hit", and a slot is exactly that
+	   identity. See RENDERING_PLAN.md phase 4d. */
+	uint16_t* ownerSlots = new uint16_t[numVoxels];
+	m_VoxelGrid.GetChunk(voxels, colliderGridPos, chunkSize, true, ownerSlots);
+
 	bool isHandled = false;
-	pColliderA->OnVoxelCollision(voxels, numVoxels, isHandled);
+	pColliderA->OnVoxelCollision(voxels, ownerSlots, numVoxels, isHandled);
 
 	if (!isHandled)
 	{
@@ -789,7 +807,7 @@ void PhysicsSystem::SolveVoxelPreciseCollision(Collider* pColliderA, const Colli
 
 		for (uint32_t i = 0; i < numVoxels; ++i)
 		{
-			if (!voxels[i] || !voxels[i]->Active) continue;
+			if (!voxels[i] || !voxels[i]->IsActive()) continue;
 
 			Vector3 voxelPos(
 				i % chunkSize.x,
@@ -826,6 +844,7 @@ void PhysicsSystem::SolveVoxelPreciseCollision(Collider* pColliderA, const Colli
 	}
 
 	delete[] voxels;
+	delete[] ownerSlots;
 }
 
 void PhysicsSystem::HandleCallbacks()
@@ -871,7 +890,7 @@ void PhysicsSystem::StepCheck(PhysicsBody* pBody, const VoxFrame* pFrame /*= nul
 			uint32_t chunkId = static_cast<uint32_t>(x + boxSize.x * z);
 
 			/* Skip if the voxel is not active or invalid */
-			if (!voxels[chunkId] || !voxels[chunkId]->Active) continue;
+			if (!voxels[chunkId] || !voxels[chunkId]->IsActive()) continue;
 
 			/* Skip if a voxel above the maximum step height is active or invalid */
 			const Voxel* pVoxel = m_VoxelGrid.GetVoxel(
@@ -880,7 +899,7 @@ void PhysicsSystem::StepCheck(PhysicsBody* pBody, const VoxFrame* pFrame /*= nul
 				static_cast<int>(chunkStart.z + z)
 			);
 
-			if (!pVoxel || pVoxel->Active) break;
+			if (!pVoxel || pVoxel->IsActive()) break;
 
 			uint32_t yHeight = 0;
 			for (uint32_t i = 0; i <= pBody->GetStepHeight(); ++i)
@@ -891,7 +910,7 @@ void PhysicsSystem::StepCheck(PhysicsBody* pBody, const VoxFrame* pFrame /*= nul
 					static_cast<int>(chunkStart.z + z)
 				);
 
-				if (pStepVoxel && pStepVoxel->Active)
+				if (pStepVoxel && pStepVoxel->IsActive())
 					yHeight = i + 1;
 				else break;
 			}
@@ -924,7 +943,7 @@ void PhysicsSystem::StepCheck(PhysicsBody* pBody, const VoxFrame* pFrame /*= nul
 		{
 			for (uint32_t i = 0; i < arrSize; ++i)
 			{
-				if (voxelBelow[i] && voxelBelow[i]->Active)
+				if (voxelBelow[i] && voxelBelow[i]->IsActive())
 				{
 					pBody->SetResting(true);
 					break;
@@ -1252,13 +1271,31 @@ void PhysicsSystem::SimulateParticles(float fDeltaTime)
 		// Update the particles position if its positions has changed
 		if (prevGridPos != newGridPos)
 		{
-			Voxel* pVoxel = m_VoxelGrid.GetVoxel(
+			const VoxelCell cell = m_VoxelGrid.GetCell(
 				static_cast<int>(newGridPos.x),
 				static_cast<int>(newGridPos.y),
 				static_cast<int>(newGridPos.z)
 			);
 
-			if (pVoxel && pVoxel->Active)
+			/* "The claim on my old voxel is mine, or there is none" - the same
+			   test the raw UserPointer comparison made, asked of the sparse
+			   particle map instead. Resolved where it is needed rather than up
+			   front, because the bounce path below never asks and the map
+			   lookup is the one part of this that is not a plain array index.
+			   See RENDERING_PLAN.md phase 4d. */
+			const VoxelCell oldCell = m_VoxelGrid.GetCell(
+				static_cast<int>(prevGridPos.x),
+				static_cast<int>(prevGridPos.y),
+				static_cast<int>(prevGridPos.z)
+			);
+
+			auto ownsOldCell = [&oldCell, aliveParticle]()
+			{
+				return oldCell &&
+					(oldCell.GetParticleOwner() == (uintptr_t)aliveParticle || !oldCell.HasOwner());
+			};
+
+			if (cell && cell.IsActive())
 			{
 				float speed = glm::length(aliveParticle->Live.Velocity);
 
@@ -1268,43 +1305,44 @@ void PhysicsSystem::SimulateParticles(float fDeltaTime)
 				// Bake particle and destroy if velocity is to low or the particle is going straight down
 				if (speed < PARTICLE_DESTROY_THRESHOLD || normal == Vector3(0, 1, 0) || prevGridPos.y < 0) //particleVelocity.y + 1.f <= 0.001f
 				{
-					Voxel* pOldVoxel = m_VoxelGrid.GetVoxel(
-						static_cast<int>(prevGridPos.x),
-						static_cast<int>(prevGridPos.y),
-						static_cast<int>(prevGridPos.z)
-					);
-
 					// Only handle particle if its old voxel is still valid
-					if (pOldVoxel && (pOldVoxel->UserPointer == (uintptr_t)aliveParticle || !pOldVoxel->UserPointer))
+					if (ownsOldCell())
 					{
 						/* Set previous voxel to default state if the particle shouldn't bake */
 						if (!aliveParticle->Live.BakeOnImpact)
 						{
-							pOldVoxel->UserPointer = 0;
+							oldCell.ClearOwner();
 						}
 						/* Bake the particle into the grid */
 						else if (aliveParticle->Live.BakeOnImpact)
 						{
-							pOldVoxel->UserPointer = 0;
+							oldCell.ClearOwner();
 
 							Vector3 bakeVoxelPos = newGridPos;
 							bakeVoxelPos.y += 1;
 
-							Voxel* pBakeVoxel = m_VoxelGrid.GetVoxel(
+							Vector3 bakeCellPos = bakeVoxelPos;
+							VoxelCell bakeCell = m_VoxelGrid.GetCell(
 								static_cast<int>(bakeVoxelPos.x),
 								static_cast<int>(bakeVoxelPos.y),
 								static_cast<int>(bakeVoxelPos.z)
 							);
 
-							if (pBakeVoxel && pBakeVoxel->Active)
+							if (bakeCell && bakeCell.IsActive())
 							{
 								if (bakeVoxelPos.y > 1) 
 									bakeVoxelPos.y -= 1;
-								pBakeVoxel = FindEmtpyNeighbor(bakeVoxelPos);
+								bakeCell = FindEmtpyNeighbor(bakeVoxelPos, bakeCellPos);
 							}
 
-							if (pBakeVoxel && !pBakeVoxel->Active)
+							if (bakeCell && !bakeCell.IsActive())
 							{
+								/* bakeCellPos is where bakeCell actually is, which
+								   is not bakeVoxelPos once FindEmtpyNeighbor has
+								   answered - a pre-existing mismatch, left alone
+								   here so this change stays about representation.
+								   The owner has to follow the cell, though, or it
+								   would clear a claim on an unrelated voxel. */
 								m_VoxelGrid.ModifyVoxel(
 									(int)bakeVoxelPos.x,
 									(int)bakeVoxelPos.y,
@@ -1318,8 +1356,10 @@ void PhysicsSystem::SimulateParticles(float fDeltaTime)
 									aliveParticle->Live.VoxelColor.inst.Color
 								);
 
-								pBakeVoxel->Active = true;
-								pBakeVoxel->UserPointer = (uintptr_t)aliveParticle->Live.UserPointer;
+								/* Live.UserPointer is never assigned anywhere, so
+								   this has always cleared the owner rather than
+								   set one. Kept as a clear. */
+								bakeCell.SetParticleOwner((uintptr_t)aliveParticle->Live.UserPointer);
 							}
 						}
 					}
@@ -1335,36 +1375,21 @@ void PhysicsSystem::SimulateParticles(float fDeltaTime)
 					}
 				}
 			}
-			else if (pVoxel && !pVoxel->Active)
+			else if (cell && !cell.IsActive())
 			{
-				Voxel* pOldVoxel = m_VoxelGrid.GetVoxel(
-					static_cast<int>(prevGridPos.x),
-					static_cast<int>(prevGridPos.y),
-					static_cast<int>(prevGridPos.z)
-				);
-
-				if (pOldVoxel && (pOldVoxel->UserPointer == (uintptr_t)aliveParticle || !pOldVoxel->UserPointer))
-				{
-					pOldVoxel->UserPointer = 0;
-				}
+				if (ownsOldCell())
+					oldCell.ClearOwner();
 
 				/* Fill and Clear voxels based on the new grid position */
 				aliveParticle->Live.GridPosition = newGridPos;
-				pVoxel->UserPointer = (uintptr_t)aliveParticle;
+				cell.SetParticleOwner((uintptr_t)aliveParticle);
 			}
 			else
 			{
 				/* Clear voxels that reach out of bounds */
-				Voxel* pOldVoxel = m_VoxelGrid.GetVoxel(
-					static_cast<int>(prevGridPos.x),
-					static_cast<int>(prevGridPos.y),
-					static_cast<int>(prevGridPos.z)
-				);
+				if (ownsOldCell())
+					oldCell.ClearOwner();
 
-				if (pOldVoxel && (pOldVoxel->UserPointer == (uintptr_t)aliveParticle || !pOldVoxel->UserPointer))
-				{
-					pOldVoxel->UserPointer = 0;
-				}
 				m_ParticlePool.DestroyParticle(aliveParticle);
 			}
 		}
@@ -1390,15 +1415,15 @@ bool PhysicsSystem::UpdateParticleTimer(Particle* pParticle, float fDeltaTime)
 	if (pParticle->Live.Timer <= 0.f)
 	{
 		Vector3 prevGridPos = pParticle->Live.GridPosition;
-		Voxel* pOldVoxel = m_VoxelGrid.GetVoxel(
+		const VoxelCell oldCell = m_VoxelGrid.GetCell(
 			static_cast<int>(prevGridPos.x),
 			static_cast<int>(prevGridPos.y),
 			static_cast<int>(prevGridPos.z)
 		);
 
-		if (pOldVoxel && (pOldVoxel->UserPointer == (uintptr_t)pParticle || !pOldVoxel->UserPointer))
+		if (oldCell && (oldCell.GetParticleOwner() == (uintptr_t)pParticle || !oldCell.HasOwner()))
 		{
-			pOldVoxel->UserPointer = 0;
+			oldCell.ClearOwner();
 		}
 
 		m_ParticlePool.DestroyParticle(pParticle);
@@ -1407,7 +1432,10 @@ bool PhysicsSystem::UpdateParticleTimer(Particle* pParticle, float fDeltaTime)
 	return false;
 }
 
-Voxel* PhysicsSystem::FindEmtpyNeighbor(Vector3 gridPos, uint32_t ySearchCount)
+/* Reports where it found the cell as well as the cell itself: ownership no
+   longer lives inside the voxel, so a caller that means to write an owner has
+   to know the coordinates rather than just hold a pointer. */
+VoxelCell PhysicsSystem::FindEmtpyNeighbor(Vector3 gridPos, Vector3& foundGridPos, uint32_t ySearchCount)
 {
 	for (int y = 0; y < static_cast<int>(ySearchCount); ++y)
 	{
@@ -1422,19 +1450,22 @@ Voxel* PhysicsSystem::FindEmtpyNeighbor(Vector3 gridPos, uint32_t ySearchCount)
 					static_cast<float>(y),
 					static_cast<float>(z));
 
-				Voxel* pBakeVoxel = m_VoxelGrid.GetVoxel(
+				const VoxelCell bakeCell = m_VoxelGrid.GetCell(
 					static_cast<int>(bakeVoxelPos.x),
 					static_cast<int>(bakeVoxelPos.y),
 					static_cast<int>(bakeVoxelPos.z)
 				);
 
-				if (pBakeVoxel && !pBakeVoxel->Active)
-					return pBakeVoxel;
+				if (bakeCell && !bakeCell.IsActive())
+				{
+					foundGridPos = bakeVoxelPos;
+					return bakeCell;
+				}
 			}
 		}
 	}
 
-	return nullptr;
+	return VoxelCell();
 }
 
 

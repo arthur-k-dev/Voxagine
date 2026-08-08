@@ -107,7 +107,7 @@ protected:
 
 	// Searched an active voxel in the voxel grid around the given gridpos
 	// ySearchCount = the maximum number of y positions it will search above gridpos
-	Voxel* FindEmtpyNeighbor(Vector3 gridPos, uint32_t ySearchCount = 2);
+	VoxelCell FindEmtpyNeighbor(Vector3 gridPos, Vector3& foundGridPos, uint32_t ySearchCount = 2);
 
 private:
 	VoxelGrid m_VoxelGrid;

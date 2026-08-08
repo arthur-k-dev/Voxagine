@@ -15,6 +15,7 @@
 #include "Core/ECS/Entities/Camera.h"
 
 #include "Core/ECS/Systems/Physics/PhysicsSystem.h"
+#include "Core/ECS/Systems/Chunk/ChunkSystem.h"
 #include "Core/Platform/Rendering/RenderAlignment.h"
 
 #include "Core/Platform/Platform.h"
@@ -632,90 +633,120 @@ void RenderSystem::SetGroundPlane(const std::string& texturePath, bool bForce)
 				color
 			);
 
-			Voxel* pVoxel = pVoxelGrid->GetVoxel(x, 0, z);
-			pVoxel->Active = true;
-			pVoxel->Color = color;
-			pVoxel->UserPointer = 0;
+			const VoxelCell cell = pVoxelGrid->GetCell(x, 0, z);
+			cell.SetColor(color);
+			cell.ClearOwner();
 		}
 	}
 
 	delete pTextureData;
 }
 
-/* Whether the CPU Voxel's two redundant-looking fields really are redundant,
- * which is what RENDERING_PLAN.md phase 4d proposes to act on.
+/* The acceptance test for RENDERING_PLAN.md phase 4d, kept now that the phase
+ * has landed because it is the only check on this representation that does not
+ * depend on the camera.
  *
- * Reports two things over the whole resident grid: where Voxel::Active
- * disagrees with the alpha of Voxel::Color (phase 4d replaces the first with
- * the second, so any disagreement is a voxel that would change state), and how
- * many owner ids name entities that no longer exist (phase 4d moves ownership
- * out of the voxel, and needs to know whether the restored ones still matter).
+ * Before the phase it asked whether Voxel::Active and Voxel::UserPointer could
+ * be dropped. Now that they are gone it reports what replaced them: how much of
+ * the resident grid is occupied, how many voxels carry a static owner slot and
+ * how many of those slots name an entity that no longer exists, and how many
+ * carry a transient particle claim - including the owner-set-but-inactive
+ * combination, which is debris in flight and is the state that blocks a static
+ * re-bake over that voxel.
  *
  * Reads 75 M voxels out of ordinary cached memory, so it costs a second or two
  * and freezes the frame - on demand only, like the brick and far-field
- * validators. Run it *during destruction* as well as at rest: the transient
- * owner-set-but-inactive state is the interesting one and a static scene does
- * not have it.
+ * validators. Run it *during destruction* as well as at rest: a static scene
+ * has no particle claims at all.
  */
 void RenderSystem::AuditVoxelRepresentation()
 {
 	VoxelGrid& grid = m_pPhysicsSystem->m_VoxelGrid;
 	const UVector3 dims = grid.GetDimensions();
 
-	uint64_t uiActiveNoAlpha = 0;
-	uint64_t uiAlphaNoActive = 0;
 	uint64_t uiActive = 0;
 	uint64_t uiOwners = 0;
 	uint64_t uiDeadOwners = 0;
 	uint64_t uiOwnerNotActive = 0;
+	uint64_t uiParticleClaims = 0;
 
-	std::unordered_map<uintptr_t, bool> aliveCache;
+	std::unordered_map<uint64_t, bool> aliveCache;
+	std::unordered_map<uint16_t, uint64_t> slotCounts;
 
 	for (uint32_t z = 0; z < dims.z; ++z)
 	for (uint32_t y = 0; y < dims.y; ++y)
 	for (uint32_t x = 0; x < dims.x; ++x)
 	{
-		const Voxel* pVoxel = grid.GetVoxel(x, y, z);
+		const VoxelCell cell = grid.GetCell(x, y, z);
 
-		if (!pVoxel)
+		if (!cell)
 			continue;
 
-		const bool bAlpha = (pVoxel->Color >> 24) != 0;
+		const bool bActive = cell.IsActive();
 
-		if (pVoxel->Active)
+		if (bActive)
 			++uiActive;
 
-		if (pVoxel->Active && !bAlpha)
-			++uiActiveNoAlpha;
+		const uint16_t uiSlot = cell.GetSlot();
 
-		if (!pVoxel->Active && bAlpha)
-			++uiAlphaNoActive;
+		if (uiSlot == VoxelOwnerVolume::k_uiNoOwnerSlot)
+			continue;
 
-		if (pVoxel->UserPointer)
+		++uiOwners;
+		++slotCounts[uiSlot];
+
+		if (!bActive)
+			++uiOwnerNotActive;
+
+		if (uiSlot == VoxelOwnerVolume::k_uiParticleSlot)
 		{
-			++uiOwners;
-
-			if (!pVoxel->Active)
-				++uiOwnerNotActive;
-
-			auto it = aliveCache.find(pVoxel->UserPointer);
-
-			if (it == aliveCache.end())
-				it = aliveCache.emplace(pVoxel->UserPointer,
-					m_pWorld->FindEntity(pVoxel->UserPointer) != nullptr).first;
-
-			if (!it->second)
-				++uiDeadOwners;
+			++uiParticleClaims;
+			continue;
 		}
+
+		const uint64_t uiEntityID = grid.ResolveOwnerSlot(uiSlot);
+
+		std::unordered_map<uint64_t, bool>::iterator it = aliveCache.find(uiEntityID);
+
+		if (it == aliveCache.end())
+			it = aliveCache.emplace(uiEntityID, m_pWorld->FindEntity(uiEntityID) != nullptr).first;
+
+		if (!it->second)
+			++uiDeadOwners;
 	}
 
-	fprintf(stderr, "[voxel-audit] %llu active of %u; divergence: %llu active-without-alpha, %llu alpha-without-active\n",
+	fprintf(stderr, "[voxel-audit] %llu active of %u (%zu B per CPU voxel + %zu B of owner slot)\n",
 	        (unsigned long long)uiActive, dims.x * dims.y * dims.z,
-	        (unsigned long long)uiActiveNoAlpha, (unsigned long long)uiAlphaNoActive);
+	        sizeof(Voxel), sizeof(uint16_t));
 
-	fprintf(stderr, "[voxel-audit] owners: %llu set, %llu naming a dead entity, %llu on an inactive voxel (%zu distinct ids)\n",
+	fprintf(stderr, "[voxel-audit] owners: %llu set, %llu naming a dead entity, %llu on an inactive voxel, %llu particle claims (%zu distinct slots of %zu allocated)\n",
 	        (unsigned long long)uiOwners, (unsigned long long)uiDeadOwners,
-	        (unsigned long long)uiOwnerNotActive, aliveCache.size());
+	        (unsigned long long)uiOwnerNotActive, (unsigned long long)uiParticleClaims,
+	        slotCounts.size(), grid.GetOwnerSlotCount());
+
+	/* The other half of the representation is the RLE the chunk system encodes
+	   into on unload, and reaching that for real means walking far enough for a
+	   chunk to leave the window. Round-tripping each resident chunk in place
+	   exercises the same codec here. */
+	ChunkSystem* pChunkSystem = m_pWorld->GetChunkSystem();
+
+	if (pChunkSystem)
+	{
+		uint64_t uiDiverged = 0;
+		uint32_t uiChunks = 0;
+
+		for (const std::pair<const uint32_t, Chunk*>& entry : pChunkSystem->GetChunks())
+		{
+			if (!entry.second || !entry.second->IsLoaded())
+				continue;
+
+			++uiChunks;
+			uiDiverged += entry.second->VerifyVoxelCodecRoundTrip();
+		}
+
+		fprintf(stderr, "[voxel-audit] codec round trip over %u loaded chunks: %llu diverging voxels\n",
+		        uiChunks, (unsigned long long)uiDiverged);
+	}
 }
 
 void RenderSystem::EnableDebugLines(bool bEnabled)

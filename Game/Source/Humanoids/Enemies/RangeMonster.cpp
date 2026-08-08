@@ -139,7 +139,7 @@ bool RangeMonster::calculateLineOfSight(IVector3 worldPos, IVector3 goalPos)
 	{
 		// Is air?
 		const Voxel* voxel = voxelGrid->GetVoxel(currentPos.x, currentPos.y, currentPos.z);
-		if (voxel != nullptr && voxel->Active)
+		if (voxel != nullptr && voxel->IsActive())
 			return false;
 
 		if (currentPos.x == goalPos.x) // Goal has been reached

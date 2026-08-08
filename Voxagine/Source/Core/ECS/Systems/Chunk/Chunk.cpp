@@ -49,6 +49,7 @@ void Chunk::Load(UVector2 gridTargetIndex)
 	if (m_bFirstLoad)
 	{
 		m_VoxelData.resize(m_ChunkSize.x * m_ChunkSize.y * m_ChunkSize.z);
+		m_OwnerVolume.Resize(m_VoxelData.size());
 		UpdateGroundPlane();
 	}
 
@@ -74,6 +75,7 @@ void Chunk::LoadAsync(ChunkUpdateGroup::Item* pItem, std::function<void(ChunkUpd
 			if (m_bFirstLoad)
 			{
 				m_VoxelData.resize(m_ChunkSize.x * m_ChunkSize.y * m_ChunkSize.z);
+				m_OwnerVolume.Resize(m_VoxelData.size());
 				UpdateGroundPlane();
 			}
 
@@ -154,33 +156,41 @@ void Chunk::EncodeVoxels()
 	//Reserve data vector to at least 10mb
 	m_pEncodedVoxelData.reserve(10000000);
 
-	uint32_t compressedVoxelSize = sizeof(bool) + sizeof(uint32_t) + sizeof(uintptr_t) + sizeof(char) + sizeof(uint8_t);
+	/* A run is a colour and an owner slot, seven bytes rather than the
+	   eighteen the old (bool, colour, uintptr_t, ';', count) record cost - and
+	   the runs are longer too, because the slot only changes at a model's
+	   boundary where the old raw pointer changed with every particle.
+
+	   Particle claims are deliberately *not* encoded. They name a Particle in
+	   a pool that will have recycled it long before this chunk comes back, so
+	   the old format was restoring dangling pointers; a chunk far enough away
+	   to unload has no debris worth preserving. */
+	const uint32_t compressedVoxelSize = sizeof(uint32_t) + sizeof(uint16_t) + sizeof(uint8_t);
 	uint8_t repeatCount = 0;
 	uint32_t byteOffset = 0;
 	for (int i = 0; i < m_VoxelData.size(); ++i)
 	{
 		repeatCount = 0;
-		Voxel& voxel = m_VoxelData[i];
-		while (i + 1 < m_VoxelData.size() && repeatCount < 255 && VoxelEqual(voxel, m_VoxelData[i + 1]))
+		const uint32_t uiColor = m_VoxelData[i].Color;
+		uint16_t uiSlot = m_OwnerVolume.GetSlot(i);
+
+		if (uiSlot == VoxelOwnerVolume::k_uiParticleSlot)
+			uiSlot = VoxelOwnerVolume::k_uiNoOwnerSlot;
+
+		while (i + 1 < m_VoxelData.size() && repeatCount < 255 &&
+			m_VoxelData[i + 1].Color == uiColor && SlotEqual(m_OwnerVolume.GetSlot(i + 1), uiSlot))
 		{
 			++repeatCount;
 			++i;
 		}
 
 		m_pEncodedVoxelData.insert(m_pEncodedVoxelData.begin() + byteOffset, compressedVoxelSize, 0);
-		
-		memcpy(&m_pEncodedVoxelData[byteOffset], &voxel.Active, sizeof(bool));
-		byteOffset += sizeof(bool);
 
-		memcpy(&m_pEncodedVoxelData[byteOffset], &voxel.Color, sizeof(uint32_t));
+		memcpy(&m_pEncodedVoxelData[byteOffset], &uiColor, sizeof(uint32_t));
 		byteOffset += sizeof(uint32_t);
 
-		memcpy(&m_pEncodedVoxelData[byteOffset], &voxel.UserPointer, sizeof(uintptr_t));
-		byteOffset += sizeof(uintptr_t);
-
-		const char divider = ';';
-		memcpy(&m_pEncodedVoxelData[byteOffset], &divider, sizeof(char));
-		byteOffset += sizeof(char);
+		memcpy(&m_pEncodedVoxelData[byteOffset], &uiSlot, sizeof(uint16_t));
+		byteOffset += sizeof(uint16_t);
 
 		memcpy(&m_pEncodedVoxelData[byteOffset], &repeatCount, sizeof(uint8_t));
 		byteOffset += sizeof(uint8_t);
@@ -189,6 +199,7 @@ void Chunk::EncodeVoxels()
 	m_pEncodedVoxelData.shrink_to_fit();
 	m_VoxelData.resize(0);
 	m_VoxelData.shrink_to_fit();
+	m_OwnerVolume.Release();
 
 	std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
 	auto execTime = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
@@ -200,31 +211,33 @@ void Chunk::DecodeVoxels()
 {
 	std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
 	m_VoxelData.resize(m_ChunkSize.x * m_ChunkSize.y * m_ChunkSize.z);
+	m_OwnerVolume.Resize(m_VoxelData.size());
 
 	uint32_t byteOffset = 0;
 	uint32_t voxelsWritten = 0;
 	while (byteOffset < m_pEncodedVoxelData.size())
 	{
-		bool active = m_pEncodedVoxelData[byteOffset];
-		byteOffset += sizeof(bool);
-
 		uint32_t color;
 		memcpy(&color, &m_pEncodedVoxelData[byteOffset], sizeof(uint32_t));
 		byteOffset += sizeof(uint32_t);
 
-		uintptr_t userptr;
-		memcpy(&userptr, &m_pEncodedVoxelData[byteOffset], sizeof(uintptr_t));
-		byteOffset += sizeof(uintptr_t) + sizeof(char);
+		uint16_t slot;
+		memcpy(&slot, &m_pEncodedVoxelData[byteOffset], sizeof(uint16_t));
+		byteOffset += sizeof(uint16_t);
 
 		uint8_t repeatCount = m_pEncodedVoxelData[byteOffset];
 		byteOffset += sizeof(uint8_t);
 
 		for (uint32_t i = 0; i < repeatCount + 1; ++i)
 		{
-			Voxel& voxel = m_VoxelData[voxelsWritten];
-			voxel.Active = active;
-			voxel.Color = color;
-			voxel.UserPointer = userptr;
+			m_VoxelData[voxelsWritten].Color = color;
+
+			/* Slots are never recycled, so one recorded at encode time still
+			   names the same entity now - which is what makes this safe to do
+			   from the decode job without touching the shared slot table. */
+			if (slot != VoxelOwnerVolume::k_uiNoOwnerSlot)
+				m_OwnerVolume.SetSlot(voxelsWritten, slot);
+
 			++voxelsWritten;
 		}
 	}
@@ -238,9 +251,55 @@ void Chunk::DecodeVoxels()
 	fprintf(stderr, "%s", message.c_str());
 }
 
-inline bool Chunk::VoxelEqual(Voxel& a, Voxel& b)
+uint64_t Chunk::VerifyVoxelCodecRoundTrip()
 {
-	return a.Active == b.Active && a.Color == b.Color && a.UserPointer == b.UserPointer;
+	if (m_VoxelData.empty())
+		return 0;
+
+	const size_t uiCount = m_VoxelData.size();
+
+	std::vector<uint32_t> colors(uiCount);
+	std::vector<uint16_t> slots(uiCount);
+
+	for (size_t i = 0; i < uiCount; ++i)
+	{
+		colors[i] = m_VoxelData[i].Color;
+
+		const uint16_t uiSlot = m_OwnerVolume.GetSlot(static_cast<uint32_t>(i));
+
+		/* A particle claim is deliberately dropped by the codec, so the
+		   expectation for one is "no owner" rather than "unchanged". */
+		slots[i] = uiSlot == VoxelOwnerVolume::k_uiParticleSlot
+			? VoxelOwnerVolume::k_uiNoOwnerSlot
+			: uiSlot;
+	}
+
+	EncodeVoxels();
+	DecodeVoxels();
+
+	uint64_t uiDiverged = 0;
+
+	if (m_VoxelData.size() != uiCount)
+		return uiCount;
+
+	for (size_t i = 0; i < uiCount; ++i)
+	{
+		if (m_VoxelData[i].Color != colors[i] ||
+			m_OwnerVolume.GetSlot(static_cast<uint32_t>(i)) != slots[i])
+			++uiDiverged;
+	}
+
+	return uiDiverged;
+}
+
+/* A particle claim encodes as no owner, so it has to compare as one too or a
+   run would break on debris that is about to be discarded anyway. */
+inline bool Chunk::SlotEqual(uint16_t uiSlot, uint16_t uiEncoded)
+{
+	if (uiSlot == VoxelOwnerVolume::k_uiParticleSlot)
+		uiSlot = VoxelOwnerVolume::k_uiNoOwnerSlot;
+
+	return uiSlot == uiEncoded;
 }
 
 void Chunk::UpdateRenderer(Entity* pEntity, bool bFirstLoad)
@@ -486,7 +545,9 @@ void Chunk::UpdateGroundPlane()
 				color = m_pTextureReadData->m_Data[id];
 			}
 
-			m_VoxelData[x + z * m_ChunkSize.y * m_ChunkSize.x].Active = true;
+			/* Occupancy comes from the colour's alpha now, and every ground
+			   texture is opaque - the 75.5 M-voxel audit found no voxel that
+			   was active without one. */
 			m_VoxelData[x + z * m_ChunkSize.y * m_ChunkSize.x].Color = color;
 		}
 	}

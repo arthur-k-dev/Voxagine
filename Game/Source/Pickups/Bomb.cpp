@@ -69,11 +69,11 @@ void Bomb::Tick(float fDeltaTime)
 }
 
 
-void Bomb::OnVoxelCollision(Voxel** voxels, uint32_t uiSize, bool& isHandled)
+void Bomb::OnVoxelCollision(Voxel** voxels, const uint16_t* pOwnerSlots, uint32_t uiSize, bool& isHandled)
 {
 	for (uint32_t i = 0; i < uiSize; ++i)
 	{
-		if (voxels[i] && voxels[i]->Active)
+		if (voxels[i] && voxels[i]->IsActive())
 		{
 			GetWorld()->ApplySphericalDestruction(GetTransform()->GetPosition(), m_fBombRadius, m_fBombForce, m_fBombForce, true);
 			Destroy();

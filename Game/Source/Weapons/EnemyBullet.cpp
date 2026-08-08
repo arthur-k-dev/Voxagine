@@ -94,11 +94,11 @@ void EnemyBullet::OnCollisionEnter(Collider* pCollider, const Manifold& manifold
 	}
 }
 
-void EnemyBullet::OnVoxelCollision(Voxel** voxels, uint32_t uiSize, bool& isHandled)
+void EnemyBullet::OnVoxelCollision(Voxel** voxels, const uint16_t* pOwnerSlots, uint32_t uiSize, bool& isHandled)
 {
 	for (uint32_t i = 0; i < uiSize; ++i)
 	{
-		if (voxels[i] && voxels[i]->Active)
+		if (voxels[i] && voxels[i]->IsActive())
 		{
 			GetWorld()->ApplySphericalDestruction(GetTransform()->GetPosition(), m_fBulletExplosionRange, 50, 50, true);
 			Destroy();

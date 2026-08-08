@@ -70,12 +70,12 @@ void Collider::CleanCollisions()
 		
 }
 
-void Collider::OnVoxelCollision(Voxel** voxels, uint32_t uiSize, bool& isHandled)
+void Collider::OnVoxelCollision(Voxel** voxels, const uint16_t* pOwnerSlots, uint32_t uiSize, bool& isHandled)
 {
 	VoxelCollision(voxels, uiSize, isHandled);
 	bool oldIsHandled = isHandled;
 
-	GetOwner()->OnVoxelCollision(voxels, uiSize, isHandled);
+	GetOwner()->OnVoxelCollision(voxels, pOwnerSlots, uiSize, isHandled);
 	if (oldIsHandled)
 		isHandled = oldIsHandled;
 }

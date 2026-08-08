@@ -12,7 +12,7 @@ public:
 
 	void Start() override;
 	void OnCollisionEnter(Collider* pCollider, const Manifold&) override;
-	void OnVoxelCollision(Voxel**, uint32_t, bool&) override {}
+	void OnVoxelCollision(Voxel**, const uint16_t*, uint32_t, bool&) override {}
 
 	RTTR_ENABLE(Bullet)
 	RTTR_REGISTRATION_FRIEND

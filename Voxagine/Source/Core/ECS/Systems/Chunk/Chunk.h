@@ -38,6 +38,7 @@ public:
 
 	UVector2 GetChunkIndex() { return m_ChunkIndex; }
 	std::vector<Voxel>& GetVoxelData() { return m_VoxelData; }
+	VoxelOwnerVolume& GetOwnerVolume() { return m_OwnerVolume; }
 	UVector3 GetChunkSize() const { return m_ChunkSize; }
 	const std::vector<Value>& GetRootEntities() { return m_RootEntities; }
 
@@ -48,6 +49,13 @@ public:
 	void LoadEntities();
 	void UpdateEntities();
 
+	/* Encodes and decodes this chunk's voxels in place and reports how many
+	   came back different - the acceptance test for the RLE format change in
+	   RENDERING_PLAN.md phase 4d, which is otherwise only reachable by walking
+	   far enough for a chunk to unload and come back. Returns the number of
+	   diverging voxels, so zero is a pass. */
+	uint64_t VerifyVoxelCodecRoundTrip();
+
 private:
 	// Compress voxel chunk data with RLE encoding
 	void EncodeVoxels();
@@ -55,7 +63,7 @@ private:
 	// Decompress data with RLE decoding
 	void DecodeVoxels();
 
-	inline bool VoxelEqual(Voxel& a, Voxel& b);
+	static inline bool SlotEqual(uint16_t uiSlot, uint16_t uiEncoded);
 
 	void UpdateRenderer(Entity* pEntity, bool bFirstLoad);
 	
@@ -70,6 +78,11 @@ private:
 	std::vector<Value> m_RootEntities;
 	std::vector<unsigned char> m_pEncodedVoxelData;
 	std::vector<Voxel> m_VoxelData;
+
+	/* Sized and freed in lockstep with m_VoxelData - see RENDERING_PLAN.md
+	   phase 4d. Two bytes a voxel beside the colour's four, where the two used
+	   to be eight bytes and a bool inside it. */
+	VoxelOwnerVolume m_OwnerVolume;
 
 	bool m_bIsLoaded = false;
 	bool m_bIsLoading = false;

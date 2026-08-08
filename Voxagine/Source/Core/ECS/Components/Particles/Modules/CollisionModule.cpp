@@ -31,7 +31,7 @@ void CollisionModule::Tick(float fDeltaTime, ParticlePool& particleData)
 			);
 
 			Vector3 relPos = prevGridPos - newGridPos;
-			if (pVoxel && pVoxel->Active)
+			if (pVoxel && pVoxel->IsActive())
 			{
 				Vector3 normal;
 				if (newGridPos.y <= 0.f)

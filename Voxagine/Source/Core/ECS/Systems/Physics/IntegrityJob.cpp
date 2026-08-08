@@ -68,7 +68,7 @@ void IntegrityJob::IntegrityCheck(const Vector3& gridPos)
 		if (iter != checkedVoxels.end())
 			continue;
 
-		bool isVoxelActive = (pVoxel && pVoxel->Active);
+		bool isVoxelActive = (pVoxel && pVoxel->IsActive());
 		if (pos.y - 1 == 0 && isVoxelActive)
 			return;
 

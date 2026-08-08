@@ -397,21 +397,27 @@ void Bullet::OnCollisionEnter(Collider* pCollider, const Manifold& manifold)
 	}*/
 }
 
-void Bullet::OnVoxelCollision(Voxel** voxels, uint32_t uiSize, bool& isHandled)
+void Bullet::OnVoxelCollision(Voxel** voxels, const uint16_t* pOwnerSlots, uint32_t uiSize, bool& isHandled)
 {
 	if (m_bShouldDestroy)
 		return;
 
 	for (uint32_t i = 0; i < uiSize; ++i)
 	{
-		if (voxels[i] && voxels[i]->Active)
+		if (voxels[i] && voxels[i]->IsActive())
 		{
-			if (voxels[i]->UserPointer!=currentModelID)
+			/* The streak only needs "a different model than the last one",
+			   and a voxel's owner slot is exactly that identity - slots are
+			   handed out per entity and never recycled. It used to be the raw
+			   owner id; see RENDERING_PLAN.md phase 4d. */
+			const uint16_t uiModelID = pOwnerSlots ? pOwnerSlots[i] : 0;
+
+			if (uiModelID != currentModelID)
 			{
 				m_pGameManager->AddComboStreak(m_pGameManager->environmentComboBonus);
 				m_pGameManager->AddToOnComboOnCatch(m_pGameManager->environmentComboBonus);
 			}
-			currentModelID = voxels[i]->UserPointer;
+			currentModelID = uiModelID;
 			GetWorld()->ApplySphericalDestruction(GetTransform()->GetPosition(), m_fBulletExplosionRange, m_pGameManager->voxelExplosionRangeMin, m_pGameManager->voxelExplosionRangeMax, true);
 			if (m_fCurrentSpeed > m_fMinimalBulletSpeed)
 				ApplyCameraShake();

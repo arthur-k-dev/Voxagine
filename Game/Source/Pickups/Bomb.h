@@ -9,7 +9,7 @@ public:
 
 	void Start() override;
 	void Tick(float fDeltaTime) override;
-	void OnVoxelCollision(Voxel** voxels, uint32_t uiSize, bool& isHandled) override;
+	void OnVoxelCollision(Voxel** voxels, const uint16_t* pOwnerSlots, uint32_t uiSize, bool& isHandled) override;
 
 	void SetOwner(Entity* pOwner) { m_pOwner = pOwner; }
 

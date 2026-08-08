@@ -31,7 +31,10 @@ public:
 	virtual void OnCollisionEnter(Collider*, const Manifold&) {};
 	virtual void OnCollisionStay(Collider*, const Manifold&) {};
 	virtual void OnCollisionExit(Collider*, const Manifold&) {};
-	virtual void OnVoxelCollision(Voxel** voxels, uint32_t uiSize, bool& isHandled) {};
+	/* pOwnerSlots is parallel to voxels: the owner slot of each cell, or
+	   VoxelOwnerVolume::k_uiNoOwnerSlot. A callback gets no coordinates, so it
+	   cannot resolve ownership itself - see RENDERING_PLAN.md phase 4d. */
+	virtual void OnVoxelCollision(Voxel** voxels, const uint16_t* pOwnerSlots, uint32_t uiSize, bool& isHandled) {};
 
 	virtual void OnEnabled() {};
 	virtual void OnDisabled() {};

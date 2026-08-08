@@ -78,12 +78,12 @@ void ChunkSystem::Start()
 		case ChunkUpdateGroup::Item::Target::T_LOAD:
 		{
 			item.pChunk->Load(item.GridTargetIndex);
-			m_pVoxelGrid->SetChunkVolumeAt(item.GridTargetIndex, item.pChunk->GetVoxelData());
+			m_pVoxelGrid->SetChunkVolumeAt(item.GridTargetIndex, item.pChunk->GetVoxelData(), item.pChunk->GetOwnerVolume());
 			break;
 		}
 		case ChunkUpdateGroup::Item::Target::T_MOVE:
 		{
-			m_pVoxelGrid->SetChunkVolumeAt(item.GridTargetIndex, item.pChunk->GetVoxelData());
+			m_pVoxelGrid->SetChunkVolumeAt(item.GridTargetIndex, item.pChunk->GetVoxelData(), item.pChunk->GetOwnerVolume());
 			if (!item.pChunk->IsFirstLoad())
 			{
 				RenderChunk(item, m_pWorld->GetApplication()->GetPlatform().GetRenderContext()->GetVoxelData(), false);
@@ -358,7 +358,7 @@ void ChunkSystem::UpdateGroup(ChunkUpdateGroup& group)
 				for (ChunkUpdateGroup::Item& item : group.GetItems())
 				{
 					if (item.ItemTarget != ChunkUpdateGroup::Item::Target::T_ASYNC_UNLOAD)
-						m_pVoxelGrid->SetChunkVolumeAt(item.GridTargetIndex, item.pChunk->GetVoxelData());
+						m_pVoxelGrid->SetChunkVolumeAt(item.GridTargetIndex, item.pChunk->GetVoxelData(), item.pChunk->GetOwnerVolume());
 				}
 
 				if (bProfiling)

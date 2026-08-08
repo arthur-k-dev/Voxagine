@@ -275,7 +275,7 @@ namespace pathfinding
 					// Is the voxel air?
 					Vector3 voxelIdx = voxelGrid.WorldToGrid(voxelPos, true);
 					const Voxel* voxel = voxelGrid.GetVoxel(voxelIdx.x, voxelIdx.y, voxelIdx.z);
-					if (voxel == nullptr || voxel->Active == true)
+					if (voxel == nullptr || voxel->IsActive() == true)
 					{
 						o_voxelsToSkip = y + 1;
 						return false;

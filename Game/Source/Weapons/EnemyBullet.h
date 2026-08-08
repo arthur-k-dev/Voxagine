@@ -16,7 +16,7 @@ public:
 	void Start() override;
 	void FixedTick(const GameTimer& gameTimer) override;
 	void OnCollisionEnter(Collider* pCollider, const Manifold& manifold) override;
-	void OnVoxelCollision(Voxel** voxels, uint32_t uiSize, bool& isHandled) override;
+	void OnVoxelCollision(Voxel** voxels, const uint16_t* pOwnerSlots, uint32_t uiSize, bool& isHandled) override;
 
 	RTTR_ENABLE(Entity)
 	RTTR_REGISTRATION_FRIEND;

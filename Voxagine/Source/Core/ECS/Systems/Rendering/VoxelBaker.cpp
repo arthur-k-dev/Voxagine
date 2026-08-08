@@ -204,9 +204,12 @@ uint32_t* VoxelBaker::Occupy(VoxRenderer* pRenderer, VoxRenderer::BakeData* pBak
 	uint32_t* pBaked = new uint32_t[static_cast<size_t>(uiSolidVoxelCount * stamp.RoundedScale.x * stamp.RoundedScale.y * stamp.RoundedScale.z)];
 	uint32_t uiBakedID = 0;
 
-	Voxel* pVoxel = nullptr;
-
 	uint64_t uiEntityID = pRenderer->GetOwner()->GetId();
+
+	/* Resolved once rather than per voxel: the arbitration below only has to
+	   know whether an existing owner is *this* renderer, and a slot compares
+	   as well as an id does. See RENDERING_PLAN.md phase 4d. */
+	const uint16_t uiOwnerSlot = bIsStatic ? grid.AcquireOwnerSlot(uiEntityID) : VoxelOwnerVolume::k_uiNoOwnerSlot;
 
 	ForEachStampedVoxel(pRenderer, stamp, [&](const Vector3& worldPosition, uint32_t uiColor)
 	{
@@ -251,24 +254,32 @@ uint32_t* VoxelBaker::Occupy(VoxRenderer* pRenderer, VoxRenderer::BakeData* pBak
 		// Bake as static
 		if (bIsStatic)
 		{
-			// Get grid voxel
-			pVoxel = grid.GetVoxel(
+			// Get grid voxel and the ownership beside it
+			const VoxelCell cell = grid.GetCell(
 				static_cast<uint32_t>(worldPosition.x),
 				static_cast<uint32_t>(worldPosition.y),
 				static_cast<uint32_t>(worldPosition.z)
 			);
 
 			// Check for out-of-bounds
-			if (!pVoxel) return;
+			if (!cell) return;
 
-			bForceVoxel = bIsStatic && ((!pVoxel->UserPointer && !pVoxel->Active) || pVoxel->UserPointer == uiEntityID);
+			/* Was "(!owner && !active) || owner == me". The slot says which of
+			   the two branches applies without resolving anything: zero is
+			   unowned, and any other value only matters if it is mine. A
+			   particle claim (k_uiParticleSlot) can never equal a renderer's
+			   slot, so it blocks the stamp exactly as its pointer used to. */
+			const uint16_t uiExisting = cell.GetSlot();
+
+			bForceVoxel = uiExisting == VoxelOwnerVolume::k_uiNoOwnerSlot
+				? !cell.IsActive()
+				: uiExisting == uiOwnerSlot;
 
 			//TODO: check for layer
 			if (bForceVoxel)
 			{
-				pVoxel->Active = true;
-				pVoxel->Color = uiColor;
-				pVoxel->UserPointer = uiEntityID;
+				cell.SetColor(uiColor);
+				cell.SetSlot(uiOwnerSlot);
 
 				m_pRenderSystem->m_pRenderContext->ModifyVoxelFast(uiWorldID, uiColor);
 			}
@@ -399,11 +410,10 @@ void VoxelBaker::Clear(VoxRenderer* pRenderer, VoxRenderer::BakeData* pBakeData)
 			if (bStatic)
 			{
 				voxelPos = grid.GetVoxelPosition(chunkOffsetPosition);
-				Voxel* pVoxel = grid.GetVoxel((int)voxelPos.x, (int)voxelPos.y, (int)voxelPos.z);
+				const VoxelCell cell = grid.GetCell((int)voxelPos.x, (int)voxelPos.y, (int)voxelPos.z);
 
-				pVoxel->Active = false;
-				pVoxel->UserPointer = 0;
-				pVoxel->Color = 0;
+				cell.SetColor(0);
+				cell.ClearOwner();
 
 				clearedMin = glm::min(clearedMin, voxelPos);
 				clearedMax = glm::max(clearedMax, voxelPos);
@@ -425,35 +435,40 @@ void VoxelBaker::Clear(VoxRenderer* pRenderer, VoxRenderer::BakeData* pBakeData)
 		UVector3 size = static_cast<UVector3>(bounds.GetSize());
 		uint32_t numVoxels = size.x * size.y * size.z;
 		Voxel** voxels = new Voxel*[numVoxels];
+		uint16_t* ownerSlots = new uint16_t[numVoxels];
 		UVector3 chunkStart = grid.WorldToGrid(pBakeData->LastLocation - static_cast<Vector3>(size) * 0.5f, true);
-		if (!grid.GetChunk(voxels, chunkStart, size, true))
+		if (!grid.GetChunk(voxels, chunkStart, size, true, ownerSlots))
 		{
 			delete[] voxels;
+			delete[] ownerSlots;
 			return;
 		}
 
 		bool bIsStatic = pRenderer->GetOwner()->IsStatic();
+		const uint16_t uiOwnerSlot = bIsStatic ? grid.AcquireOwnerSlot(pRenderer->GetOwner()->GetId()) : VoxelOwnerVolume::k_uiNoOwnerSlot;
+
 		for (uint32_t i = 0; i < numVoxels; ++i)
 		{
 			/* Skip if the voxel is invalid */
 			if (!voxels[i]) continue;
 
-			if (bIsStatic && voxels[i]->UserPointer == pRenderer->GetOwner()->GetId())
+			if (bIsStatic && uiOwnerSlot != VoxelOwnerVolume::k_uiNoOwnerSlot && ownerSlots[i] == uiOwnerSlot)
 			{
 				UVector3 chunkRelVec = VoxelGrid::IndexToVector(i, size);
 				uint32_t voxelPos = (chunkRelVec.x + chunkStart.x) + (chunkRelVec.y + chunkStart.y) * gridDims.x + (chunkRelVec.z + chunkStart.z) * gridDims.x * gridDims.y;
 
 				m_pRenderSystem->m_pRenderContext->ModifyVoxelFast(voxelPos, 0);
 
-				if (bIsStatic)
-				{
-					voxels[i]->Active = false;
-					voxels[i]->UserPointer = 0;
-					voxels[i]->Color = 0;
-				}
+				voxels[i]->Color = 0;
+				grid.SetOwnerSlot(
+					chunkRelVec.x + chunkStart.x,
+					chunkRelVec.y + chunkStart.y,
+					chunkRelVec.z + chunkStart.z,
+					VoxelOwnerVolume::k_uiNoOwnerSlot);
 			}
 		}
 
 		delete[] voxels;
+		delete[] ownerSlots;
 	}
 }

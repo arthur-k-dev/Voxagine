@@ -23,7 +23,7 @@ public:
 	void OnDrawGizmos(float fDeltaTime) override;
 
 	void OnCollisionEnter(Collider* pCollider, const Manifold& manifold) override;
-	void OnVoxelCollision(Voxel** voxels, uint32_t uiSize, bool& isHandled) override;
+	void OnVoxelCollision(Voxel** voxels, const uint16_t* pOwnerSlots, uint32_t uiSize, bool& isHandled) override;
 
 	void SetCurrentCaster(Player* pPlayer);
 	Player* GetCurrentCaster() const;
@@ -72,7 +72,9 @@ public:
 	void MarkAsDestroyed();
 
 	//This is the default model ID, which is compared when the bullet collides with a destructible model
-	uint64_t currentModelID = -1;
+	/* A voxel owner slot, not an entity id - see OnVoxelCollision. Starts at
+	   an unused value so the first hit always counts as a new model. */
+	uint16_t currentModelID = 0xFFFE;
 	bool bIsReturning = false;
 
 	float m_fCameraShake = 0.1f;

@@ -57,11 +57,16 @@ void VoxelGrid::Create(uint32_t uiDimX, uint32_t uiDimY, uint32_t uiDimZ)
 	m_uiNumChunkY = uiDimZ / m_chunkSize.z;
 
 	m_ChunkVolumes.resize(m_uiNumChunkX * m_uiNumChunkY);
+	m_ChunkOwners.assign(m_uiNumChunkX * m_uiNumChunkY, nullptr);
 }
 
 void VoxelGrid::Clear()
 {
 	m_ChunkVolumes.clear();
+	m_ChunkOwners.clear();
+
+	m_EntityToSlot.clear();
+	m_SlotToEntity.clear();
 
 	m_uiDimensionX = 0;
 	m_uiDimensionY = 0;
@@ -69,7 +74,47 @@ void VoxelGrid::Clear()
 	m_uiNumVoxels = 0;
 }
 
-bool VoxelGrid::GetChunk(Voxel** chunk, Vector3 chunkOrigin, Vector3 dimensions, bool bAllowOutBounds /*= false*/)
+uint16_t VoxelGrid::AcquireOwnerSlot(uint64_t uiEntityID)
+{
+	if (!uiEntityID)
+		return VoxelOwnerVolume::k_uiNoOwnerSlot;
+
+	if (m_SlotToEntity.empty())
+		m_SlotToEntity.push_back(0); /* slot 0 is "no owner" */
+
+	std::unordered_map<uint64_t, uint16_t>::const_iterator it = m_EntityToSlot.find(uiEntityID);
+
+	if (it != m_EntityToSlot.end())
+		return it->second;
+
+	/* k_uiParticleSlot is reserved, so the last usable slot is one below it.
+	   Exhausting this means 65533 distinct static owners in one world; the
+	   largest level here uses 117. Report it rather than wrap, and treat the
+	   overflow as unowned - which is what the field held before phase 4d gave
+	   it a slot at all. */
+	if (m_SlotToEntity.size() >= VoxelOwnerVolume::k_uiParticleSlot)
+	{
+		static bool s_bWarned = false;
+
+		if (!s_bWarned)
+		{
+			s_bWarned = true;
+			fprintf(stderr, "[voxel-grid] out of owner slots (%zu); further static renderers will bake as unowned\n",
+			        m_SlotToEntity.size());
+		}
+
+		return VoxelOwnerVolume::k_uiNoOwnerSlot;
+	}
+
+	const uint16_t uiSlot = static_cast<uint16_t>(m_SlotToEntity.size());
+
+	m_SlotToEntity.push_back(uiEntityID);
+	m_EntityToSlot.emplace(uiEntityID, uiSlot);
+
+	return uiSlot;
+}
+
+bool VoxelGrid::GetChunk(Voxel** chunk, Vector3 chunkOrigin, Vector3 dimensions, bool bAllowOutBounds /*= false*/, uint16_t* pOwnerSlots /*= nullptr*/)
 {
 	OPTICK_EVENT();
 	uint32_t dimX = static_cast<uint32_t>(dimensions.x);
@@ -83,6 +128,12 @@ bool VoxelGrid::GetChunk(Voxel** chunk, Vector3 chunkOrigin, Vector3 dimensions,
 	/* Set voxels to nullptr on default */
 	for (uint32_t i = 0; i < dimX * dimY * dimZ; ++i)
 		chunk[i] = nullptr;
+
+	if (pOwnerSlots)
+	{
+		for (uint32_t i = 0; i < dimX * dimY * dimZ; ++i)
+			pOwnerSlots[i] = VoxelOwnerVolume::k_uiNoOwnerSlot;
+	}
 
 	/* Return if some of the chunk is out of bounds */
 	if (!bAllowOutBounds && (originX + dimX > m_uiDimensionX ||
@@ -124,6 +175,9 @@ bool VoxelGrid::GetChunk(Voxel** chunk, Vector3 chunkOrigin, Vector3 dimensions,
 				Voxel* pVoxel = nullptr;
 				pVoxel = &m_ChunkVolumes[chunkArrPos]->at(chunkGridPos);
 
+				const VoxelOwnerVolume* pOwners = pOwnerSlots ? m_ChunkOwners[chunkArrPos] : nullptr;
+				uint32_t voxelIndex = chunkGridPos;
+
 				for (unsigned x = 0; x < dimX; ++x)
 				{
 					/* Continue until valid X is found */
@@ -133,7 +187,12 @@ bool VoxelGrid::GetChunk(Voxel** chunk, Vector3 chunkOrigin, Vector3 dimensions,
 					uint32_t chunkPos = x + y * dimX + dimX * dimY * z;
 
 					chunk[chunkPos] = pVoxel;
+
+					if (pOwners && voxelIndex < pOwners->Size())
+						pOwnerSlots[chunkPos] = pOwners->GetSlot(voxelIndex);
+
 					++pVoxel;
+					++voxelIndex;
 				}
 			}
 		}
@@ -175,6 +234,14 @@ bool VoxelGrid::GetChunk(Voxel** chunk, Vector3 chunkOrigin, Vector3 dimensions,
 					pVoxel = &m_ChunkVolumes[chunkArrPos]->at(chunkGridPos);
 
 					chunk[chunkPos] = pVoxel;
+
+					if (pOwnerSlots)
+					{
+						const VoxelOwnerVolume* pOwners = m_ChunkOwners[chunkArrPos];
+
+						if (pOwners && chunkGridPos < pOwners->Size())
+							pOwnerSlots[chunkPos] = pOwners->GetSlot(chunkGridPos);
+					}
 				}
 			}
 		}

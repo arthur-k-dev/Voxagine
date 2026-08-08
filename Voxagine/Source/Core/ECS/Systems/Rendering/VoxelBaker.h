@@ -27,19 +27,28 @@ public:
 	virtual void Bake();
 
 	virtual uint32_t* Occupy(VoxRenderer* pRenderer, VoxRenderer::BakeData* pBakeData = nullptr);
-	virtual void Clear(VoxRenderer* pRenderer, VoxRenderer::BakeData* pBakeData = nullptr);
+
+	/* bNotify false suppresses the repair pass below, and is how a repair is
+	   stopped from provoking another one - see NotifyClearedRegion. */
+	virtual void Clear(VoxRenderer* pRenderer, VoxRenderer::BakeData* pBakeData = nullptr, bool bNotify = true);
 
 	/* What Occupy would stamp, as a value: see VoxRenderer::BakeData::StampKey.
 	   O(1) - it computes the stamp transform and reads three fields, it does
 	   not walk the model. */
 	VoxRenderer::BakeData::StampKey ComputeStampKey(VoxRenderer* pRenderer);
 
-	/* Marks the dynamic renderers a static renderer's Clear may have erased, so
-	   they stamp themselves again. See the definition - the asymmetry between
-	   static and dynamic is the whole reason this is needed. */
+	/* Marks the dynamic renderers a Clear may have erased, so they stamp
+	   themselves again. See the definition - the asymmetry between static and
+	   dynamic is the whole reason this is needed. */
 	void NotifyClearedRegion(VoxRenderer* pCleared, const Vector3& v3GridMin, const Vector3& v3GridMax);
 
 protected:
+	/* Milliseconds this bake spent in NotifyClearedRegion, accumulated across
+	   every clear in the pass and reported once - the scan is per clear and
+	   per renderer, so a per-call average would say nothing about the frame.
+	   Only written while the profiler is on. */
+	double m_fRepairMilliseconds = 0.0;
+
 	RenderContext* m_pRenderContext = nullptr;
 	RenderSystem* m_pRenderSystem = nullptr;
 	PhysicsSystem* m_pPhysicsSystem = nullptr;

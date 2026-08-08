@@ -38,6 +38,7 @@ void VoxelBaker::Bake()
 
 	VoxelGrid& grid = m_pPhysicsSystem->m_VoxelGrid;
 
+	m_fRepairMilliseconds = 0.0;
 
 	for (VoxRenderer* pRenderer : m_pRenderSystem->m_VoxRenderers)
 	{
@@ -72,7 +73,16 @@ void VoxelBaker::Bake()
 		   fallback branch, which allocates and scans the renderer's whole
 		   bounding box out of the physics grid. The disabled path resets the
 		   same flags the enabled one does now, so it clears exactly once. */
-		if (!bForced && !pRenderer->UpdateRequested() && (!pRenderer->m_BakeData.Updated || bIsStaticChunkLoaded))
+		/* The swap that comes with a window slide rewrites the whole resident
+		   window from the chunks' own voxels, which never held a dynamic
+		   renderer's stamp - so one that has not moved is not "already correct
+		   in the buffer", it is missing from it. It has to be re-examined even
+		   though nothing about it changed. See Clear. */
+		const bool bSwapDropped =
+			pRenderer->m_BakeData.WorldOffset != grid.GetWorldOffset() &&
+			!pRenderer->GetOwner()->IsStatic();
+
+		if (!bForced && !bSwapDropped && !pRenderer->UpdateRequested() && (!pRenderer->m_BakeData.Updated || bIsStaticChunkLoaded))
 			continue;
 
 		/* Everything above says a re-bake was *asked for*. This asks whether it
@@ -100,8 +110,12 @@ void VoxelBaker::Bake()
 		}
 
 
-		/* Remove old voxels */
-		Clear(pRenderer);
+		/* Remove old voxels. A bake that is itself a repair does not start
+		   another one - see NotifyClearedRegion. */
+		const bool bRepairOnly = pRenderer->m_BakeData.RepairOnly;
+		pRenderer->m_BakeData.RepairOnly = false;
+
+		Clear(pRenderer, nullptr, !bRepairOnly);
 
 		if (!bEnabled)
 		{
@@ -138,6 +152,12 @@ void VoxelBaker::Bake()
 			std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
 
 		FrameProfiler::Get().Report("CPU VoxelBaker::Bake", fMilliseconds);
+
+		/* Reported beside it rather than inside it: the repair scan is the one
+		   part of the bake whose cost is a function of how many renderers exist
+		   rather than how many voxels moved, so it is the part that would grow
+		   quietly with the level. */
+		FrameProfiler::Get().Report("CPU VoxelBaker::Bake (repair scan)", m_fRepairMilliseconds);
 	}
 }
 
@@ -278,6 +298,27 @@ uint32_t* VoxelBaker::Occupy(VoxRenderer* pRenderer, VoxRenderer::BakeData* pBak
 			//TODO: check for layer
 			if (bForceVoxel)
 			{
+				/* VOXAGINE_BOUNDS_AUDIT=1 counts the moment the damage is set
+				   up: this cell has no owner, so nothing static put a colour
+				   there, yet the voxel buffer says something is drawn - which
+				   makes it a dynamic renderer's, about to be taken over and
+				   recorded on two Positions lists at once. The occupancy comes
+				   from the brick grid's CPU bitmap, so asking costs a cached
+				   read rather than a PCIe read of VRAM. */
+				static const bool s_bAudit = std::getenv("VOXAGINE_BOUNDS_AUDIT") != nullptr;
+
+				if (s_bAudit &&
+					uiExisting == VoxelOwnerVolume::k_uiNoOwnerSlot &&
+					m_pRenderSystem->m_pRenderContext->GetBrickGrid().IsOccupied(uiWorldID))
+				{
+					static uint64_t s_uiTaken = 0;
+
+					if (++s_uiTaken == 1 || (s_uiTaken % 1000) == 0)
+						fprintf(stderr, "[stamp] %llu voxels taken over from a dynamic renderer by static '%s'\n",
+							static_cast<unsigned long long>(s_uiTaken),
+							pRenderer->GetOwner()->GetName().c_str());
+				}
+
 				cell.SetColor(uiColor);
 				cell.SetSlot(uiOwnerSlot);
 
@@ -316,6 +357,13 @@ uint32_t* VoxelBaker::Occupy(VoxRenderer* pRenderer, VoxRenderer::BakeData* pBak
 	   ask whether re-running it would write anything different. */
 	FillStampKey(pRenderer, stamp, pBakeData->Stamp);
 
+	/* And the box it went into, for the repair pass - see BakeData::StampMin. */
+	if (!ComputeStampedGridBounds(pRenderer, stamp, pBakeData->StampMin, pBakeData->StampMax))
+	{
+		pBakeData->StampMin = Vector3(1.f);
+		pBakeData->StampMax = Vector3(0.f);
+	}
+
 	return pBaked;
 }
 
@@ -340,13 +388,32 @@ uint32_t* VoxelBaker::Occupy(VoxRenderer* pRenderer, VoxRenderer::BakeData* pBak
  * skipping a renderer whose stamp is unchanged but whose voxels are gone.
  *
  * Static renderers are deliberately not notified. They cannot be damaged this
- * way - the physics grid makes them visible to each other's bForceVoxel test -
- * and notifying them would let two overlapping renderers mark each other every
- * frame, forever.
+ * way - the physics grid makes them visible to each other's bForceVoxel test,
+ * and Clear now declines to erase a voxel another owner holds - and notifying
+ * them would let two overlapping renderers mark each other every frame,
+ * forever.
+ *
+ * A *dynamic* renderer's clear reaches here too, which the first version of
+ * this did not do. Two dynamic renderers are invisible to each other in exactly
+ * the same way: whichever stamps second is refused the overlapping voxels and
+ * never records them, so when the first walks away it erases voxels the second
+ * should be showing, and the second has no idea. That is the ping-pong the
+ * comment above warns about, so the repair itself does not notify: one round is
+ * all a repair needs, since it re-stamps everything it holds.
  */
 void VoxelBaker::NotifyClearedRegion(VoxRenderer* pCleared, const Vector3& v3GridMin, const Vector3& v3GridMax)
 {
+	const bool bProfiling = FrameProfiler::Get().IsEnabled();
+	const std::chrono::steady_clock::time_point start =
+		bProfiling ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
+
 	VoxelGrid& grid = m_pPhysicsSystem->m_VoxelGrid;
+
+	/* World space, so that a renderer baked before the window slid is compared
+	   against the same origin this clear was measured in. VoxelGrid::GridToWorld
+	   against the grid's *current* offset; the candidates below carry the offset
+	   their own bake used. */
+	const float fVoxelSize = static_cast<float>(grid.GetVoxelSize());
 
 	Box cleared;
 	cleared.Min = grid.GridToWorld(v3GridMin);
@@ -357,18 +424,29 @@ void VoxelBaker::NotifyClearedRegion(VoxRenderer* pCleared, const Vector3& v3Gri
 		if (pRenderer == pCleared || !pRenderer->IsEnabled() || pRenderer->GetOwner()->IsStatic())
 			continue;
 
-		if (!pRenderer->m_BakeData.Positions)
+		const VoxRenderer::BakeData& bake = pRenderer->m_BakeData;
+
+		if (!bake.Positions || bake.StampMin.x > bake.StampMax.x)
 			continue;
 
-		if (!pRenderer->GetBounds().Intersects(cleared))
+		Box stamped;
+		stamped.Min = bake.StampMin * fVoxelSize + bake.WorldOffset;
+		stamped.Max = (bake.StampMax + Vector3(1.f)) * fVoxelSize + bake.WorldOffset;
+
+		if (!stamped.Intersects(cleared))
 			continue;
 
 		pRenderer->m_BakeData.Generation = 0;
+		pRenderer->m_BakeData.RepairOnly = true;
 		pRenderer->RequestUpdate();
 	}
+
+	if (bProfiling)
+		m_fRepairMilliseconds +=
+			std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
 }
 
-void VoxelBaker::Clear(VoxRenderer* pRenderer, VoxRenderer::BakeData* pBakeData)
+void VoxelBaker::Clear(VoxRenderer* pRenderer, VoxRenderer::BakeData* pBakeData, bool bNotify)
 {
 	if (pRenderer->GetWorld()->GetApplication()->IsShuttingDown())
 		return;
@@ -379,6 +457,65 @@ void VoxelBaker::Clear(VoxRenderer* pRenderer, VoxRenderer::BakeData* pBakeData)
 
 	pBakeData = pBakeData ? pBakeData : &pRenderer->m_BakeData;
 
+	/* A window slide voids a dynamic renderer's recorded positions outright,
+	 * and replaying them is destructive.
+	 *
+	 * The voxel buffer is double buffered. When the chunk window moves,
+	 * ChunkSystem::RenderChunk rewrites every resident chunk's slice of the
+	 * *back* buffer in full - from the chunk's own CPU voxels, which hold static
+	 * geometry and nothing else - and then swaps. A dynamic renderer never
+	 * writes a chunk's voxels, only the mapping, so the swap drops its stamp
+	 * entirely. Its Positions then name addresses whose contents are gone, and
+	 * the shift below maps them onto addresses that now hold the freshly
+	 * rendered static world: erasing those punches a renderer-shaped hole in
+	 * whatever the window slid over.
+	 *
+	 * There is nothing to erase, so do not. Dropping the list also means Bake
+	 * re-stamps this renderer into the new front buffer, which it has to - the
+	 * swap took its voxels with it, and a renderer standing still would
+	 * otherwise stay invisible until something moved it.
+	 *
+	 * A static renderer is the opposite case and keeps the shift: its colour is
+	 * in the chunk's voxels, so RenderChunk puts it back at the shifted address
+	 * and the address is exactly where its Positions say it is. */
+	if (pBakeData->Positions && worldOffsetDiff != Vector3(0.f) && !pRenderer->GetOwner()->IsStatic())
+	{
+		/* VOXAGINE_BOUNDS_AUDIT=1 prices what the replay would have cost: how
+		   many of the shifted addresses hold geometry right now. Every one of
+		   them is a voxel of the freshly slid-in world that the old path was
+		   about to zero. Occupancy comes from the brick grid's CPU bitmap. */
+		static const bool s_bAudit = std::getenv("VOXAGINE_BOUNDS_AUDIT") != nullptr;
+
+		if (s_bAudit)
+		{
+			uint32_t uiWouldErase = 0;
+
+			for (uint32_t i = 0; i < pBakeData->Size; ++i)
+			{
+				const uint32_t uiShifted = (uint32_t)((int)pBakeData->Positions[i] +
+					(int)(worldOffsetDiff.x + worldOffsetDiff.z * gridDims.y * gridDims.x));
+
+				if (uiShifted < m_pRenderSystem->m_pRenderContext->GetVoxelDataSize() &&
+					m_pRenderSystem->m_pRenderContext->GetBrickGrid().IsOccupied(uiShifted))
+					++uiWouldErase;
+			}
+
+			fprintf(stderr, "[slide] '%s': %u of %u recorded voxels dropped rather than replayed; %u of the shifted addresses hold world geometry\n",
+				pRenderer->GetOwner()->GetName().c_str(),
+				pBakeData->Size, pBakeData->Size, uiWouldErase);
+		}
+
+		delete[] pBakeData->Positions;
+
+		pBakeData->Positions = nullptr;
+		pBakeData->Size = 0;
+		pBakeData->IsStatic = false;
+		pBakeData->Generation = 0;
+		pBakeData->Stamp = VoxRenderer::BakeData::StampKey();
+
+		return;
+	}
+
 	/* Remove old voxels if array is valid */
 	if (pBakeData->Positions)
 	{
@@ -386,10 +523,14 @@ void VoxelBaker::Clear(VoxRenderer* pRenderer, VoxRenderer::BakeData* pBakeData)
 		bool bStatic = pBakeData->IsStatic;
 		Vector3 voxelPos(0);
 
-		/* Grid-space bounds of what this actually erased, gathered only for a
-		   static renderer - see the notify pass after the loop. */
+		/* Grid-space bounds of what this actually erased - see the notify pass
+		   after the loop. */
 		Vector3 clearedMin(FLT_MAX);
 		Vector3 clearedMax(-FLT_MAX);
+
+		/* Which slot, if any, means "still mine". A dynamic renderer never owns
+		   a voxel, so for one of those any owner at all is somebody else. */
+		const uint16_t uiOwnerSlot = grid.FindOwnerSlot(pRenderer->GetOwner()->GetId());
 
 		for (uint32_t i = 0; i < arrSize; ++i)
 		{
@@ -405,22 +546,74 @@ void VoxelBaker::Clear(VoxRenderer* pRenderer, VoxRenderer::BakeData* pBakeData)
 			if (chunkOffsetPosition >= grid.GetNumVoxels())
 				continue;
 
+			voxelPos = grid.GetVoxelPosition(chunkOffsetPosition);
+			const VoxelCell cell = grid.GetCell((uint32_t)voxelPos.x, (uint32_t)voxelPos.y, (uint32_t)voxelPos.z);
+
+			/* A recorded position is not a claim that the voxel is still this
+			   renderer's. A static bake stamps straight over a dynamic
+			   renderer's voxels - it has to, or a wall grows a character-shaped
+			   hole the moment the character walks away - and it records them as
+			   its own, so the same voxel is now on two Positions lists with the
+			   static one holding the grid's ownership. Erasing it here on the
+			   strength of a stale list is what punches a hole in the wall when
+			   the character moves off, and nothing re-stamps a static renderer
+			   whose own stamp has not changed, so the hole stays.
+
+			   The owner slot answers "is it still mine" out of ordinary cached
+			   memory, which is the only reason this can afford to ask: reading
+			   the voxel back out of the mapping would be a PCIe read of VRAM
+			   per cleared voxel.
+
+			   The owner has to be *drawing* something there, which is why the
+			   cell has to be active as well as owned. Two states look like an
+			   owner and are not: destruction zeroes a voxel's colour and leaves
+			   the slot behind, so a blasted area is full of owned but empty
+			   cells, and a particle claim reserves a cell without ever putting a
+			   colour in the voxel buffer, since particles are drawn by their own
+			   pass. Treating either as an owner strands this renderer's colour
+			   at that address for good - which is the exact shape of walking a
+			   character through a destroyed area and leaving its colours in it.
+			   An active owned cell, on the other hand, was written into the grid
+			   and the voxel buffer together, so its colour is genuinely there. */
+			const uint16_t uiExisting = cell ? cell.GetSlot() : VoxelOwnerVolume::k_uiNoOwnerSlot;
+
+			if (cell && cell.IsActive() &&
+				uiExisting != VoxelOwnerVolume::k_uiNoOwnerSlot &&
+				uiExisting != VoxelOwnerVolume::k_uiParticleSlot &&
+				uiExisting != uiOwnerSlot)
+			{
+				/* VOXAGINE_BOUNDS_AUDIT=1 counts what this rule saves, which is
+				   the only way to see the defect from outside: every one of
+				   these was a voxel erased out of somebody else's model. */
+				static const bool s_bAudit = std::getenv("VOXAGINE_BOUNDS_AUDIT") != nullptr;
+
+				if (s_bAudit)
+				{
+					static uint64_t s_uiKept = 0;
+
+					if (++s_uiKept == 1 || (s_uiKept % 10000) == 0)
+						fprintf(stderr, "[clear] %llu voxels not erased because another renderer owns them now (latest: '%s' over slot %u)\n",
+							static_cast<unsigned long long>(s_uiKept),
+							pRenderer->GetOwner()->GetName().c_str(),
+							uiExisting);
+				}
+
+				continue;
+			}
+
 			m_pRenderSystem->m_pRenderContext->ModifyVoxelFast(chunkOffsetPosition, 0);
 
-			if (bStatic)
-			{
-				voxelPos = grid.GetVoxelPosition(chunkOffsetPosition);
-				const VoxelCell cell = grid.GetCell((int)voxelPos.x, (int)voxelPos.y, (int)voxelPos.z);
+			clearedMin = glm::min(clearedMin, voxelPos);
+			clearedMax = glm::max(clearedMax, voxelPos);
 
+			if (bStatic && cell)
+			{
 				cell.SetColor(0);
 				cell.ClearOwner();
-
-				clearedMin = glm::min(clearedMin, voxelPos);
-				clearedMax = glm::max(clearedMax, voxelPos);
 			}
 		}
 
-		if (bStatic && clearedMin.x <= clearedMax.x)
+		if (bNotify && clearedMin.x <= clearedMax.x)
 			NotifyClearedRegion(pRenderer, clearedMin, clearedMax);
 
 		delete[] pBakeData->Positions;

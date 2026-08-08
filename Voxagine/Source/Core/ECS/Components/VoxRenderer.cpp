@@ -118,22 +118,35 @@ Box VoxRenderer::GetBounds() const
 	bounds.Max = extents;
 	bounds.Min = -extents;
 
-	std::vector<Vector3> corners;
-	corners.push_back(bounds.Min);
-	corners.push_back(Vector3(bounds.Min.x, bounds.Min.y, bounds.Max.z));
-	corners.push_back(Vector3(bounds.Min.x, bounds.Max.y, bounds.Min.z));
-	corners.push_back(Vector3(bounds.Max.x, bounds.Min.y, bounds.Min.z));
-	corners.push_back(Vector3(bounds.Min.x, bounds.Max.y, bounds.Max.z));
-	corners.push_back(Vector3(bounds.Max.x, bounds.Min.y, bounds.Max.z));
-	corners.push_back(Vector3(bounds.Max.x, bounds.Max.y, bounds.Min.z));
-	corners.push_back(bounds.Max);
+	/* A fixed array rather than a vector: VoxelBaker::NotifyClearedRegion asks
+	   every renderer in the world for its bounds every time one of them clears,
+	   and a heap allocation per call turns a cheap box test into a per-frame
+	   cost. */
+	const Vector3 corners[8] = {
+		bounds.Min,
+		Vector3(bounds.Min.x, bounds.Min.y, bounds.Max.z),
+		Vector3(bounds.Min.x, bounds.Max.y, bounds.Min.z),
+		Vector3(bounds.Max.x, bounds.Min.y, bounds.Min.z),
+		Vector3(bounds.Min.x, bounds.Max.y, bounds.Max.z),
+		Vector3(bounds.Max.x, bounds.Min.y, bounds.Max.z),
+		Vector3(bounds.Max.x, bounds.Max.y, bounds.Min.z),
+		bounds.Max
+	};
 
+	/* FLT_MIN is the smallest *positive* normal, not the most negative float, so
+	   the seed for the maximum was effectively zero: a model whose corners are
+	   all at negative coordinates on an axis reported a bound that ran from the
+	   model to the world origin. Every consumer of this box - the AABB proxy,
+	   the auto-sized BoxCollider, VoxelBaker's cleared-region test - reads that
+	   as geometry that is not there. */
 	bounds.Min = Vector3(1, 1, 1) * FLT_MAX;
-	bounds.Max = Vector3(1, 1, 1) * FLT_MIN;
+	bounds.Max = Vector3(1, 1, 1) * -FLT_MAX;
 
-	for (uint32_t i = 0; i < corners.size(); i++)
+	const Matrix4 matrix = GetTransform()->GetMatrix();
+
+	for (uint32_t i = 0; i < 8; i++)
 	{
-		Vector3 transformed = GetTransform()->GetMatrix() * Vector4(corners[i], 1.f);
+		Vector3 transformed = matrix * Vector4(corners[i], 1.f);
 		bounds.Min = glm::min(bounds.Min, transformed);
 		bounds.Max = glm::max(bounds.Max, transformed);
 	}

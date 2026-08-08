@@ -43,7 +43,15 @@ struct VoxFrame {
 	const uint32_t* GetPositions() const { return m_pPositions; };
 
 	uint32_t GetVoxelCount() const { return m_uiVoxelCount; }
-	uint32_t GetSolidVoxelCount() const { return m_uiVoxelCount; }
+
+	/* The number of entries m_pColors/m_pPositions actually hold, which is the
+	   voxels whose palette entry is not transparent - not m_uiVoxelCount, which
+	   is what the file stored. The two are equal for every asset in this tree
+	   (611 .vox files, checked), so returning the wrong one has cost nothing so
+	   far; a model with a transparent palette index would have had the stamp
+	   walk off the end of both arrays and scatter voxels from whatever the
+	   allocator left there. */
+	uint32_t GetSolidVoxelCount() const { return m_uiSolidVoxelCount; }
 
 	Vector3 GetSize() const { return m_v3Size + m_v3FitSizeOffset; }
 

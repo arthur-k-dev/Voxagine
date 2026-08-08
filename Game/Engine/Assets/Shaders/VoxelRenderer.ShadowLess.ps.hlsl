@@ -54,6 +54,9 @@ float4 main(PS_in IN) : TAR_OUT
        VoxelRenderer.ps.hlsl. */
 	if (marchDiffuse.Color.a == 0.0)
 	{
+#ifdef MARCH_STEP_DEBUG
+		return GetStepHeatmap();
+#endif
 		return float4(0.0, 0.0, 0.0, 0.0);
 	}
 
@@ -70,6 +73,10 @@ float4 main(PS_in IN) : TAR_OUT
 
     marchDiffuse.Color.xyz *= float3(shadowMultiplier, shadowMultiplier, shadowMultiplier) * ambient.xyz;
     marchDiffuse.Color.a = 1.0;
+
+#ifdef MARCH_STEP_DEBUG
+    return GetStepHeatmap();
+#endif
 
     return marchDiffuse.Color;
 }

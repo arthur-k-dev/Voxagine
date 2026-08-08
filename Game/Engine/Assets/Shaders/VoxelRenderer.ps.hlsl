@@ -65,6 +65,9 @@ float4 main(PS_in IN) : TAR_OUT
        needs. */
     if (marchDiffuse.Color.a == 0.0)
     {
+#ifdef MARCH_STEP_DEBUG
+        return GetStepHeatmap();
+#endif
         return float4(0.0, 0.0, 0.0, 0.0);
     }
 
@@ -100,6 +103,12 @@ float4 main(PS_in IN) : TAR_OUT
 
     marchDiffuse.Color.xyz *= float3(shadowMultiplier, shadowMultiplier, shadowMultiplier) * ambient.xyz;
     marchDiffuse.Color.a = 1.0;
+
+#ifdef MARCH_STEP_DEBUG
+    /* After the shadow ray, so the heatmap shows the pixel's whole cost - the
+       shadow ray is 53% of this pass (RENDERING_PLAN.md phase 3 notes). */
+    return GetStepHeatmap();
+#endif
 
     return marchDiffuse.Color;
 }

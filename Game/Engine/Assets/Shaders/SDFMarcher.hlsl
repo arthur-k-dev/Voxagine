@@ -20,7 +20,57 @@ struct MarchResult
 	float4 Color;
 };
 
+/* Every DDA crossing this pixel has made, at either level, across every ray it
+   has fired. A static global is per-invocation, so the primary march and the
+   shadow ray that follows it accumulate into the same counter - which is the
+   point. What has to be bounded is the pixel's total work; bounding each ray
+   separately just doubles the ceiling.
+
+   MARCH_STEP_BUDGET is the ceiling and Defines.hlsl says why. */
 static uint numStepsTaken = 0;
+
+inline bool HasStepBudget() {
+	return numStepsTaken < MARCH_STEP_BUDGET;
+}
+
+/* Step-count heatmap - RENDERING_PLAN.md phase 6.0. Uncomment, rebuild, and
+   both voxel pixel shaders shade every fragment by how much marching it did
+   rather than by what it hit: black at rest, then blue, green, yellow, red,
+   and full white for a pixel that ran out of MARCH_STEP_BUDGET.
+
+   This exists because the trigger for the Xid 109 hang is not identified, and
+   a frame that takes seconds is one nobody can screenshot. The heatmap is the
+   thing to leave running while reproducing it - white appearing anywhere names
+   the geometry responsible in one look, which is what CLAUDE.md's "colour the
+   suspects" note asks for. It is also how the budget itself was calibrated.
+
+   Both shaders deliberately apply it to the miss path too: a ray that marches
+   a long way and finds nothing is exactly the expensive kind, and it is
+   invisible in the normal image. */
+// #define MARCH_STEP_DEBUG
+
+#ifdef MARCH_STEP_DEBUG
+float4 GetStepHeatmap()
+{
+	float fLoad = saturate(float(numStepsTaken) / float(MARCH_STEP_BUDGET));
+
+	/* blue -> green -> yellow -> red over the first three quarters, so the
+	   ordinary range stays readable, then to white over the last one. */
+	float3 v3Color = lerp(
+		lerp(
+			lerp(float3(0.0, 0.0, 0.5), float3(0.0, 1.0, 0.0), saturate(fLoad * 4.0)),
+			float3(1.0, 1.0, 0.0),
+			saturate(fLoad * 4.0 - 1.0)
+		),
+		float3(1.0, 0.0, 0.0),
+		saturate(fLoad * 4.0 - 2.0)
+	);
+
+	v3Color = lerp(v3Color, float3(1.0, 1.0, 1.0), saturate(fLoad * 4.0 - 3.0));
+
+	return float4(v3Color, 1.0);
+}
+#endif
 
 inline uint PosToVoxelID(uint3 v3Position)
 {
@@ -148,6 +198,11 @@ MarchResult MarchBricks(float3 v3Origin, float3 v3Direction, int iMaxBrickSteps)
 		if (!IsBrickInWorld(v3Brick))
 			break;
 
+		/* Out of budget. Falling out of the loop reports a miss, which is the
+		   same answer this already gives a ray that uses up iMaxBrickSteps. */
+		if (!HasStepBudget())
+			break;
+
 		if (IsBrickOccupied(v3Brick)) {
 			int3 v3Position;
 			float3 v3Mask;
@@ -261,8 +316,20 @@ MarchResult MarchBricks(float3 v3Origin, float3 v3Direction, int iMaxBrickSteps)
 
 				if (any((v3Position >> BRICK_SHIFT) != v3Brick))
 					break;
+
+				/* The outer loop re-tests this and breaks too; leaving the
+				   inner walk first is what stops a single dense brick from
+				   overrunning the budget by up to BRICK_MAX_VOXEL_STEPS. */
+				if (!HasStepBudget())
+					break;
 			}
 		}
+
+		/* A brick crossing is cheaper than a voxel one but not free, and a ray
+		   can spend the whole of iMaxBrickSteps here without descending once.
+		   Counting both into one budget is what makes the bound hold for every
+		   shape of ray rather than only the dense ones. */
+		numStepsTaken++;
 
 		/* Step to the next brick. The crossing parameter has to be read before
 		   the step, since that is where the next brick is entered. */

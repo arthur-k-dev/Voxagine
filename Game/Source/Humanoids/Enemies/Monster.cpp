@@ -276,15 +276,28 @@ void Monster::RangeAttack()
 	if (m_bAliveTimer < 1.f)
 		return;
 
-	// Calculate bullet rotation
-	Quaternion rotation;
+	/* Two ways this produced a non-finite rotation, and the identity default
+	   matters as much as the guard: GLM does not zero-initialise and
+	   GLM_FORCE_CTOR_INIT is not set, so a `Quaternion rotation;` that never
+	   gets assigned is whatever was on the stack.
+
+	   The zero test used to run *before* y was flattened, so a monster
+	   directly above or below its target passed it with a non-zero y and then
+	   normalized a zero vector - NaN, straight into SetRotation here and into
+	   the bullet spawned below. A NaN transform reaches the renderer as a
+	   proxy AABB nothing filters, and the marcher has had no step cap since
+	   RENDERING_PLAN.md phase 2, so the frame never finishes: the [stall]
+	   report in RenderContext, and a window that looks frozen while the main
+	   loop keeps spinning. */
+	Quaternion rotation = Quaternion(1.f, 0.f, 0.f, 0.f);
+
 	Vector3 direction = m_pClosestTarget->GetTransform()->GetPosition() - GetTransform()->GetPosition();
+	direction.y = 0.f;
+	direction = SafeNormalize(direction);
+
 	if (direction != Vector3(0.f, 0.f, 0.f))
-	{
-		direction.y = 0.f;
-		direction = glm::normalize(direction);
 		rotation = glm::quatLookAt(direction, Vector3(0, 1, 0));
-	}
+
 	GetTransform()->SetRotation(rotation);
 
 	EnemyBullet* bullet = GetWorld()->SpawnEntity<EnemyBullet>(GetTransform()->GetPosition() + m_bulletSpawnOffset, rotation, Vector3(1));

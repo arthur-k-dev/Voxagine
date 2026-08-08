@@ -188,6 +188,31 @@ void RenderSystem::PostTick(float fDeltaTime)
 		buffer.Extents = (v3ProxyMax - v3ProxyMin) * 0.5f;
 		buffer.MapperID = pRenderer->GetFrame()->GetMapperID();
 
+		/* VoxelBaker::Occupy already refuses a non-finite stamp position; this
+		   is the same check on the other consumer of the same transform, and
+		   it is the one that could hang the machine. The proxy AABB is what
+		   the marcher starts from, and the marcher has had no step cap since
+		   RENDERING_PLAN.md phase 2 - so a NaN or absurd box is not a wrong
+		   pixel, it is a frame that never finishes, reported only as the
+		   [stall] line in RenderContext with nothing naming the cause.
+		   Dropping the model loses one entity from the image and says which. */
+		if (!(std::isfinite(buffer.Position.x + buffer.Position.y + buffer.Position.z) &&
+		      std::isfinite(buffer.Extents.x + buffer.Extents.y + buffer.Extents.z)))
+		{
+			static bool s_bWarned = false;
+
+			if (!s_bWarned)
+			{
+				s_bWarned = true;
+				fprintf(stderr, "[render] non-finite voxel proxy from '%s': pos(%.2f %.2f %.2f) extents(%.2f %.2f %.2f) - model dropped\n",
+				        pRenderer->GetOwner()->GetName().c_str(),
+				        buffer.Position.x, buffer.Position.y, buffer.Position.z,
+				        buffer.Extents.x, buffer.Extents.y, buffer.Extents.z);
+			}
+
+			continue;
+		}
+
 		m_pRenderContext->Submit(buffer);
 
 		if (s_bCoverageAudit)

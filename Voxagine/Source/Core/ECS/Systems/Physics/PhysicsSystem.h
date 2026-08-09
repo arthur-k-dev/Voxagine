@@ -1,5 +1,6 @@
 #pragma once
 #include <unordered_map>
+#include <deque>
 #include "Core/ECS/ComponentSystem.h"
 #include "Core/ECS/Systems/Physics/ParticleLinkedList.h"
 #include "Core/ECS/Systems/Physics/IntegrityChecker.h"
@@ -116,6 +117,15 @@ private:
 	   thread holding a raw pointer to m_VoxelGrid above, which nothing joined
 	   before this object was destroyed - see IntegrityChecker.h. */
 	IntegrityChecker m_IntegrityChecker;
+
+	/* Islands the checker has finished but that have not been turned into
+	   debris yet, and how far into the front one we got. Converting is budgeted
+	   per tick because an island is as large as the disconnected structure and
+	   those grow as a level fragments - see ProcessIntegrityChecks. */
+	std::deque<std::vector<uint64_t>> m_PendingIslands;
+	size_t m_uiIslandCursor = 0;
+
+	static const uint32_t k_uiIntegrityConvertPerTick = 16384;
 
 	Entity* m_pStaticEntityBody;
 	PhysicsBody* m_pStaticBody;

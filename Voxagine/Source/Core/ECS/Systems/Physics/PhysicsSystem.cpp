@@ -163,8 +163,11 @@ void PhysicsSystem::OnComponentDestroyed(Component* pComponent)
 
 void PhysicsSystem::OnWorldPaused(World* pWorld)
 {
-	/* Positions queued against the paused world are not worth resuming. */
+	/* Positions queued against the paused world are not worth resuming, and
+	   neither is a half-converted island. */
 	m_IntegrityChecker.Reset();
+	m_PendingIslands.clear();
+	m_uiIslandCursor = 0;
 }
 
 void PhysicsSystem::OnWorldResumed(World* pWorld)
@@ -243,15 +246,42 @@ void PhysicsSystem::ProcessIntegrityChecks()
 {
 	OPTICK_EVENT();
 
-	/* Runs the flood fill inline, for a bounded number of voxel visits, and
-	   consumes whatever islands completed in the same tick. */
+	/* Runs the flood fill inline for a bounded number of voxel visits. */
 	std::vector<std::vector<uint64_t>> results;
 	m_IntegrityChecker.Process(IntegrityChecker::VISIT_BUDGET_PER_TICK, results);
 
 	for (std::vector<uint64_t>& checkedVoxels : results)
+		m_PendingIslands.push_back(std::move(checkedVoxels));
+
+	/* Converting an island is budgeted too, and that is not symmetry for its
+	   own sake. An island is however large the disconnected structure is, and
+	   the more of a level has been destroyed the more it fragments, so islands
+	   grow over a session. Every voxel in one costs a particle spawn and two
+	   ModifyVoxel calls, and doing a whole island in one tick is a frame as
+	   long as the island is big - measured as 127 frames over 30 ms in a single
+	   session, several pegged at 100 ms, with 94 ms and 41 ms immediately
+	   before a GPU timeout that a bullet penetration triggered.
+
+	   The second ModifyVoxel is the part that reaches the GPU: it writes the
+	   voxel mapper, which is DEVICE_LOCAL | HOST_VISIBLE, so an unbounded burst
+	   is an unbounded burst of CPU writes into VRAM the voxel pass is reading
+	   at the same time.
+
+	   The cost of spreading it is that a large island takes a few frames to
+	   fall rather than one. At 16384 voxels a tick that is 60 ms for a 64 K
+	   island, against a 100 ms stall for the same work done at once. */
+	uint32_t uiConvertBudget = k_uiIntegrityConvertPerTick;
+
+	while (uiConvertBudget > 0 && !m_PendingIslands.empty())
 	{
-		for (uint64_t& vecHash : checkedVoxels)
+		std::vector<uint64_t>& checkedVoxels = m_PendingIslands.front();
+
+		for (; m_uiIslandCursor < checkedVoxels.size() && uiConvertBudget > 0; ++m_uiIslandCursor)
 		{
+			--uiConvertBudget;
+
+			uint64_t& vecHash = checkedVoxels[m_uiIslandCursor];
+			{
 			const Vector3 vec = IntegrityChecker::HashToPosition(vecHash);
 
 			const VoxelCell cell = m_VoxelGrid.GetCell(
@@ -286,6 +316,13 @@ void PhysicsSystem::ProcessIntegrityChecks()
 				static_cast<uint32_t>(vec.z),
 				0
 			);
+			}
+		}
+
+		if (m_uiIslandCursor >= checkedVoxels.size())
+		{
+			m_PendingIslands.pop_front();
+			m_uiIslandCursor = 0;
 		}
 	}
 }

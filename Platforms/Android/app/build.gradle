@@ -1,0 +1,199 @@
+apply plugin: 'com.android.application'
+
+// One SDL3 checkout serves both halves of this build: Gradle compiles its Java
+// (org.libsdl.app) and CMake compiles its C into libSDL3.so. They talk to each
+// other over JNI, so a version mismatch is a crash at startup rather than a
+// build error - which is why this is a path to one directory rather than two
+// independent version numbers. fetch-sdl.sh creates it.
+def sdlSourceDir = file(project.hasProperty('sdlSourceDir')
+        ? project.property('sdlSourceDir')
+        : "${rootDir}/third_party/SDL")
+
+// Which ABIs to build. arm64-v8a is the only one worth shipping - Play
+// requires 64-bit and a Vulkan 1.3 game has no 32-bit audience - but the
+// emulator is x86_64, and an arm64 system image on an x86 host runs under full
+// CPU translation, which is fine for a launcher and useless for a voxel
+// marcher. So the emulator gets its own ABI on request rather than by default:
+//
+//   ./gradlew assembleDebug                          -> arm64-v8a (a real phone)
+//   ./gradlew assembleDebug -PabiFilters=x86_64      -> the emulator
+//
+// Each extra ABI is a full second build of the engine, SDL3 and RTTR, which is
+// why this is not just "build both, always".
+def targetAbis = (project.hasProperty('abiFilters')
+        ? project.property('abiFilters')
+        : 'arm64-v8a').split(',').collect { it.trim() }
+
+android {
+    namespace 'com.voxagine.bitbuster'
+    compileSdk 34
+    ndkVersion '27.2.12479018'
+
+    defaultConfig {
+        applicationId 'com.voxagine.bitbuster'
+
+        // 31 is a *compile* floor chosen for Vulkan 1.3; see
+        // CMake/Platforms.cmake for the reasoning and for why an API 31 device
+        // with an older driver still will not run this.
+        minSdk 31
+        targetSdk 34
+
+        versionCode 1
+        versionName '0.1.0'
+
+        externalNativeBuild {
+            cmake {
+                // Matches CMakePresets.json's android-arm64 preset. The
+                // editor is not buildable for mobile at all (Platforms.cmake
+                // makes that a configure error), and the bring-up target has
+                // no activity to run in.
+                arguments '-DVOXAGINE_BUILD_ENGINE=ON',
+                          '-DVOXAGINE_BUILD_EDITOR=OFF',
+                          '-DVOXAGINE_BUILD_BRINGUP=OFF',
+                          '-DANDROID_STL=c++_shared',
+                          "-DVOXAGINE_ASSET_VERSION=${defaultConfig.versionName}",
+                          "-DVOXAGINE_SDL3_SOURCE_DIR=${sdlSourceDir}"
+
+                targets 'BitBuster'
+            }
+        }
+
+        ndk {
+            abiFilters.clear()
+            abiFilters.addAll(targetAbis)
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path '../../../CMakeLists.txt'
+            version '3.22.1+'
+        }
+    }
+
+    sourceSets {
+        main {
+            java.srcDirs += "${sdlSourceDir}/android-project/app/src/main/java"
+
+            // Assets are contributed by the stageGameAssets task instead of
+            // being listed here - see the bottom of this file.
+        }
+    }
+
+    buildTypes {
+        debug {
+            // The Vulkan validation layers are gated on _DEBUG, which CMake
+            // defines for the Debug configuration only.
+            debuggable true
+        }
+        release {
+            minifyEnabled false
+
+            // No signingConfig here on purpose. A release key is the user's,
+            // and this file is in a public repository. This variant therefore
+            // produces an *unsigned* APK, which cannot be installed - use
+            // `benchmark` below to actually run an optimised build.
+        }
+
+        // Optimised native code, no validation layers, signed with the debug
+        // key so it installs. This is the variant to measure with, and the
+        // reason it exists: a Debug APK is unoptimised C++ with full symbols,
+        // so any frame rate from one is a floor rather than a number, and
+        // quoting it would be misleading in the direction that matters.
+        //
+        // debuggable false is what gets AGP to configure CMake as a release
+        // build. It also means the wrap.sh trick for setting environment
+        // variables is unavailable, which is why the profiler is turned on
+        // through VOXAGINE_PROFILE_DEFAULT at compile time instead of through
+        // VOXAGINE_PROFILE at run time.
+        benchmark {
+            initWith release
+            signingConfig signingConfigs.debug
+            debuggable false
+            matchingFallbacks = ['release']
+
+            externalNativeBuild {
+                cmake {
+                    arguments '-DVOXAGINE_PROFILE_DEFAULT=ON'
+                }
+            }
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    packagingOptions {
+        jniLibs {
+            // libmain.so, libSDL3.so, librttr_core.so and libc++_shared.so all
+            // have to reach the APK. CMake/SDL3.cmake and CMake/RTTR.cmake
+            // redirect the two that would otherwise be left in _deps/.
+            useLegacyPackaging true
+        }
+    }
+}
+
+dependencies {
+    implementation 'androidx.core:core:1.13.1'
+}
+
+// Asset staging.
+//
+// Pointing assets.srcDirs straight at Game/ is the obvious thing and it is
+// wrong: it ships everything in there - the game's entire C++ source tree under
+// Game/Source, the leftover MSVC .vcxproj/.rc/.aps files, two OptickCore DLLs,
+// and whatever PlayerPrefs the last local run happened to write. 1273 files. It
+// built and installed perfectly happily, which is why it is worth a comment.
+//
+// The include list is deliberately the same list as k_pAssetRoots plus the two
+// loose files in Core/System/MobileAssets.cpp. If one gains an entry the other
+// has to, and the failure is asymmetric: staged-but-not-extracted is dead
+// weight, extracted-but-not-staged is a missing asset at runtime whose "No such
+// file or directory" reads as a code bug.
+abstract class StageGameAssets extends DefaultTask {
+    @InputFiles
+    @PathSensitive(PathSensitivity.RELATIVE)
+    abstract ConfigurableFileCollection getSourceFiles()
+
+    @OutputDirectory
+    abstract DirectoryProperty getOutputDirectory()
+
+    @Inject
+    abstract FileSystemOperations getFileSystemOperations()
+
+    @TaskAction
+    void stage() {
+        fileSystemOperations.sync { spec ->
+            spec.from(sourceFiles)
+            spec.into(outputDirectory)
+        }
+    }
+}
+
+def stageGameAssets = tasks.register('stageGameAssets', StageGameAssets) {
+    sourceFiles.from(fileTree("${rootDir}/../../Game") {
+        include 'Content/**'
+        include 'Engine/**'
+        include 'Settings.vgs'
+        include 'ProjectSettings.vgps'
+
+        // Editor autosaves churn constantly and are working copies, not
+        // content - the same reason .gitignore excludes them.
+        exclude '**/*_AutoSave.wld'
+    })
+
+    outputDirectory.set(layout.buildDirectory.dir('game-assets'))
+}
+
+// addGeneratedSourceDirectory, not assets.srcDirs, and that is the whole point:
+// it hands AGP a task *provider*, so every consumer - merge, package, and the
+// lint model task that is easy to forget - gets the dependency wired for it.
+// Doing this by hand with `dependsOn` on tasks matched by name misses one, and
+// Gradle then fails the build with "uses this output without declaring a
+// dependency" for a task nobody thought about.
+androidComponents.onVariants(androidComponents.selector().all()) { variant ->
+    variant.sources.assets?.addGeneratedSourceDirectory(
+        stageGameAssets, StageGameAssets::getOutputDirectory)
+}

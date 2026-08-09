@@ -3,7 +3,7 @@
 #include "Core/Platform/Rendering/RenderDefines.h"
 #include "Core/Platform/Rendering/Vulkan/VKAllocator.h"
 
-#include <vulkan/vulkan.h>
+#include <Core/Platform/Rendering/Vulkan/VulkanAPI.h>
 
 #include <cstdint>
 #include <string>

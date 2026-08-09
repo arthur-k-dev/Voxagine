@@ -358,8 +358,14 @@ void RenderSystem::PostTick(float fDeltaTime)
 
 		if (pTextRenderer->IsWrapping())
 		{
+			/* "%s", not the string: same reasoning as the TextUnformatted
+			   below, which the wrapping branch had simply been missed on. The
+			   text is world data, so a '%' in it is read as a conversion
+			   against arguments that were never passed. GCC lets it through,
+			   the NDK's clang makes it -Werror=format-security, and it is a
+			   real defect on both. */
 			ImGui::PushTextWrapPos(ImGui::GetIO().DisplaySize.x - windowPosition.x);
-			ImGui::TextWrapped(pTextRenderer->GetText().c_str());
+			ImGui::TextWrapped("%s", pTextRenderer->GetText().c_str());
 			ImGui::PopTextWrapPos();
 		}
 		else

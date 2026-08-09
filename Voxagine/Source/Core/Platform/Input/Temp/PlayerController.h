@@ -12,6 +12,7 @@ class InputHandler;
 class KeyboardController;
 class MouseController;
 class GamePadController;
+class TouchController;
 
 class PlayerController : 
 	protected InputBindingHandlerInterface, public InputBindingMapInterface
@@ -49,6 +50,10 @@ protected:
 	void SetPlayerMouse(MouseController* pMouse) { m_pPlayerMouse = pMouse; };
 	void SetPlayerGamepad(GamePadController* pGamePad) { m_pPlayerGamePad = pGamePad; };
 
+	/* Only player one gets touch. A phone has one screen, and a second local
+	   player sharing it is not a control scheme. */
+	void SetPlayerTouch(TouchController* pTouch) { m_pPlayerTouch = pTouch; };
+
 private:
 	void ProcessInputBindings();
 
@@ -56,6 +61,7 @@ private:
 	MouseController* GetMouseController() override;
 	KeyboardController* GetKeyBoardController() override;
 	GamePadController* GetGamePadController() override;
+	TouchController* GetTouchController() override;
 
 private:
 	static int UNIQUE_PLAYER_ID;
@@ -67,4 +73,5 @@ private:
 	MouseController* m_pPlayerMouse = nullptr;
 	KeyboardController* m_pPlayerKeyboard = nullptr;
 	GamePadController* m_pPlayerGamePad = nullptr;
+	TouchController* m_pPlayerTouch = nullptr;
 };

@@ -1,7 +1,8 @@
-# Compiled shaders (see cmake/Shaders.cmake)
+# Compiled shaders (see CMake/Shaders.cmake)
 *.spv
 
-# CMake build output. Everything lands in Build/<preset>/ - see CMakePresets.json.
+# CMake build output. Everything lands in Build/<Platform>/<Type>/<Config>/ -
+# see CMakePresets.json.
 Build/
 compile_commands.json
 CMakeUserPresets.json
@@ -56,8 +57,8 @@ x86/
 *.swp
 
 # Phased agent planning docs - kept local, not checked in.
-/RENDERING_PLAN.md
-/MOBILE_PORT_PLAN.md
+/Docs/RENDERING_PLAN.md
+/Docs/MOBILE_PORT_PLAN.md
 
 # OAuth/credential files — never commit real tokens
 **/token_v2.json

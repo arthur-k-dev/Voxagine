@@ -16,6 +16,32 @@
 
 #define MAX_PLAYERS 2
 
+namespace
+{
+	/* Which pad belongs to which player, in one place - because it has to be
+	   answered identically for player one and for everybody else, and it was
+	   not.
+	 *
+	 * Desktop rotates: the keyboard is player one, so the first pad plugged in
+	 * should be player two. Mobile has no keyboard, so it is a straight
+	 * mapping.
+	 *
+	 * Both mistakes here are visible within seconds of picking up a
+	 * controller, and both were made. Rotating on mobile hands the only pad
+	 * anyone has to player two, so Start joins as P2 with P1 empty. Fixing that
+	 * for player one *only* leaves the loop below still rotating, so player one
+	 * and player two both end up pointing at pad 0 and a single Start press
+	 * joins everybody at once. */
+	int PadIndexForPlayer(int iPlayer, int iMaxPlayers)
+	{
+#if defined(VOXAGINE_MOBILE)
+		return iPlayer;
+#else
+		return (iPlayer + iMaxPlayers - 1) % iMaxPlayers;
+#endif
+	}
+}
+
 void InputContextNew::Initialize(WindowContext* pWindowContext, bool bInitDefaultMap)
 {
 	m_WindowContext = pWindowContext;
@@ -31,6 +57,12 @@ void InputContextNew::Initialize(WindowContext* pWindowContext, bool bInitDefaul
 	m_MouseController.Initialize(pWindowContext);
 	m_KeyboardController.Initialize(pWindowContext);
 
+	/* Always initialised, on every platform: SDL reports touch from laptop
+	   trackpads and drawing tablets too, and a desktop with none simply never
+	   produces a finger. Gating it on a platform macro would mean the touch
+	   path is only ever compiled where nobody can run a debugger on it. */
+	m_TouchController.Initialize(pWindowContext);
+
 	m_GamePadControllers.resize(m_iMaxPlayerCount);
 	for (GamePadController& gamePadIt : m_GamePadControllers)
 		gamePadIt.Initialize(pWindowContext);
@@ -39,11 +71,9 @@ void InputContextNew::Initialize(WindowContext* pWindowContext, bool bInitDefaul
 
 	m_PlayerControllers[0].SetPlayerMouse(&m_MouseController);
 	m_PlayerControllers[0].SetPlayerKeyboard(&m_KeyboardController);
+	m_PlayerControllers[0].SetPlayerTouch(&m_TouchController);
 
-	// If we want player controller 1 to be connected to player 1
-	//m_PlayerControllers[0].SetPlayerGamepad(&m_GamePadControllers[0]);
-	// else if we want the last controller to be player 1 (Player1 = Keyboard and Player2 = GameController)
-	m_PlayerControllers[0].SetPlayerGamepad(&m_GamePadControllers[m_iMaxPlayerCount - 1]);
+	m_PlayerControllers[0].SetPlayerGamepad(&m_GamePadControllers[PadIndexForPlayer(0, m_iMaxPlayerCount)]);
 
 	m_PlayerControllers[0].SetDefaultMapName(GetDefaultMapName());
 
@@ -55,10 +85,8 @@ void InputContextNew::Initialize(WindowContext* pWindowContext, bool bInitDefaul
 		m_PlayerControllers[playerControllerIndex].SetPlayerMouse(nullptr);
 		m_PlayerControllers[playerControllerIndex].SetPlayerKeyboard(nullptr);
 
-		// If we want player controller 1 to be connected to player 1
-		//m_PlayerControllers[playerControllerIndex].SetPlayerGamepad(&m_GamePadControllers[playerControllerIndex]);
-		// else if we want the last controller to be player 1 (Player1 = Keyboard and Player2 = GameController)
-		m_PlayerControllers[playerControllerIndex].SetPlayerGamepad(&m_GamePadControllers[playerControllerIndex - 1]);
+		m_PlayerControllers[playerControllerIndex].SetPlayerGamepad(
+			&m_GamePadControllers[PadIndexForPlayer(playerControllerIndex, m_iMaxPlayerCount)]);
 
 		m_PlayerControllers[playerControllerIndex].SetDefaultMapName(GetDefaultMapName());
 
@@ -85,6 +113,7 @@ void InputContextNew::Uninitialize()
 {
 	m_MouseController.UnInitialize();
 	m_KeyboardController.UnInitialize();
+	m_TouchController.UnInitialize();
 
 	for (GamePadController& gamePadIt : m_GamePadControllers)
 		gamePadIt.UnInitialize();
@@ -211,6 +240,7 @@ void InputContextNew::UpdateHardwareControllers()
 {
 	m_MouseController.Update();
 	m_KeyboardController.Update();
+	m_TouchController.Update();
 
 	for (GamePadController& gamePadControllerIt : m_GamePadControllers)
 	{
@@ -396,6 +426,11 @@ KeyboardController * InputContextNew::GetKeyBoardController()
 GamePadController * InputContextNew::GetGamePadController()
 {
 	return &m_GamePadControllers[0];
+}
+
+TouchController * InputContextNew::GetTouchController()
+{
+	return &m_TouchController;
 }
 
 void InputContextNew::RegisterAxis(const std::string & axisName, const InputKey & masterKey, float fScalar, BindingMapType inputBindingMapType)

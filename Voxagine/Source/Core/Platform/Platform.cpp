@@ -16,10 +16,10 @@
 #include "Editor/imgui/Contexts/VKImContext.h"
 #include "Editor/imgui/Platforms/SDLImPlatform.h"
 
-#ifdef VOXAGINE_FMOD
-#include "Audio/FMODContext.h"
-#else
 #include "Audio/NullAudioContext.h"
+
+#ifdef VOXAGINE_MINIAUDIO
+#include "Audio/MiniaudioContext.h"
 #endif
 
 #include <filesystem>
@@ -42,6 +42,7 @@ void Platform::Initialize()
 	switch (platform) {
 	case PT_LINUX:
 	case PT_WINDOWS:
+	case PT_ANDROID:
 	{
 		m_pGameTimer = new ChronoGameTimer();
 		m_pGameTimer->SetFrameLimitSeconds(m_pApplication->GetSettings().GetFrameLimit());
@@ -83,21 +84,28 @@ void Platform::Initialize()
 		assert(false);
 	}
 
-	/* Setup rendering API */
+	/* Setup audio API */
 	switch (audioApi) {
-	case AA_FMOD:
-#ifdef VOXAGINE_FMOD
-		m_pAudioContext = new FMODContext(this);
+	case AA_MINIAUDIO:
+#ifdef VOXAGINE_MINIAUDIO
+		m_pAudioContext = new MiniaudioContext(this);
+		break;
 #else
-		/* FMOD needs a proprietary SDK; run silent rather than not at all. */
+		/* Built with VOXAGINE_AUDIO_BACKEND=NONE. Run silent rather than not
+		   at all - the same thing a machine with no audio device gets. */
 		m_pAudioContext = new NullAudioContext(this);
+		break;
 #endif
-		m_pAudioContext->Initialize();
+	case AA_NONE:
+		m_pAudioContext = new NullAudioContext(this);
 		break;
 	default:
 		assert(false);
+		m_pAudioContext = new NullAudioContext(this);
 		break;
 	}
+
+	m_pAudioContext->Initialize();
 
 	/* Setup imGui */
 	m_ImguiSystem.SetContext(pImContext);

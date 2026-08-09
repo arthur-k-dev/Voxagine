@@ -3,7 +3,7 @@
 #include "Core/Resources/ReferenceManager.h"
 
 #include "Core/Resources/Formats/VoxModel.h"
-#include "Core/Resources/Formats/FMODSoundReference.h"
+#include "Core/Resources/Formats/PlatformSoundReference.h"
 #include "Core/Resources/Formats/TextureReference.h"
 
 class Application;
@@ -15,7 +15,7 @@ public:
 	void Unload();
 
 	TextureReference* LoadTexture(const std::string& filePath);
-	FMODSoundReference* LoadSound(const std::string& filePath);
+	PlatformSoundReference* LoadSound(const std::string& filePath);
 	VoxModel* LoadVox(const std::string& filePath);
 	std::vector<VoxModel*> LoadVoxBatch(const std::string& filePath, const std::string& fileName);
 	
@@ -30,6 +30,6 @@ private:
 	Application* m_pApp;
 
 	ReferenceManager<VoxModel> m_voxManager;
-	ReferenceManager<FMODSoundReference> m_soundManager;
+	ReferenceManager<PlatformSoundReference> m_soundManager;
 	ReferenceManager<TextureReference> m_textureManager;
 };

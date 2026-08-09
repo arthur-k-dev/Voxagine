@@ -25,6 +25,20 @@ public:
 
 	virtual bool OnResize(uint32_t uiWidth, uint32_t uiHeight) override;
 
+	/* Android destroys the app's ANativeWindow while backgrounded - the same
+	   handle the live VkSurfaceKHR was created from - so the surface does not
+	   degrade the way a resize does, it becomes invalid outright, and
+	   presenting to it or even querying its capabilities afterwards is
+	   undefined. A resize recreates the swapchain against a surface that is
+	   assumed still good; this instead tears the surface down before it can be
+	   pulled out from under a live Vulkan call, and builds a new one - a new
+	   VkSurfaceKHR, from a new ANativeWindow - on the way back.
+	 *
+	 * The device, instance and allocator are untouched: none of them are tied
+	 * to the window, only the surface and swapchain are. */
+	virtual void SuspendForBackground() override;
+	virtual bool ResumeFromBackground() override;
+
 	virtual void CaptureTarget(const std::string& passName, const std::string& path) override;
 
 	virtual bool IsVSyncEnabled() const override { return m_Swapchain.IsVSyncEnabled(); }

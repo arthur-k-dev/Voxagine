@@ -2,7 +2,7 @@
 
 #include "Core/Platform/Rendering/RenderDefines.h"
 
-#include <vulkan/vulkan.h>
+#include <Core/Platform/Rendering/Vulkan/VulkanAPI.h>
 
 /* The only place engine rendering vocabulary is allowed to meet Vulkan's.
    Everything here is a pure function of a RenderDefines.h value. */

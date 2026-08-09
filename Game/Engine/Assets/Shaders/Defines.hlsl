@@ -240,7 +240,32 @@
    4-voxel brick containing the wall the cone started on. The finest level is
    two voxels, so a sample two voxels out is already reading somewhere else -
    and the 1-to-8 voxel gap that made walls read flat closes. */
+/* Halved on mobile. Not a guess dressed as a measurement: measured on a
+   Galaxy S23 (Adreno 740, arm64) at native resolution in an arena, the Voxel
+   pass alone was 108.8 ms of a ~138 ms frame - 79% of it, and fragment-bound.
+   Every cone step here is a dependent Texture3D sample (the next step's
+   position depends on the last), for *two* cones per shaded pixel - this one
+   and GetConeSpecular's SPEC_CONE_STEPS below - stacked on top of the primary
+   march and a filtered shadow-map lookup. Both cone traces are recent
+   additions (RENDERING_PLAN.md 7.3 diffuse bounce, 7.4 specular) added after
+   the desktop numbers elsewhere in this file were taken, and neither had been
+   measured on a phone before this - AO_CONE_ENABLED's last measured desktop
+   cost (2.44 -> 3.47 ms at 4K) predates both.
+ *
+ * This is the cheap, reversible half of the experiment: fewer steps costs
+ * less per pixel with a shorter, coarser cone, in exchange for AO/bounce that
+ * reads a little flatter up close. What it is *not* is a measured answer -
+ * nobody has run a build with this change on the device it was written for.
+ * Re-run the profiler capture (VOXAGINE_PROFILE_DEFAULT is already on for the
+ * `benchmark` Android variant) and see whether "Voxel" actually moved before
+ * tuning this further in either direction. See CMake/Shaders.cmake for why
+ * this needs `cmake --build`, not an incremental one, to actually take
+ * effect if a desktop build has run more recently in the same source tree. */
+#ifdef VOXAGINE_MOBILE
+#define AO_CONE_STEPS 4
+#else
 #define AO_CONE_STEPS 7
+#endif
 #define AO_CONE_START 2.0
 #define AO_CONE_GROWTH 1.7
 
@@ -341,7 +366,14 @@
    shorter step count rather than AO_CONE_STEPS. */
 #define SPEC_CONE_ENABLED 1
 #define SPEC_CONE_APERTURE 0.12
+/* Halved on mobile - same reasoning and same caveat as AO_CONE_STEPS above.
+   GetConeSpecular already skips the loop below its Fresnel cutoff, so this
+   only shortens the cone for the grazing-angle pixels that actually run it. */
+#ifdef VOXAGINE_MOBILE
+#define SPEC_CONE_STEPS 3
+#else
 #define SPEC_CONE_STEPS 5
+#endif
 
 /* Reflectance at normal incidence. 0.04 is the standard dielectric value and
    this art is stone, wood, cloth and sand - there is no metal in it. */

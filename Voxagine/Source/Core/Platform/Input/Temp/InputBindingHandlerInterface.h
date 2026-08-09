@@ -14,6 +14,7 @@ class InputController;
 class MouseController;
 class KeyboardController;
 class GamePadController;
+class TouchController;
 
 class InputBindingHandlerInterface
 {
@@ -38,4 +39,10 @@ private:
 	virtual MouseController* GetMouseController() = 0;
 	virtual KeyboardController* GetKeyBoardController() = 0;
 	virtual GamePadController* GetGamePadController() = 0;
+
+	/* Not pure, unlike the three above: touch is optional and most
+	   implementers have none. Returning null here is the normal case, and
+	   making it pure would be a compile error for every future implementer
+	   that has nothing to say about touch. */
+	virtual TouchController* GetTouchController() { return nullptr; }
 };

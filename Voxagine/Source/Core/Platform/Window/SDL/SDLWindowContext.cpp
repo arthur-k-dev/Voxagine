@@ -24,6 +24,8 @@ SDLWindowContext::SDLWindowContext(Platform* pPlatform) : WindowContext(pPlatfor
 
 SDLWindowContext::~SDLWindowContext()
 {
+	SDL_RemoveEventWatch(&SDLWindowContext::EventWatch, this);
+
 	if (m_pWindow != nullptr)
 	{
 		SDL_DestroyWindow(m_pWindow);
@@ -95,6 +97,51 @@ void SDLWindowContext::Initialize()
 	int iY = 0;
 	SDL_GetWindowPosition(m_pWindow, &iX, &iY);
 	m_v2Position = UVector2(static_cast<uint32_t>(iX), static_cast<uint32_t>(iY));
+
+	/* See the comment on EventWatch for why this has to be a watch rather
+	   than a case in Poll()'s switch. `this` outlives the watch: it is removed
+	   in the destructor before the object it points at stops existing. */
+	SDL_AddEventWatch(&SDLWindowContext::EventWatch, this);
+}
+
+bool SDLCALL SDLWindowContext::EventWatch(void* pUserData, SDL_Event* pEvent)
+{
+	SDLWindowContext* pSelf = static_cast<SDLWindowContext*>(pUserData);
+
+	switch (pEvent->type)
+	{
+	case SDL_EVENT_WILL_ENTER_BACKGROUND:
+		/* Set going into the background, not coming out of it: this is the
+		   point at which the surface is still valid and Vulkan calls are still
+		   safe, which DID_ENTER_BACKGROUND does not promise - Android can
+		   destroy the ANativeWindow at any point after onPause, and this is
+		   the engine's only warning that onPause has happened. */
+		pSelf->m_bBackgrounded.store(true, std::memory_order_release);
+		pSelf->m_bEnteredBackground.store(true, std::memory_order_release);
+		break;
+
+	case SDL_EVENT_DID_ENTER_FOREGROUND:
+		pSelf->m_bBackgrounded.store(false, std::memory_order_release);
+		pSelf->m_bEnteredForeground.store(true, std::memory_order_release);
+		break;
+
+	default:
+		break;
+	}
+
+	/* A watch never consumes the event; SDL_PollEvent's normal queue still
+	   sees everything. */
+	return true;
+}
+
+bool SDLWindowContext::ConsumeEnteredBackground()
+{
+	return m_bEnteredBackground.exchange(false, std::memory_order_acq_rel);
+}
+
+bool SDLWindowContext::ConsumeEnteredForeground()
+{
+	return m_bEnteredForeground.exchange(false, std::memory_order_acq_rel);
 }
 
 void SDLWindowContext::GetMousePositionInPixels(float* pfX, float* pfY)

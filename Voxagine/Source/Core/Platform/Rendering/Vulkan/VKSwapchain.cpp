@@ -116,6 +116,7 @@ bool VKSwapchain::CreateSwapchain(uint32_t uiWidth, uint32_t uiHeight)
 	 * setting rather than a constant - and it now behaves like one. */
 	VkPresentModeKHR presentMode = VK_PRESENT_MODE_FIFO_KHR;
 
+#if !defined(VOXAGINE_MOBILE)
 	if (!m_bVSync)
 	{
 		for (VkPresentModeKHR mode : presentModes)
@@ -127,6 +128,14 @@ bool VKSwapchain::CreateSwapchain(uint32_t uiWidth, uint32_t uiHeight)
 			}
 		}
 	}
+#else
+	/* Mobile takes FIFO regardless of the setting. Mailbox means rendering
+	   frames the panel will never show, which on a phone is heat and battery
+	   spent on nothing - and a device that thermally throttles gets *worse*
+	   latency than the one it was chasing. The setting stays meaningful on
+	   desktop, where the cost is only a fan. */
+	(void)m_bVSync;
+#endif
 
 	if (caps.currentExtent.width != UINT32_MAX)
 	{
@@ -154,7 +163,41 @@ bool VKSwapchain::CreateSwapchain(uint32_t uiWidth, uint32_t uiHeight)
 	createInfo.imageExtent = m_Extent;
 	createInfo.imageArrayLayers = 1;
 	createInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-	createInfo.preTransform = caps.currentTransform;
+	/* preTransform is a promise, not a request: it tells the presentation
+	 * engine what rotation the app has *already applied* to its own rendering.
+	 *
+	 * This was `caps.currentTransform`, which is correct on desktop for the
+	 * boring reason that currentTransform is always IDENTITY there - so the
+	 * promise was true by accident. On Android it is not. A phone whose natural
+	 * orientation is portrait reports ROTATE_90 while running a landscape app,
+	 * and the engine renders upright regardless, so claiming ROTATE_90 hands
+	 * the compositor an upright image labelled as pre-rotated. The result is
+	 * the entire game displayed on its side: caught on the first Android run,
+	 * with the menu text reading bottom to top.
+	 *
+	 * Asking for IDENTITY makes the promise true again - the compositor then
+	 * does the rotation, which costs it a full-screen pass. The faster answer
+	 * on mobile is to keep currentTransform and rotate the projection to match,
+	 * which is why the extension exists at all; that is a real change to every
+	 * camera matrix and to the letterbox maths, and it should be done with a
+	 * device to measure it against. Correct first. */
+	createInfo.preTransform = (caps.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR)
+		? VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR
+		: caps.currentTransform;
+
+	m_bSuboptimalIsExpected = createInfo.preTransform != caps.currentTransform;
+
+	if (m_bSuboptimalIsExpected && !m_bReportedTransform)
+	{
+		/* Once, not every swapchain: this is the compositor doing work every
+		   frame that the app could have done for free inside its own
+		   projection. */
+		m_bReportedTransform = true;
+
+		printf("[vulkan] surface wants transform %u; presenting untransformed and "
+		       "letting the compositor rotate\n",
+		       static_cast<unsigned>(caps.currentTransform));
+	}
 	createInfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
 	createInfo.presentMode = presentMode;
 	createInfo.clipped = VK_TRUE;
@@ -405,6 +448,17 @@ bool VKSwapchain::ClearAndPresent(const float a_fColor[4])
 
 	m_uiFrameIndex = (m_uiFrameIndex + 1) % m_uiFramesInFlight;
 
+	/* OUT_OF_DATE always means rebuild. SUBOPTIMAL means "this still works but
+	   is not ideal", and when the swapchain was deliberately created with a
+	   preTransform the surface disagrees with, *every* present is suboptimal -
+	   so acting on it rebuilds the swapchain forever, at the frame rate. That
+	   is not hypothetical: it is what a Galaxy S23 does, and the emulator never
+	   reported suboptimal at all. A genuine resize still arrives as
+	   OUT_OF_DATE, and SDL's own resize event is what the engine actually
+	   listens to (SDLWindowContext::ConsumeResizeRequest). */
+	if (present == VK_SUBOPTIMAL_KHR && m_bSuboptimalIsExpected)
+		return true;
+
 	return present != VK_ERROR_OUT_OF_DATE_KHR && present != VK_SUBOPTIMAL_KHR;
 }
 
@@ -625,6 +679,17 @@ bool VKSwapchain::BlitAndPresent(VKResource* pSource, VkSemaphore waitTimeline, 
 	}
 
 	m_uiFrameIndex = (m_uiFrameIndex + 1) % m_uiFramesInFlight;
+
+	/* OUT_OF_DATE always means rebuild. SUBOPTIMAL means "this still works but
+	   is not ideal", and when the swapchain was deliberately created with a
+	   preTransform the surface disagrees with, *every* present is suboptimal -
+	   so acting on it rebuilds the swapchain forever, at the frame rate. That
+	   is not hypothetical: it is what a Galaxy S23 does, and the emulator never
+	   reported suboptimal at all. A genuine resize still arrives as
+	   OUT_OF_DATE, and SDL's own resize event is what the engine actually
+	   listens to (SDLWindowContext::ConsumeResizeRequest). */
+	if (present == VK_SUBOPTIMAL_KHR && m_bSuboptimalIsExpected)
+		return true;
 
 	return present != VK_ERROR_OUT_OF_DATE_KHR && present != VK_SUBOPTIMAL_KHR;
 }

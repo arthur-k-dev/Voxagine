@@ -16,8 +16,8 @@ RTTR_REGISTRATION
 
 	rttr::registration::enumeration<AudioAPI>("E_AudioAPI")
 	(
-		rttr::value("AA_FMOD", AudioAPI::AA_FMOD),
-		rttr::value("AA_OPENAL", AudioAPI::AA_OPENAL)
+		rttr::value("AA_MINIAUDIO", AudioAPI::AA_MINIAUDIO),
+		rttr::value("AA_NONE", AudioAPI::AA_NONE)
 	);
 
 	rttr::registration::enumeration<RenderingAPI>("E_RenderingAPI")

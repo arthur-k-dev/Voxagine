@@ -72,6 +72,11 @@ public:
 		uint32_t* Positions = nullptr;
 		uint32_t Size = 0;
 
+		/* Set the first time Occupy drops voxels for landing outside the world,
+		   so that warning fires once per renderer rather than once per stamp -
+		   a walking monster is re-stamped every time it moves. */
+		bool bWarnedClipped = false;
+
 		Vector3 WorldOffset = Vector3(0.f, 0.f, 0.f);
 
 		/* RenderContext::GetVoxelGeneration at the moment Positions was

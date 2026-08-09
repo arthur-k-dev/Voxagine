@@ -101,3 +101,8 @@ GamePadController * PlayerController::GetGamePadController()
 {
 	return m_pPlayerGamePad;
 }
+
+TouchController * PlayerController::GetTouchController()
+{
+	return m_pPlayerTouch;
+}

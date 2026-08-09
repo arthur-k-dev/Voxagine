@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Never built. This is a first draft written on a Linux machine with no
+    Xcode; see MOBILE_PORT_LOG.md phase 2 and 8. Everything here is
+    conventional for an SDL game, but "conventional" is not "verified".
+
+    Deliberately minimal on permissions - this game wants none. No camera, no
+    microphone, no location, no network, so there is no usage-description key
+    to justify to review.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleExecutable</key>
+    <string>$(EXECUTABLE_NAME)</string>
+    <key>CFBundleIdentifier</key>
+    <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>Bit Buster</string>
+    <key>CFBundleDisplayName</key>
+    <string>Bit Buster</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>${PROJECT_VERSION}</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+
+    <!-- Matches the Android manifest's sensorLandscape: a twin-stick layout
+         with two thumbs and four buttons does not fit a portrait phone. -->
+    <key>UISupportedInterfaceOrientations</key>
+    <array>
+        <string>UIInterfaceOrientationLandscapeLeft</string>
+        <string>UIInterfaceOrientationLandscapeRight</string>
+    </array>
+    <key>UISupportedInterfaceOrientations~ipad</key>
+    <array>
+        <string>UIInterfaceOrientationLandscapeLeft</string>
+        <string>UIInterfaceOrientationLandscapeRight</string>
+    </array>
+
+    <key>UIRequiresFullScreen</key>
+    <true/>
+    <key>UIStatusBarHidden</key>
+    <true/>
+    <key>UIViewControllerBasedStatusBarAppearance</key>
+    <false/>
+
+    <!-- MoltenVK needs Metal; there is no software fallback and the renderer
+         has no reduced path, so this is a hard requirement in the same sense
+         the Android manifest's vulkan.version entry is. -->
+    <key>UIRequiredDeviceCapabilities</key>
+    <array>
+        <string>arm64</string>
+        <string>metal</string>
+    </array>
+
+    <key>MinimumOSVersion</key>
+    <string>${VOXAGINE_IOS_MIN_VERSION}</string>
+    <key>LSRequiresIPhoneOS</key>
+    <true/>
+</dict>
+</plist>

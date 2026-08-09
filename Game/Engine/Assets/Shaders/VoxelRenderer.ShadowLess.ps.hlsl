@@ -20,7 +20,13 @@ Texture2D<float4> particlePass : register(t1);
    t3 rather than t4 because this variant has no shadow map in front of it. */
 Texture3D<float4> voxelPyramid : register(t3);
 
-VOXEL_BUFFER voxelModelData[] : register(t4);
+/* The unbounded `VOXEL_BUFFER voxelModelData[] : register(tN)` that used to be
+   here is gone. It was never read - it belonged to a GPU-baker path that was
+   abandoned - but it compiled into the live SPIR-V as an unbounded typed-buffer
+   descriptor array, which is exactly the shape mobile drivers and MoltenVK are
+   pickiest about, and it would have been bound to nothing. Deleting dead code
+   beats working around a descriptor-indexing limitation for it.
+   MOBILE_PORT_PLAN.md phase 4, step 3. */
 
 struct PS_in
 {

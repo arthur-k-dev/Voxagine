@@ -9,6 +9,7 @@
 #include "MouseController.h"
 #include "KeyboardController.h"
 #include "GamePadController.h"
+#include "TouchController.h"
 
 void InputBindingHandlerInterface::ProcessBindingMapAction(const InputBindingMapInformation & inputBindingMapInformation)
 {
@@ -136,4 +137,9 @@ void InputBindingHandlerInterface::GetInputControllers(std::vector<InputControll
 
 	if (GetGamePadController() != nullptr)
 		inputControllers.push_back(GetGamePadController());
+
+	/* Touch reports the same IK_GAMEPAD* keys a pad does, so it lands here as
+	   just another controller and every existing binding works untouched. */
+	if (GetTouchController() != nullptr)
+		inputControllers.push_back(GetTouchController());
 }

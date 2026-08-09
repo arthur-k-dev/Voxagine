@@ -15,8 +15,10 @@ enum RenderingAPI
 
 enum AudioAPI
 {
-	AA_FMOD,
-	AA_OPENAL
+	AA_MINIAUDIO,
+	/* Deliberately silent. Useful headless, and the fallback when the engine
+	   was built with VOXAGINE_AUDIO_BACKEND=NONE. */
+	AA_NONE
 };
 
 enum PlatformType
@@ -114,7 +116,7 @@ private:
 #endif
 	RenderingAPI m_RenderApiType = RA_VULKAN;
 
-	AudioAPI m_AudioApiType = AA_FMOD;
+	AudioAPI m_AudioApiType = AA_MINIAUDIO;
 
 	double m_dFixedTimeStep = 1.0 / 60.0;
 	double m_dFrameLimit = 1.0 / 200.0;
@@ -127,7 +129,13 @@ private:
 	bool m_bShadowsEnabled = true;
 	float m_fResolutionScale = 1.f;
 
-#ifdef _DEBUG
+	/* VOXAGINE_PROFILE_DEFAULT is for builds that are optimised but exist to be
+	   measured - the Android `benchmark` variant, which is a release build with
+	   a debug signature. VOXAGINE_PROFILE=1 still overrides at runtime on
+	   desktop, but there is no practical way to set an environment variable for
+	   a non-debuggable Android app, and a measurement build whose profiler is
+	   off is not a measurement build. */
+#if defined(_DEBUG) || defined(VOXAGINE_PROFILE_DEFAULT)
 	bool m_bGPUProfilingEnabled = true;
 #else
 	bool m_bGPUProfilingEnabled = false;

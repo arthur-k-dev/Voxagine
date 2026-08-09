@@ -1,0 +1,5 @@
+// SDL's Java sources are added from the checkout fetch-sdl.sh creates; see
+// app/build.gradle. They are not a Gradle module of their own because SDL's
+// android-project ships them as a plain source directory.
+rootProject.name = "BitBuster"
+include ':app'

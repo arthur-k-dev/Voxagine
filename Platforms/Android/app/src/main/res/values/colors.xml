@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Placeholder branding. Phase 8 of MOBILE_PORT_PLAN.md is where real
+         store art gets decided, with the user - this exists so the manifest
+         resolves and the launcher has something to draw. -->
+    <color name="ic_launcher_background">#1B1F2A</color>
+</resources>

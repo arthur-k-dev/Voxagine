@@ -17,7 +17,9 @@
 #include "Core/ECS/World.h"
 #include "ECS/Entities/Camera.h"
 
+#include <chrono>
 #include <iostream>
+#include <thread>
 #include "Core/GameTimer.h"
 #include "ECS/WorldManager.h"
 #include "ECS/Systems/Physics/PhysicsSystem.h"
@@ -58,6 +60,31 @@ void Application::Run()
 	/* The lock is a game presentation choice; the editor wants the whole
 	   window. Play mode still uses the camera's own aspect ratio. */
 	m_Settings.SetLockedAspectRatio(0.f);
+#elif defined(VOXAGINE_MOBILE)
+	/* Same on a phone, for a different reason. The lock letterboxes the frame
+	   to 16:9 whatever the display is, and a modern phone is nearer 20:9 - so
+	   a locked game would run with black bars down a fifth of the screen while
+	   the device it is on has no bars anywhere else. Rendering at the device's
+	   own ratio widens the view instead, which is the right trade for a
+	   top-down game: it shows more of the arena rather than stretching it.
+
+	   The screen is also the only place a phone has to put anything, so
+	   spending a fifth of it on nothing is worse here than on a monitor. */
+	m_Settings.SetLockedAspectRatio(0.f);
+
+	/* Half resolution by default, and this is the single biggest performance
+	   lever the engine has on a phone.
+	 *
+	 * Measured on a Galaxy S23 (Adreno 740) at native 2340x1080, in an arena:
+	 * the Voxel pass alone is 108.8 ms of a ~138 ms frame - 79% of it - and it
+	 * is fragment-bound, so it scales with pixel count almost linearly. Sun
+	 * Shadow (a fixed 1024^2) and the full-resolution post and UI passes do
+	 * not scale, which is why this is worth about 2.5x rather than 4x.
+	 *
+	 * Set from code rather than from Settings.vgs on purpose: that file is
+	 * shared with the desktop build, and a half-resolution default is very
+	 * much not wanted on a 4070. */
+	m_Settings.SetResolutionScale(0.5f);
 #endif
 
 	m_JobManager.Initialize();
@@ -88,6 +115,40 @@ void Application::Run()
 			}
 
 			m_Platform.GetWindowContext()->Poll();
+
+			/* Android does not merely stop giving the app CPU time in the
+			   background - it destroys the window surface the swapchain was
+			   built from, and it may kill the process outright if it keeps
+			   rendering and mixing audio anyway. Nothing here fires on
+			   desktop; WindowContext's default ConsumeEntered* always return
+			   false there. See WindowContext::IsBackgrounded and
+			   VKRenderContext::SuspendForBackground for what each side is
+			   actually protecting against. */
+			if (m_Platform.GetWindowContext()->ConsumeEnteredBackground())
+			{
+				m_Platform.GetAudioContext()->PauseAll();
+				m_Platform.GetRenderContext()->SuspendForBackground();
+			}
+
+			if (m_Platform.GetWindowContext()->ConsumeEnteredForeground())
+			{
+				m_Platform.GetRenderContext()->ResumeFromBackground();
+				m_Platform.GetAudioContext()->ResumeAll();
+			}
+
+			if (m_Platform.GetWindowContext()->IsBackgrounded())
+			{
+				/* Nothing below this point has anything to draw to or, for
+				   most of the frame, anything useful to simulate against - the
+				   render context has no surface until ResumeFromBackground
+				   runs. Sleeping here is what stops the main loop spinning
+				   Poll() as fast as the CPU allows while there is nothing to
+				   poll for but the foreground transition; GameTimer::Update
+				   already gates *this* lambda by the frame limit, but with no
+				   limit set (this game's default) that gate does nothing. */
+				std::this_thread::sleep_for(std::chrono::milliseconds(100));
+				return;
+			}
 
 			m_Platform.GetInputContext()->Update();
 			m_Platform.GetImguiSystem().Update();

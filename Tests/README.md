@@ -6,7 +6,7 @@ whole voxel write path is reachable without any of them.
 
 ```bash
 cmake --preset editor-release -DVOXAGINE_BUILD_TESTS=ON && cmake --build --preset editor-release
-ctest --test-dir Build/editor-release --output-on-failure
+ctest --test-dir Build/Linux/Editor/Release --output-on-failure
 ```
 
 | mode | what it is | cost (Release / Debug) |
@@ -45,7 +45,7 @@ property they assert.
 
 Everything self-registers from a static initialiser, so **adding a case is
 adding a file** — no runner edit, no header to update, one line in
-`cmake/TestSources.cmake`. That cheapness is the design goal: every defect the
+`CMake/TestSources.cmake`. That cheapness is the design goal: every defect the
 first play session found was a case that did not exist, and the cost of adding
 one is what decides whether the next one gets written.
 

@@ -5,7 +5,7 @@
 #include "Core/Platform/Rendering/Vulkan/VKDescriptorLayout.h"
 #include "Core/Platform/Rendering/Vulkan/VKPassBindings.h"
 
-#include <vulkan/vulkan.h>
+#include <Core/Platform/Rendering/Vulkan/VulkanAPI.h>
 
 #include <cstdint>
 

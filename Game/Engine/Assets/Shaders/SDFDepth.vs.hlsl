@@ -42,7 +42,7 @@ struct SDF
 STRUCTURED_BUFFER(SDF) SDFs : register(t0);
 
 VOXEL_RW_BUFFER voxelWorldData : register(u0);
-VOXEL_BUFFER voxelModelData[] : register(t1) {};
+VOXEL_BUFFER voxelModelData[] : register(t1);
 
 struct VS_out
 {
@@ -63,7 +63,7 @@ VS_out main(uint IDvert : VERT_ID, uint IDinst : INST_ID)
     //Get cube model data
     //Store world-space coordinates in the vertex
 	OUT.WorldPosition = vertices[indices[IDvert]] * tSDF.Extents + tSDF.Position;
-	OUT.WorldPosition = clamp(OUT.WorldPosition.xyz, float3(0.0, 0.0, 0.0), float3(worldSize.xyz)) + camOffset;
+	OUT.WorldPosition = clamp(OUT.WorldPosition.xyz, float3(0.0, 0.0, 0.0), float3(worldSize.xyz)) + camOffset.xyz;
 
     //Multiply the position with the MVP matrix
     OUT.NormScreenPosition = mul(mvp, float4(OUT.WorldPosition, 1.0));

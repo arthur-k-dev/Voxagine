@@ -130,8 +130,7 @@ void ChunkSystem::FixedTick(const GameTimer& fixedTimer)
 
 	Vector3 worldOffset = CalculateWorldOffset(cameraPosition);
 	Vector3 currWorldOffset = m_pWorld->GetPhysics()->GetVoxelGrid()->GetWorldOffset();
-	if (currWorldOffset != worldOffset && 
-		(m_ClampedCameraPosition.x >= 0 && m_ClampedCameraPosition.y >= 0) && 
+	if (currWorldOffset != worldOffset &&
 		(m_ClampedCameraPosition.x < m_uiNumChunkX && m_ClampedCameraPosition.y < m_uiNumChunkY))
 	{
 		IVector2 gridOffset(worldOffset.x / (float)m_ChunkSize.x, worldOffset.z / (float)m_ChunkSize.y);
@@ -238,12 +237,12 @@ void ChunkSystem::UpdateChunks(IVector2 gridOffset, ChunkUpdateGroup& group, boo
 	{
 		for (uint32_t y = 0; y < m_uiNumChunkY; ++y)
 		{
-			if (x < 0 || x >= m_uiNumChunkX || y < 0 || y >= m_uiNumChunkY) continue;
+			if (x >= m_uiNumChunkX || y >= m_uiNumChunkY) continue;
 
 			Chunk* pChunk = m_Chunks[x + y * m_uiNumChunkX];
 			if (!pChunk) continue;
 
-			if (x >= gridOffset.x && x < (gridOffset.x + 3) && y >= gridOffset.y && y < (gridOffset.y + 3))
+			if (x >= static_cast<uint32_t>(gridOffset.x) && x < static_cast<uint32_t>(gridOffset.x + 3) && y >= static_cast<uint32_t>(gridOffset.y) && y < static_cast<uint32_t>(gridOffset.y + 3))
 			{
 				UVector2 gridTarget(x - gridOffset.x, y - gridOffset.y);
 				if (!pChunk->IsTargetLoaded())

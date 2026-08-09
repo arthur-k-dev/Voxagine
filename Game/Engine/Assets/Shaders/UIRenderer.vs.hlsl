@@ -98,7 +98,7 @@ VS_out main(uint IDvert : VERT_ID, uint IDinst : INST_ID)
 		OUT.Position = mul(mvp, mul(sprite.Model, float4(worldCoords, 1.0)));
 	}
 	
-	OUT.UVs = (vertexPos + float2(1.0, 1.0)) * 0.5; // Convert from -1,-1 - 1,1 To 0,0 - 1,1
+	OUT.UVs = (vertexPos.xy + float2(1.0, 1.0)) * 0.5; // Convert from -1,-1 - 1,1 To 0,0 - 1,1
 	OUT.UVs.y = 1.0 - OUT.UVs.y; // Invert Y axis
 	
 	OUT.UVs *= sprite.TextureRepeat; // Repeat sprite

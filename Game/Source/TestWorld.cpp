@@ -53,10 +53,10 @@ void TestWorld::Initialize()
 	SpawnEntity<BoxPrefab>(Vector3(130.0f, 1.0f, 120.0f), Vector3(0.f), Vector3(1.f));
 
 	// Keep in mind Rotation Y is in the X!
-	auto key1 = SpawnEntity<KeyPrefab>(Vector3(50.0f, 12.0f, 80.0f), Vector3(0.0f, 270.0f, 0.0f), Vector3(1.f));
-	auto key2 = SpawnEntity<KeyPrefab>(Vector3(130.0f, 12.0f, 80.0f), Vector3(0.0f, 270.0f, 0.0f), Vector3(1.f));
-	auto key3 = SpawnEntity<KeyPrefab>(Vector3(50.0f, 12.0f, 120.0f), Vector3(0.0f, 270.0f, 0.0f), Vector3(1.f));
-	auto key4 = SpawnEntity<KeyPrefab>(Vector3(130.0f, 12.0f, 120.0f), Vector3(0.0f, 270.0f, 0.0f), Vector3(1.f));
+	SpawnEntity<KeyPrefab>(Vector3(50.0f, 12.0f, 80.0f), Vector3(0.0f, 270.0f, 0.0f), Vector3(1.f));
+	SpawnEntity<KeyPrefab>(Vector3(130.0f, 12.0f, 80.0f), Vector3(0.0f, 270.0f, 0.0f), Vector3(1.f));
+	SpawnEntity<KeyPrefab>(Vector3(50.0f, 12.0f, 120.0f), Vector3(0.0f, 270.0f, 0.0f), Vector3(1.f));
+	SpawnEntity<KeyPrefab>(Vector3(130.0f, 12.0f, 120.0f), Vector3(0.0f, 270.0f, 0.0f), Vector3(1.f));
 
 	/* Wave System settings - Spawner is now a component and the entity is basically a trigger box */
 	Entity* pWaveNumberOne = SpawnEntity<Entity>(Vector3(120.0f, 1.0f, 200.0f), Vector3(), Vector3(1.f));

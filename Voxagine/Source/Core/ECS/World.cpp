@@ -88,7 +88,7 @@ void World::Initialize()
 	Entity entity(nullptr); // Do not remove! Prevents compiler optimization.
 	volatile pathfinding::ChunkGrid chunkGrid(this); // Do not remove! Prevents compiler optimization.
 	volatile pathfinding::ContinuumCrowdsGroup contiuumCrowdsGroup(this); // Do not remove! Prevents compiler optimization.
-	volatile pathfinding::PathfinderGroup* pathfinderGroup = &contiuumCrowdsGroup; // Do not remove! Prevents compiler optimization.
+	[[maybe_unused]] volatile pathfinding::PathfinderGroup* pathfinderGroup = &contiuumCrowdsGroup; // Do not remove! Prevents compiler optimization.
 	volatile pathfinding::Pathfinder pathfinder(&entity); // Do not remove! Prevents compiler optimization.
 	volatile pathfinding::PathfindingObstacle obstacle(&entity); // Do not remove! Prevents compiler optimization.
 }

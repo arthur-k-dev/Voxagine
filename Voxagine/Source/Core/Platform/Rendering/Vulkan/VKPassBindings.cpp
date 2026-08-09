@@ -158,9 +158,10 @@ namespace
 			if (pSampler == nullptr)
 				continue;
 
-			out.push_back(MakeBinding(VKPassBinding::E_SAMPLER, counters.m_uiSampler++,
+			uint32_t samplerIndex = counters.m_uiSampler++;
+			out.push_back(MakeBinding(VKPassBinding::E_SAMPLER, samplerIndex,
 			                          stages, pSampler,
-			                          "Sampler " + std::to_string(counters.m_uiSampler - 1), 1, VKPassBinding::E_SOURCE_SAMPLER));
+			                          "Sampler " + std::to_string(samplerIndex), 1, VKPassBinding::E_SOURCE_SAMPLER));
 		}
 	}
 }

@@ -26,7 +26,7 @@ namespace pathfinding
 	void ChunkBuilderJob::Finish()
 	{
 		PhysicsSystem* physicsSystem = m_grid.GetWorld()->GetPhysics();
-		VoxelGrid* voxelGrid = physicsSystem->GetVoxelGrid();
+		[[maybe_unused]] VoxelGrid* voxelGrid = physicsSystem->GetVoxelGrid();
 		assert(voxelGrid);
 
 		// Destroy old chunk and place new chunk

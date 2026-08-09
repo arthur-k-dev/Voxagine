@@ -49,16 +49,16 @@ namespace pathfinding
 		m_groupToDraw(nullptr),
 		m_currentGridJob(REBUILD_GRID),
 		m_gridCenterEntity(nullptr),
-		m_gridCenter(0),
+		m_bGenerateVerticalNodes(true),
+		m_iGridCoarseness(2),
 		m_fDensityExponent(3.f),
 		m_fMaxAgentsPerNode(3),
-		m_fMaxDensity(5.f),
 		m_fMinDensity(0.1f),
+		m_fMaxDensity(5.f),
 		m_iGridLocks(0),
-		m_chunksNeedingConnecting(),
 		m_rebuildGrid(false),
-		m_bGenerateVerticalNodes(true),
-		m_iGridCoarseness(2)
+		m_chunksNeedingConnecting(),
+		m_gridCenter(0)
 	{
 		SetPersistent(true);
 	}
@@ -279,7 +279,7 @@ namespace pathfinding
 	Chunk * ChunkGrid::getChunk(const IVector2 & gridPos)
 	{
 		int chunkIdx = getChunkIdx(gridPos);
-		if (chunkIdx < 0 || chunkIdx >= m_grid.size())
+		if (chunkIdx < 0 || chunkIdx >= static_cast<int>(m_grid.size()))
 			return nullptr;
 
 		Chunk* result = &m_grid[chunkIdx];
@@ -339,7 +339,7 @@ namespace pathfinding
 		if (!pJobQueue) return;
 
 		PhysicsSystem* physicsSystem = GetWorld()->GetPhysics();
-		VoxelGrid* voxelGrid = physicsSystem->GetVoxelGrid();
+		[[maybe_unused]] VoxelGrid* voxelGrid = physicsSystem->GetVoxelGrid();
 		assert(voxelGrid);
 
 		m_iGridLocks++;
@@ -353,9 +353,9 @@ namespace pathfinding
 			jobs.resize(g_GRIDSIZE * g_GRIDSIZE);
 
 			// Build grid on seprate thread
-			for (int x = 0; x < g_GRIDSIZE; x++)
+			for (unsigned int x = 0; x < g_GRIDSIZE; x++)
 			{
-				for (int z = 0; z < g_GRIDSIZE; z++)
+				for (unsigned int z = 0; z < g_GRIDSIZE; z++)
 				{
 					IVector3 worldPos = IVector3(gridCorner.x + x, 0, gridCorner.y + z) * (int)(Chunk::g_CHUNKSIZE * Chunk::g_NODESIZE);
 					jobs[x + z * g_GRIDSIZE] = new ChunkBuilderJob(*this, worldPos, IVector2(x, z));

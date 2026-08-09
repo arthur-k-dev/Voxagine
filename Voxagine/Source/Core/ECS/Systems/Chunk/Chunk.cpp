@@ -168,11 +168,11 @@ void Chunk::EncodeVoxels()
 	const uint32_t compressedVoxelSize = sizeof(uint32_t) + sizeof(uint16_t) + sizeof(uint8_t);
 	uint8_t repeatCount = 0;
 	uint32_t byteOffset = 0;
-	for (int i = 0; i < m_VoxelData.size(); ++i)
+	for (size_t i = 0; i < m_VoxelData.size(); ++i)
 	{
 		repeatCount = 0;
 		const uint32_t uiColor = m_VoxelData[i].Color;
-		uint16_t uiSlot = m_OwnerVolume.GetSlot(i);
+		uint16_t uiSlot = m_OwnerVolume.GetSlot(static_cast<uint32_t>(i));
 
 		if (uiSlot == VoxelOwnerVolume::k_uiParticleSlot)
 			uiSlot = VoxelOwnerVolume::k_uiNoOwnerSlot;
@@ -228,7 +228,7 @@ void Chunk::DecodeVoxels()
 		uint8_t repeatCount = m_pEncodedVoxelData[byteOffset];
 		byteOffset += sizeof(uint8_t);
 
-		for (uint32_t i = 0; i < repeatCount + 1; ++i)
+		for (uint32_t i = 0; i < static_cast<uint32_t>(repeatCount) + 1; ++i)
 		{
 			m_VoxelData[voxelsWritten].Color = color;
 
@@ -448,8 +448,8 @@ void Chunk::FindEntitiesInChunk(const std::vector<Entity*>& allEntities, std::ve
 						int neighborChunkX = chunkXPos + x;
 						int neighborChunkY = chunkYPos + y;
 
-						if (neighborChunkX < 0 || neighborChunkX >= numX) continue;
-						if (neighborChunkY < 0 || neighborChunkY >= numY) continue;
+						if (neighborChunkX < 0 || neighborChunkX >= static_cast<int>(numX)) continue;
+						if (neighborChunkY < 0 || neighborChunkY >= static_cast<int>(numY)) continue;
 
 						Box chunkBox;
 						chunkBox.Max = Vector3((neighborChunkX + 1) * m_ChunkSize.x, voxelDims.y, (neighborChunkY + 1) * m_ChunkSize.z);
@@ -458,7 +458,7 @@ void Chunk::FindEntitiesInChunk(const std::vector<Entity*>& allEntities, std::ve
 						Chunk* pNeighborChunk = chunks.at((uint32_t)(neighborChunkX + neighborChunkY * numX));
 						if (bounds.Intersects(chunkBox))
 						{
-							if (neighborChunkX == m_ChunkIndex.x && neighborChunkY == m_ChunkIndex.y)
+							if (static_cast<uint32_t>(neighborChunkX) == m_ChunkIndex.x && static_cast<uint32_t>(neighborChunkY) == m_ChunkIndex.y)
 								isInside = true;
 							//Push deletion responsibility to another chunk if its loaded and not unloading
 							else if (pNeighborChunk->IsLoaded() && !pNeighborChunk->IsUnloading())
@@ -486,7 +486,7 @@ void Chunk::SaveAndDeleteEntities(std::vector<std::pair<Entity*, bool>>& entitie
 	m_RootEntities.clear();
 	m_RootEntities.resize(entities.size());
 
-	for (int i = 0; i < entities.size(); ++i)
+	for (size_t i = 0; i < entities.size(); ++i)
 	{
 		std::pair<Entity*, bool>& entityPair = entities[i];
 

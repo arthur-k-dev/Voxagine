@@ -13,7 +13,7 @@ enum RenderAlignment
 	RA_BOTTOMRIGHT
 };
 
-static Vector2 GetNormRenderAlignment(RenderAlignment alignment)
+inline Vector2 GetNormRenderAlignment(RenderAlignment alignment)
 {
 	switch (alignment)
 	{

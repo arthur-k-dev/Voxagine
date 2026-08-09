@@ -167,7 +167,7 @@ void LevelSelectCanvas::SetFocusRight()
 	Canvas::SetFocusRight();
 
 	m_iCurrentlySelectedWorld++;
-	if (m_bLoopWorlds && m_iCurrentlySelectedWorld >= m_LevelSelectWorlds.size())
+	if (m_bLoopWorlds && m_iCurrentlySelectedWorld >= static_cast<int>(m_LevelSelectWorlds.size()))
 		m_iCurrentlySelectedWorld = 0;
 
 	UpdateSelectedWorld();

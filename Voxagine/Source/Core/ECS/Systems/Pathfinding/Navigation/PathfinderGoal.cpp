@@ -17,9 +17,9 @@ namespace pathfinding
 {
 	PathfinderGoal::PathfinderGoal(Entity * pOwner) :
 		Component(pOwner),
-		m_fPotential(0),
 		m_group(nullptr),
-		m_bProjectPosition(true)
+		m_bProjectPosition(true),
+		m_fPotential(0)
 	{}
 
 	PathfinderGoal::~PathfinderGoal()

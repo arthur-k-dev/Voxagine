@@ -7,8 +7,8 @@
 
 StackAlloc::StackAlloc() :
 	m_pBaseAddr(nullptr),
-	m_bufferSize(0),
-	m_pFront(nullptr)
+	m_pFront(nullptr),
+	m_bufferSize(0)
 {
 
 }

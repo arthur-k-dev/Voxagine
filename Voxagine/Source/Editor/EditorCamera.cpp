@@ -107,12 +107,6 @@ void EditorCamera::PostFixedTick(const GameTimer& timer)
 	if (m_pInputContext->GetActiveBindingMap()->Name == EDITOR_INPUT_LAYER_NAME)
 	{
 		float deltaTime = static_cast<float>(timer.GetElapsedSeconds());
-		float speedMultiplier = 1.0f;
-
-		if (m_pInputContext->IsKeyHeld(IK_LEFTSHIFT))
-		{
-			speedMultiplier = 2.0f;
-		}
 
 		/* Get Input Axis values*/
 		Vector3 CamerTranslation = Vector3(0.f);

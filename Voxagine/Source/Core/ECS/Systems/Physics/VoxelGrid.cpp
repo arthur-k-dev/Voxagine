@@ -154,7 +154,7 @@ bool VoxelGrid::GetChunk(Voxel** chunk, Vector3 chunkOrigin, Vector3 dimensions,
 		for (unsigned z = 0; z < dimZ; ++z)
 		{
 			/* Continue if Z row lays out of bounds */
-			if (originZ + z < 0 || originZ + z >= m_uiDimensionZ)
+			if (originZ + z >= m_uiDimensionZ)
 				continue;
 
 			for (unsigned y = 0; y < dimY; ++y)
@@ -165,7 +165,7 @@ bool VoxelGrid::GetChunk(Voxel** chunk, Vector3 chunkOrigin, Vector3 dimensions,
 					startX = originX;
 
 				/* Continue if Y row lays out of bounds */
-				if (originY + y < 0 || originY + y >= m_uiDimensionY)
+				if (originY + y >= m_uiDimensionY)
 					continue;
 
 				uint32_t chunkXOffset = startX - (chunkArrPos % m_uiNumChunkX * m_chunkSize.x);
@@ -181,7 +181,7 @@ bool VoxelGrid::GetChunk(Voxel** chunk, Vector3 chunkOrigin, Vector3 dimensions,
 				for (unsigned x = 0; x < dimX; ++x)
 				{
 					/* Continue until valid X is found */
-					if (originX + x < 0 || originX + x >= m_uiDimensionX)
+					if (originX + x >= m_uiDimensionX)
 						continue;
 
 					uint32_t chunkPos = x + y * dimX + dimX * dimY * z;
@@ -202,18 +202,13 @@ bool VoxelGrid::GetChunk(Voxel** chunk, Vector3 chunkOrigin, Vector3 dimensions,
 		for (unsigned z = 0; z < dimZ; ++z)
 		{
 			/* Continue if Z row lays out of bounds */
-			if (originZ + z < 0 || originZ + z >= m_uiDimensionZ)
+			if (originZ + z >= m_uiDimensionZ)
 				continue;
 
 			for (unsigned y = 0; y < dimY; ++y)
 			{
-				/* Set a minimum valid value for X if out of bounds */
-				int startX = 0;
-				if (originX > 0)
-					startX = originX;
-
 				/* Continue if Y row lays out of bounds */
-				if (originY + y < 0 || originY + y >= m_uiDimensionY)
+				if (originY + y >= m_uiDimensionY)
 					continue;
 
 				Voxel* pVoxel = nullptr;
@@ -221,10 +216,9 @@ bool VoxelGrid::GetChunk(Voxel** chunk, Vector3 chunkOrigin, Vector3 dimensions,
 				for (unsigned x = 0; x < dimX; ++x)
 				{
 					/* Continue until valid X is found */
-					if (originX + x < 0 || originX + x >= m_uiDimensionX)
+					if (originX + x >= m_uiDimensionX)
 						continue;
 
-					uint32_t gridPos = (originX + x) + (originY + y) * m_uiDimensionX + m_uiDimensionX * m_uiDimensionY * (originZ + z);
 					uint32_t chunkPos = x + y * dimX + dimX * dimY * z;
 
 					uint32_t chunkArrPos = ftoi_sse1((float)(originX + x) * m_InvChunkSize.x) + ftoi_sse1((float)(originZ + z) * m_InvChunkSize.z) * m_uiNumChunkX;

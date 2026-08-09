@@ -88,7 +88,7 @@ void Camera::SetRecalculated(bool bIsUpdated)
 
 void Camera::SetOrthographic(bool bIsOrthographic)
 {
-	if (bIsOrthographic == bIsOrthographic)
+	if (m_bIsOrthographic == bIsOrthographic)
 		return;
 
 	m_bIsOrthographic = bIsOrthographic;

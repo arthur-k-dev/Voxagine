@@ -50,7 +50,7 @@ void InputContextNew::Initialize(WindowContext* pWindowContext, bool bInitDefaul
 	if (bInitDefaultMap)
 		m_PlayerControllers[0].CreateBindingMap(GetDefaultMapName(), true);
 
-	for (unsigned playerControllerIndex = 1; playerControllerIndex != m_iMaxPlayerCount; ++playerControllerIndex)
+	for (int playerControllerIndex = 1; playerControllerIndex != m_iMaxPlayerCount; ++playerControllerIndex)
 	{
 		m_PlayerControllers[playerControllerIndex].SetPlayerMouse(nullptr);
 		m_PlayerControllers[playerControllerIndex].SetPlayerKeyboard(nullptr);
@@ -487,6 +487,8 @@ InputBindingAxisValue InputContextNew::GetAxisValue(const std::string & bindingM
 
 		return (pCurrentInputBindingAxis != nullptr) ? ProcessBindingAxis(*pCurrentInputBindingAxis) : InputBindingAxisValue({ false, 0.f });
 	}
+
+	return InputBindingAxisValue({ false, 0.f });
 }
 
 bool InputContextNew::CreateBindingMap(const std::string & bindingMapName, bool bSetActiveMap, BindingMapType inputBindingMapType)

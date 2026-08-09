@@ -274,8 +274,8 @@ void RenderSystem::PostTick(float fDeltaTime)
 		Vector2 v2Alignment = GetNormRenderAlignment(pTextRenderer->GetAlignment());
 		Vector2 v2ScreenAlignment = GetNormRenderAlignment(pTextRenderer->GetScreenAlignment());
 
-		ImVec2 alignment = *(ImVec2*)&v2Alignment;
-		ImVec2 screenAlignment = *(ImVec2*)&v2ScreenAlignment;
+		ImVec2 alignment = ImVec2(v2Alignment.x, v2Alignment.y);
+		ImVec2 screenAlignment = ImVec2(v2ScreenAlignment.x, v2ScreenAlignment.y);
 
 		ImGui::SetNextWindowBgAlpha(0.f);
 		

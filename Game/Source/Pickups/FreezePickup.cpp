@@ -52,7 +52,7 @@ void FreezePickup::OnFreezePicked(Collider* pCollider)
 		{
 			for (auto& pEntity : entities)
 			{
-				if (auto enemy = dynamic_cast<Monster*>(pEntity))
+				if (dynamic_cast<Monster*>(pEntity))
 				{
 					//enemy->SetFreeze(true);
 				}

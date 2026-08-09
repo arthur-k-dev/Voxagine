@@ -45,10 +45,10 @@ RTTR_REGISTRATION
 
 UISlider::UISlider(Entity * pOwner)
 	: UIComponent(pOwner)
+	, m_StepInterval(.030f) // 30 ms
 	, m_bProgressBar(false)
 	, m_Value(0.f)
 	, m_StepSize(0.005f)
-	, m_StepInterval(.030f) // 30 ms
 	, m_Orientation(EOrientation::HORIZONTAL)
 	, m_bInverted(false)
 {

@@ -273,6 +273,7 @@ void Bullet::FixedTick(const GameTimer& gameTimer)
 						break;
 					}
 				}
+				[[fallthrough]];
 
 			case WeaponManager::Type::MT_STRAIGHT:
 			default:

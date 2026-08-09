@@ -62,8 +62,6 @@ void GameStateManager::Tick(GameManager* pGameManager, float)
 			if (m_pSpriteRenderer)
 				m_pSpriteRenderer->SetEnabled(true);
 
-			const auto endPos = pGameManager->GetEndPositions()[0] ? pGameManager->GetEndPositions()[0]->GetTransform()->GetPosition() : Vector3(0.0f);
-
 			// DoorPrefab* pDoor = pGameManager->GetWorld()->SpawnEntity<DoorPrefab>(endPos, Vector3(0.f), Vector3(1.f));
 			// pDoor->SetWorld("Content/valencio_testworld.wld");
 

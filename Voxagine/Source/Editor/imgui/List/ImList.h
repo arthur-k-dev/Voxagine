@@ -98,7 +98,7 @@ public:
 	 */
 	void SetCurrentValue(uint32_t uiArgument)
 	{
-		if (!Empty() && uiArgument >= 0)
+		if (!Empty())
 		{
 			for (ListElement<ListTypeArgs>& ListValue : m_vListValues)
 			{

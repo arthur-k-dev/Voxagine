@@ -25,8 +25,8 @@
 #include "External/optick/optick.h"
 
 Application::Application() :
-	m_WorldManager(this),
 	m_Platform(this),
+	m_WorldManager(this),
 	m_ResourceManager(this),
 	m_Serializer(m_Settings, m_LoggingSystem)
 {

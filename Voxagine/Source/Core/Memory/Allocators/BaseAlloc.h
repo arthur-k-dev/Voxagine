@@ -141,7 +141,7 @@ template<typename T, typename U> inline T* alignPtrTo(const T* ptr, const U alig
 
 inline size_t alignAdjustment(const uint8_t* address, size_t alignment)
 {
-	size_t adjustment = alignment - (reinterpret_cast<const uintptr_t>(address) & static_cast<uintptr_t>(alignment - 1));
+	size_t adjustment = alignment - (reinterpret_cast<uintptr_t>(address) & static_cast<uintptr_t>(alignment - 1));
 
 
 	if (adjustment == alignment) 

@@ -1,6 +1,6 @@
 #include "Defines.hlsl"
 
-Texture2D<float4> Textures[] : register(t1) {};
+Texture2D<float4> Textures[] : register(t1);
 
 SamplerState s0 : register(s0);
 

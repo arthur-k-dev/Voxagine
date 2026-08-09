@@ -6,12 +6,16 @@
 #define GLM_FORCE_LEFT_HANDED
 #define GLM_ENABLE_EXPERIMENTAL
 
-#pragma warning(push, 0)        
+#ifdef _MSC_VER
+#pragma warning(push, 0)
+#endif
 #include <External/glm/glm.hpp>
 #include <External/glm/gtx/transform.hpp>
 #include <External/glm/gtx/norm.hpp>
 #include <External/glm/gtc/random.hpp>
+#ifdef _MSC_VER
 #pragma warning(pop)
+#endif
 
 typedef glm::vec4 Vector4;
 typedef glm::vec3 Vector3;

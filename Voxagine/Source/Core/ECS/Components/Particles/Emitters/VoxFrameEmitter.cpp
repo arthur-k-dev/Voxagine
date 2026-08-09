@@ -15,7 +15,6 @@ void VoxFrameEmitter::Emit(float fDeltatime, ParticlePool& particleData, uint32_
 		const VoxelGrid* pGrid = m_pSystem->GetWorld()->GetVoxelGrid();
 		uint32_t* bakePositionData = m_pRenderer->m_BakeData.Positions;
 		uint32_t arrSize = m_pRenderer->m_BakeData.Size;
-		Vector3 dir = m_pSystem->GetOwner()->GetTransform()->GetForward();
 
 		for (uint32_t i = uiStartId; i < uiEndId; ++i)
 		{

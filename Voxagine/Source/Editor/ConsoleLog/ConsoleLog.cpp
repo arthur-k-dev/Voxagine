@@ -17,13 +17,13 @@
 ConsoleLog::ConsoleLog()
 	: m_pLog(nullptr)
 	, m_LogLevelLookUp()
+	, m_bLogEventSearch(false)
+	, m_TargetLogEventFilter(&m_LogEventFilter)
 	, m_bScrollToBottum(true)
 	, m_ulDisplayLineCount(10)
 	, m_fOutputLineFocus(0.f)
 	, m_uiWindowWidth(700)
 	, m_uiWindowHeight(205)
-	, m_bLogEventSearch(false)
-	, m_TargetLogEventFilter(&m_LogEventFilter)
 {
 }
 

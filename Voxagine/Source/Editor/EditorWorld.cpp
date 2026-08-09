@@ -16,8 +16,8 @@
 
 EditorWorld::EditorWorld(Application* pApplication, Editor* pEditor, UVector2 chunkWorldSize /*= UVector2(1, 1) */)
 	: World(pApplication)
-	, m_pEditor(pEditor)
 	, m_CommandManager()
+	, m_pEditor(pEditor)
 	, m_ChunkWorldSize(chunkWorldSize)
 {
 }

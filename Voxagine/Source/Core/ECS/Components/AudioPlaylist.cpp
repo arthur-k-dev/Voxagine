@@ -70,7 +70,7 @@ void AudioPlaylist::PlayNext()
 
 void AudioPlaylist::AddAudioFile(SoundReference* audioFile, unsigned int audioFileIndex)
 {
-	if (audioFileIndex >= 0 && audioFileIndex <= m_SoundReferences.size())
+	if (audioFileIndex <= m_SoundReferences.size())
 	{
 		if (audioFileIndex >= m_SoundReferences.size())
 		{
@@ -99,7 +99,7 @@ void AudioPlaylist::AddAudioFile(SoundReference* audioFile, unsigned int audioFi
 
 void AudioPlaylist::RemoveAudioFile(unsigned int audioFileIndex)
 {
-	if (audioFileIndex >= 0 && audioFileIndex < m_SoundReferences.size())
+	if (audioFileIndex < m_SoundReferences.size())
 	{
 		if (audioFileIndex == m_SoundReferences.size() - 1)
 		{

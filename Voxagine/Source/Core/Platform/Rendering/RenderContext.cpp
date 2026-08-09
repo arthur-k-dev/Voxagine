@@ -211,7 +211,6 @@ void RenderContext::Submit(StructuredVoxelBuffer& renderData)
 
 void RenderContext::SortAABBs()
 {
-	Vector3 invRayDirection = m_CameraData.m_ModelView * Vector4(0.0f, 0.0f, 1.0f, 0.f);
 	//Vector3 invRayDirection = Vector3::Transform(Vector3(0.0f, 0.0f, 1.0f), m_CameraData.m_ModelView);
 	//CLEANUP
 
@@ -436,17 +435,13 @@ bool RenderContext::Present()
 	Buffer* pAABBBuffer = m_mBuffers["AABB Data"].get();
 
 	Buffer* pSpriteBuffer = m_mBuffers["Sprite Data"].get();
-	Buffer* pVoxelBakeBuffer = m_mBuffers["Bake Command Data"].get();
 
 	PRenderPass* pParticlePass = m_pRenderPasses["Particles"].get();
 	PRenderPass* pVoxelPass = m_pRenderPasses["Voxel"].get();
 	PRenderPass* pUIPass = m_pRenderPasses["UI Renderer"].get();
 	PRenderPass* pPostProcessingPass = m_pRenderPasses["Post Processing"].get();
 
-	PComputePass* pVoxelBakePass = m_pComputePasses["Voxel Baker"].get();
-
 	PCommandEngine* pVDirectEngine = m_pCommandEngines["VDirect"].get();
-	PCommandEngine* pComputeEngine = m_pCommandEngines["Compute"].get();
 
 	PCommandEngine* pDirectEngine = m_pCommandEngines["Direct"].get();
 
@@ -732,7 +727,6 @@ void RenderContext::InitializeRenderLoop()
 
 	Buffer* pCameraBuffer = nullptr;
 	Buffer* pAABBBuffer = nullptr;
-	Buffer* pBakeCommandBuffer = nullptr;
 
 	Mapper* pParticleMapper = nullptr;
 	Buffer* pSpriteBuffer = nullptr;
@@ -772,7 +766,6 @@ void RenderContext::InitializeRenderLoop()
 		bakeCmdBufInfo.m_Type = Buffer::E_CONSTANT;
 
 		m_mBuffers.emplace(bakeCmdBufInfo.m_Name, std::make_unique<Buffer>(Get(), bakeCmdBufInfo));
-		pBakeCommandBuffer = m_mBuffers[bakeCmdBufInfo.m_Name].get();
 	}
 
 	// Sprite buffer

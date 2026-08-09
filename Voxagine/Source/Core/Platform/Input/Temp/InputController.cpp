@@ -120,6 +120,8 @@ void InputController::UpdateKeyState(InputKey inputKey, bool bKeyPressed)
 	case (InputKeyStatus::IKS_RELEASED):
 		found->second = (bKeyPressed) ? InputKeyStatus::IKS_PRESSED : InputKeyStatus::IKS_NONE;
 		break;
+	case (InputKeyStatus::IKS_COUNT):
+		break;
 	}
 }
 

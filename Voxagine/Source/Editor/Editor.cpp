@@ -1589,7 +1589,6 @@ void Editor::RenderWindowAboutVoxagine()
 		if (!ImGui::IsPopupOpen("About Voxagine"))
 			ImGui::OpenPopup("About Voxagine");
 
-		ImVec2 PopUpModelSize = ImVec2(320, 480);
 		UVector2 WindowSize = GetApplication()->GetPlatform().GetWindowContext()->GetSize();
 		ImGui::SetNextWindowPos(ImVec2(static_cast<float>(WindowSize.x / 2.0f), static_cast<float>(WindowSize.y / 2.0f)), 0, ImVec2(0.5f, 0.5f));
 

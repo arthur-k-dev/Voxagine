@@ -13,10 +13,10 @@ public:
 	void SetVoxRenderer(VoxRenderer* pRenderer) { m_pRenderer = pRenderer; }
 	VoxRenderer* GetVoxRenderer() { return m_pRenderer; }
 
-	Vector3 GetMinForce() const { m_MinForce; }
+	Vector3 GetMinForce() const { return m_MinForce; }
 	void SetMinForce(Vector3 force) { m_MinForce = force; }
 
-	Vector3 GetMaxForce() const { m_MaxForce; }
+	Vector3 GetMaxForce() const { return m_MaxForce; }
 	void SetMaxForce(Vector3 force) { m_MaxForce = force; }
 
 	void SetArcAngle(float fArc) { m_fArcAngle = fArc; }

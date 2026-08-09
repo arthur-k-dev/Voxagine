@@ -8,18 +8,18 @@
 uint64_t IntegrityChecker::PositionToHash(const Vector3& v3Position)
 {
 	uint64_t uiHash = 0;
-	((uint16_t*)&uiHash)[0] = (uint16_t)v3Position.z;
-	((uint16_t*)&uiHash)[1] = (uint16_t)v3Position.y;
-	((uint16_t*)&uiHash)[2] = (uint16_t)v3Position.x;
+	uiHash |= (uint64_t)(uint16_t)v3Position.z;
+	uiHash |= (uint64_t)(uint16_t)v3Position.y << 16;
+	uiHash |= (uint64_t)(uint16_t)v3Position.x << 32;
 	return uiHash;
 }
 
 Vector3 IntegrityChecker::HashToPosition(uint64_t uiHash)
 {
 	Vector3 v3Position;
-	v3Position.x = ((uint16_t*)&uiHash)[2];
-	v3Position.y = ((uint16_t*)&uiHash)[1];
-	v3Position.z = ((uint16_t*)&uiHash)[0];
+	v3Position.x = (uint16_t)(uiHash >> 32);
+	v3Position.y = (uint16_t)(uiHash >> 16);
+	v3Position.z = (uint16_t)(uiHash);
 	return v3Position;
 }
 

@@ -48,7 +48,7 @@ EditorEntityCommand::EditorEntityCommand(Editor* pEditor, bool bIsbIsRedoExecute
 void EditorEntityCommand::AddEntityToWorld()
 {
 	Entity* pNewEntity = nullptr;
-	Entity* pNewEntityParent = (m_ParentEntityID != -1) ? m_pEntityWorld->FindEntity(m_ParentEntityID) : nullptr;
+	Entity* pNewEntityParent = (m_ParentEntityID != static_cast<uint64_t>(-1)) ? m_pEntityWorld->FindEntity(m_ParentEntityID) : nullptr;
 	bool bTempDuplicateEntity = m_bDuplicateEntity;
 
 	if (!m_bCreateWithEntityType)

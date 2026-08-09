@@ -561,9 +561,9 @@ void PhysicsSystem::ApplySphericalDestruction(const Vector3& position, float fRa
 						Vector3 vec = volumePos + Vector3(x, 1, z);
 
 						uint64_t hash = 0;
-						((uint16_t*)&hash)[0] = (uint16_t)vec.z;
-						((uint16_t*)&hash)[1] = (uint16_t)vec.y;
-						((uint16_t*)&hash)[2] = (uint16_t)vec.x;
+						hash |= (uint64_t)(uint16_t)vec.z;
+						hash |= (uint64_t)(uint16_t)vec.y << 16;
+						hash |= (uint64_t)(uint16_t)vec.x << 32;
 						integrityChecks.push_back(hash);
 					}
 				}
@@ -1315,7 +1315,6 @@ void PhysicsSystem::SimulateParticles(float fDeltaTime)
 				float speed = glm::length(aliveParticle->Live.Velocity);
 
 				Vector3 normal = glm::normalize(prevGridPos - newGridPos);
-				Vector3 particleVelocity = glm::normalize(aliveParticle->Live.Velocity);
 
 				// Bake particle and destroy if velocity is to low or the particle is going straight down
 				if (speed < PARTICLE_DESTROY_THRESHOLD || normal == Vector3(0, 1, 0) || prevGridPos.y < 0) //particleVelocity.y + 1.f <= 0.001f

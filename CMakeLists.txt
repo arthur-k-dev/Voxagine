@@ -173,6 +173,27 @@ if(VOXAGINE_BUILD_ENGINE)
         PROPERTIES LANGUAGE CXX
     )
 
+    # Vendored sources are compiled straight into the voxagine target (see
+    # EngineSources.cmake), so they inherit -Wall -Wextra from voxagine_warnings
+    # like everything else - unlike External/*.h, which is only ever reached by
+    # #include and stays out of the way on its own. -w keeps our own warning set
+    # meaningful without patching code that isn't ours to fix.
+    set_source_files_properties(
+        ${VOXAGINE_SOURCE_DIR}/External/STB/image_DXT.c
+        ${VOXAGINE_SOURCE_DIR}/External/STB/image_helper.c
+        ${VOXAGINE_SOURCE_DIR}/External/STB/stb_image_aug.c
+        ${VOXAGINE_SOURCE_DIR}/External/imgui/imgui.cpp
+        ${VOXAGINE_SOURCE_DIR}/External/imgui/imgui_demo.cpp
+        ${VOXAGINE_SOURCE_DIR}/External/imgui/imgui_draw.cpp
+        ${VOXAGINE_SOURCE_DIR}/External/imgui/imgui_dropdown.cpp
+        ${VOXAGINE_SOURCE_DIR}/External/imgui/imgui_stdlib.cpp
+        ${VOXAGINE_SOURCE_DIR}/External/imgui/imgui_widgets.cpp
+        ${VOXAGINE_SOURCE_DIR}/External/imguizmo/ImGuizmo.cpp
+        ${VOXAGINE_SOURCE_DIR}/External/imguizmo/ImSequencer.cpp
+        ${VOXAGINE_SOURCE_DIR}/External/teenypath/teenypath.cpp
+        PROPERTIES COMPILE_OPTIONS "-w"
+    )
+
     target_include_directories(voxagine PUBLIC ${VOXAGINE_SOURCE_DIR})
 
     target_link_libraries(voxagine

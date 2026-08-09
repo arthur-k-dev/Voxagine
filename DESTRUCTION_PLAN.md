@@ -1256,14 +1256,67 @@ cap, not a working set.
 
 ---
 
+## Open after the phases: the floating bamboo (2026-08-09)
+
+**Not fixed.** Parked on branch `bamboo-support-wip` (commit `80a8f26`), which
+has three deliberate check failures. The full write-up is in `CLAUDE.md` under
+"The floating bamboo: what it is, what it is not, and where it stopped"; this is
+the committed pointer, because `CLAUDE.md` is not in the repository.
+
+**Reported:** `Bamboo7`/`Bamboo8` in `Fishing_Village_Beat1` never fall when
+shot — the middle goes and the rest hangs in the air.
+
+**Cause, measured:** `Obstacle_Pillar_Small_Tall_Bamboo_4.vox` is three stalks
+one voxel thick, up to 9 voxels apart, 26-connected only at a base layer and two
+rejoin layers. A pole falls only when a burst removes *every* voxel of its
+grounded layer (`IsGrounded` is `y == 1`); miss one stalk and the pole hangs off
+that voxel — grounded by the connectivity rule, floating to the player.
+
+**Two dead ends, recorded so they are not rebuilt.** The indestructible
+`RiverPiece3` slab that all three bounding boxes intersect touches **zero** of
+the bamboo's voxels — box overlap on a 64-wide terrain model proves nothing. And
+the nine layers `Bamboo7`/`Bamboo8` lose below the world (a centred model at
+y = 5 with a 27-tall mesh) move the outcome by **3 aim points in 81**.
+
+**On the branch, worth keeping either way:** `VoxelStamp.h` is parameterised so
+`ComputeVoxelStampTransform`/`ForEachStampedVoxel` no longer need a
+`VoxRenderer*`, plus `Tests/Harness/VoxModelFile` and
+`VoxelWorldHarness::StampModel`. That is what lets a headless test place a real
+`.vox` at a real world transform — before it, every scenario was a box on flat
+ground, which is why nothing in the suite resembled a bamboo pole.
+
+**Where it stopped:** a footing rule in `IntegrityChecker` (a ground contact
+supports a load only if it has an in-layer neighbour or carries a short enough
+column) passes all 31 scenarios — it killed two earlier versions that made
+settled debris convert and re-land forever — but the aim-rate metric it was
+tuned against reads identically at three thresholds, so it measures whether the
+shot connected rather than whether the pole fell. **Rebuild the metric to fire
+only at points that intersect the model before trusting any threshold**, then
+price the rule with `voxagine_tests perf` (`checker-visits`).
+
+### Ride-along found here: placement silently drops everything below the world
+
+`ComputeVoxelStampTransform` centres a model on its transform, so a renderer
+lower than half its model's height loses its base and nothing reports it.
+**853 of 8039 renderers across 21 levels are clipped; 141 are destructible**,
+worst case 83 of 90 layers. Most non-destructible ones are deliberate —
+foundations and floors are buried to hide seams — so **do not mass-edit this**;
+the agreed scope is to correct only what is proven broken. What is worth
+building regardless: have `VoxelBaker::Occupy` count the voxels it drops for
+being out of the world and warn once per renderer, naming the entity.
+`StampedGridFloor` (on the branch) already computes the lowest layer a stamp
+writes into.
+
+---
+
 ## Verification reference (all phases)
 
-- `voxagine_gauntlet [script]` — deterministic destruction run over
-  `VoxelWorldHarness`, printing per-phase timings and a state hash and failing
-  on any representation disagreement. Built by `VOXAGINE_BUILD_TESTS=ON`, run
-  by `ctest`, no GPU. **Not** an env var on the running game; phase 0's notes
-  say why, and why the sliding variant is not built yet. (Phase 0.)
-- `ctest --test-dir Build/<preset>` — the gtest suite plus the gauntlet.
+- `voxagine_tests [checks|scenarios|perf]` — the whole suite, one binary, no
+  GPU. Replaced the gtest suite, `voxagine_gauntlet` and `voxagine_selftest`,
+  which had drifted into two different copies of the destruction tick loop.
+  `perf` gates on exact, machine-independent work counters and is the thing to
+  run before claiming a change costs nothing. See `Tests/README.md`.
+- `ctest --test-dir Build/<preset>` — runs all three modes.
   `VOXAGINE_BUILD_TESTS=ON` needs `VOXAGINE_BUILD_ENGINE=ON`. (Phase 0.)
 - `VOXAGINE_SYNC_AUDIT=<sec>` — recompute occupancy bitmap + brick counts
   from CPU voxels, compare all representations. (Phase 0, from the editor's

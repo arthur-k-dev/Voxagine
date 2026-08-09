@@ -42,6 +42,19 @@ bool VKRenderContext::InitializeBackend()
 	bValidation = true;
 #endif
 
+	/* VOXAGINE_VALIDATION forces the layers either way, same shape as
+	   VOXAGINE_PROFILE above and for the same reason: the defect worth
+	   validating only reproduces in Release. The Xid 109 hang has never once
+	   been caught in Debug - it is timing dependent, and Debug is slow enough
+	   and the layers serializing enough to hide it - so gating validation on
+	   _DEBUG means the only build that faults is the only build that cannot
+	   say why. Pair with
+	   VK_LAYER_ENABLES=VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT
+	   to get the write-after-read hazards, which is what a GPU stuck on work
+	   no pass timer shows as slow would look like. */
+	if (const char* pEnv = std::getenv("VOXAGINE_VALIDATION"))
+		bValidation = (pEnv[0] != '0');
+
 	if (!m_Device.CreateInstance(pWindow->GetRequiredInstanceExtensions(), bValidation))
 		return false;
 

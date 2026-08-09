@@ -512,6 +512,31 @@ bool VKSwapchain::BlitAndPresent(VKResource* pSource, VkSemaphore waitTimeline, 
 
 		vkCmdClearColorImage(cmd, m_Images[uiImageIndex],
 		                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &range);
+
+		/* The clear covers the whole image and the blit then writes the centre
+		   of it, so the two transfer writes overlap and nothing ordered them -
+		   "vkCmdBlitImage writes to VkImage ... previously written by
+		   vkCmdClearColorImage". Same layout either side, so this is a pure
+		   execution and memory dependency, not a transition. */
+		VkImageMemoryBarrier2 clearBarrier{};
+		clearBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+		clearBarrier.srcStageMask = VK_PIPELINE_STAGE_2_CLEAR_BIT;
+		clearBarrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+		clearBarrier.dstStageMask = VK_PIPELINE_STAGE_2_BLIT_BIT;
+		clearBarrier.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+		clearBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+		clearBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+		clearBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		clearBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		clearBarrier.image = m_Images[uiImageIndex];
+		clearBarrier.subresourceRange = range;
+
+		VkDependencyInfo clearDependency{};
+		clearDependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+		clearDependency.imageMemoryBarrierCount = 1;
+		clearDependency.pImageMemoryBarriers = &clearBarrier;
+
+		vkCmdPipelineBarrier2(cmd, &clearDependency);
 	}
 
 	VkImageBlit region{};
@@ -540,7 +565,17 @@ bool VKSwapchain::BlitAndPresent(VKResource* pSource, VkSemaphore waitTimeline, 
 	VkSemaphoreSubmitInfo waits[2]{};
 	waits[0].sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
 	waits[0].semaphore = frame.m_ImageAvailable;
-	waits[0].stageMask = VK_PIPELINE_STAGE_2_BLIT_BIT;
+
+	/* ALL_COMMANDS, not BLIT. A semaphore wait only orders stages at and after
+	   the wait stage, and the first thing done to the acquired image is not the
+	   blit - it is the TRANSFER_DST layout transition, whose barrier uses
+	   TOP_OF_PIPE as its source scope and so runs before BLIT. Waiting at BLIT
+	   therefore left that transition free to execute before the presentation
+	   engine had finished with the image, which sync validation reports as
+	   "vkCmdPipelineBarrier2 writes to VkImage ... previously accessed by
+	   vkAcquireNextImageKHR". Widening the wait is free here: this submission
+	   does nothing but transition, clear and blit. */
+	waits[0].stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
 
 	waits[1].sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
 	waits[1].semaphore = waitTimeline;

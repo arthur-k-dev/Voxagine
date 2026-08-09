@@ -61,7 +61,7 @@ void VoxelWorldHarness::Set(uint32_t uiX, uint32_t uiY, uint32_t uiZ, uint32_t u
 	const uint32_t uiID = VoxelID(uiX, uiY, uiZ);
 
 	m_Words[uiID] = uiColor;
-	m_Bricks.SetVoxel(uiID, (uiColor >> 24) != 0);
+	m_Bricks.SetVoxel(uiID, uiColor);
 }
 
 void VoxelWorldHarness::SetDynamic(uint32_t uiX, uint32_t uiY, uint32_t uiZ, uint32_t uiColor)
@@ -75,7 +75,7 @@ void VoxelWorldHarness::SetDynamic(uint32_t uiX, uint32_t uiY, uint32_t uiZ, uin
 	const uint32_t uiID = VoxelID(uiX, uiY, uiZ);
 
 	m_Words[uiID] = uiColor;
-	m_Bricks.SetVoxel(uiID, (uiColor >> 24) != 0);
+	m_Bricks.SetVoxel(uiID, uiColor);
 }
 
 void VoxelWorldHarness::Clear(uint32_t uiX, uint32_t uiY, uint32_t uiZ)

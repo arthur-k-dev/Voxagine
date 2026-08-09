@@ -139,7 +139,7 @@ VS_out main(uint IDvert : VERT_ID, uint IDinst : INST_ID)
 	   different formula makes an explosion's particles read as a separate
 	   effect pasted over the scene. Unshadowed and unoccluded: a particle is
 	   in flight and there is nothing to cast a ray against. */
-	OUT.Color.xyz = EncodeSceneColor(ShadeSurface(OUT.Color.xyz, normals[normIndices[IDvert]], 1.0, 1.0));
+	OUT.Color.xyz = EncodeSceneColor(ShadeSurface(OUT.Color.xyz, normals[normIndices[IDvert]], 1.0, 1.0, 0.0));
 	
     float4 pos = float4(particle.Position + positions[posIndices[IDvert]], 1.0);
 	OUT.Position = mul(mvp, pos);

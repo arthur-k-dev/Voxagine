@@ -53,6 +53,10 @@ bool LaunchOptions::Parse(int argc, char** argv)
 		{
 			m_bHidden = true;
 		}
+		else if (strcmp(argv[i], "--uncapped") == 0)
+		{
+			m_bUncapped = true;
+		}
 		else if (strcmp(argv[i], "--size") == 0 && bHasValue)
 		{
 			if (!ParseSize(argv[++i], m_uiWidth, m_uiHeight))
@@ -76,12 +80,15 @@ bool LaunchOptions::Parse(int argc, char** argv)
 				"  --hidden                create the window unmapped - renders, displays nothing\n"
 				"  --size <WxH>            window size. Only honoured with --hidden; a mapped\n"
 				"                          window is the compositor's to size\n"
+				"  --uncapped              ignore Settings' vsync and frame limit. Use for every\n"
+				"                          GPU measurement: a vsync-locked run lets the card\n"
+				"                          clock down, so two resolutions measure at two clocks\n"
 				"  --screenshot <path>     write the last frame as a binary PPM and exit\n"
 				"  --screenshot-pass <name>  which pass's target to capture\n"
 				"                          (default \"Post Processing\"; try \"Voxel\", \"Sun Shadow\")\n"
 				"\n"
 				"A benchmark or a look, without touching any file or taking the display:\n"
-				"  BitBuster --hidden --size 3840x2160 --frames 600 --map Content/Worlds/...\n");
+				"  BitBuster --hidden --uncapped --size 3840x2160 --frames 600 --map Content/Worlds/...\n");
 
 			return false;
 		}

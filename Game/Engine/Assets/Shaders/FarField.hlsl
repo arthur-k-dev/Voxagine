@@ -26,6 +26,7 @@
 
 #include "Lighting.hlsl"
 #include "VoxelPyramid.hlsl"
+#include "Fog.hlsl"
 
 struct FarFieldResult
 {
@@ -299,7 +300,13 @@ FarFieldResult MarchFarFieldFromWindow(float3 v3LevelOrigin, float3 v3Direction)
    is how it was found (RENDERING_PLAN.md phase 4). It is also why the endless
    ground plane goes through here. */
 float4 ShadeFarField(FarFieldResult far) {
-	return float4(EncodeSceneColor(ShadeSurface(far.Color.xyz, far.Normal, 1.0, 1.0)), 1.0);
+	float3 v3Radiance = ShadeSurface(far.Color.xyz, far.Normal, 1.0, 1.0, 0.0);
+
+	/* Aerial perspective, and this is the half of RENDERING_PLAN.md 6.1 that
+	   matters: far.Distance is already from the camera, everything drawn here
+	   is by definition distant, and the boundary with the window is exactly
+	   where the two shading models disagree. See Fog.hlsl. */
+	return float4(EncodeSceneColor(ApplyAerialPerspective(v3Radiance, far.Distance)), 1.0);
 }
 
 /* The whole background: far-field geometry, then the endless ground plane, then

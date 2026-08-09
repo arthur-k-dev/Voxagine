@@ -16,9 +16,9 @@ Texture2D<float4> particlePass : register(t1);
 /* t2 is the particle depth target, which this variant does not read; the pass
    binds it either way, so the register is spoken for. */
 
-/* Coverage pyramid - RENDERING_PLAN.md 7.1b route B, and t3 rather than t4
-   because this variant has no shadow map in front of it. */
-Texture3D<float> voxelPyramid : register(t3);
+/* Coverage and radiance pyramid - RENDERING_PLAN.md 7.1b route B and 7.3, and
+   t3 rather than t4 because this variant has no shadow map in front of it. */
+Texture3D<float4> voxelPyramid : register(t3);
 
 VOXEL_BUFFER voxelModelData[] : register(t4);
 
@@ -29,10 +29,15 @@ struct PS_in
     float3 WorldPosition		: POSITION1;
 };
 
+/* AmbientCone.hlsl after Lighting.hlsl, which supplies the constants its bounce
+   term is lit by. AO_CONE_HAS_SUN_SHADOW is left undefined: there is no map
+   here, so a cone sample is lit by an unshadowed sun - the same assumption this
+   variant already makes about the surface it is shading. */
 #include "SDFMarcher.hlsl"
 #include "AmbientOcclusion.hlsl"
-#include "AmbientCone.hlsl"
 #include "Lighting.hlsl"
+#include "AmbientCone.hlsl"
+#include "Fog.hlsl"
 
 FORCE_DEPTH_TEST
 float4 main(PS_in IN) : TAR_OUT
@@ -69,6 +74,26 @@ float4 main(PS_in IN) : TAR_OUT
 		return float4(0.0, 0.0, 0.0, 0.0);
 	}
 
+    /* Emissive voxels are light sources, not surfaces - RENDERING_PLAN.md 7.4.
+       Everything between here and ShadeSurface below measures how much light
+       *arrives* at a surface, and none of it applies to light that is leaving:
+       a lantern is not dimmer in shadow, and ambient occlusion has nothing to
+       occlude. Placed above the shadow-map lookup and the cones so an emissive
+       voxel does not pay for either.
+
+       It still fogs. A glowing thing far enough away is still seen through the
+       same air as everything else, and skipping that would make emissives the
+       one class of geometry that refuses to recede. */
+    if (IsEmissiveVoxel(marchDiffuse.Color.a))
+    {
+        float3 v3Emitted = SrgbToLinear(marchDiffuse.Color.xyz) * EMISSIVE_GAIN;
+
+        v3Emitted = ApplyAerialPerspective(
+            v3Emitted, distance(marchDiffuse.SmoothPosition + camOffset.xyz, camPosition.xyz));
+
+        return float4(EncodeSceneColor(v3Emitted), 1.0);
+    }
+
     /* Same sun-plus-sky model as VoxelRenderer.ps.hlsl (rule 8: non-shadow
        changes land in both), with the sun unoccluded because this variant
        casts no shadow ray at all. */
@@ -76,16 +101,30 @@ float4 main(PS_in IN) : TAR_OUT
 
     float skyVisibility = GetSkyVisibility(marchDiffuse.Position, marchDiffuse.Mask, marchDiffuse.SRDirection, marchDiffuse.Normal, marchDiffuse.UV);
 
+    /* Bounce light from the same cones - RENDERING_PLAN.md 7.3. */
+    float3 bounce = 0.0;
+
 #if AO_CONE_ENABLED
-    skyVisibility *= GetConeSkyVisibility(marchDiffuse.SmoothPosition, marchDiffuse.Normal, IN.NormScreenPosition.xy);
+    skyVisibility *= GetConeAmbient(marchDiffuse.SmoothPosition, marchDiffuse.Normal, IN.NormScreenPosition.xy, bounce);
 #endif
 
     /* Linear radiance until EncodeSceneColor - RENDERING_PLAN.md phase 7.2. */
-    float3 v3Radiance = ShadeSurface(marchDiffuse.Color.xyz, marchDiffuse.Normal, 1.0, skyVisibility);
+    float3 v3Radiance = ShadeSurface(marchDiffuse.Color.xyz, marchDiffuse.Normal, 1.0, skyVisibility, bounce);
+
+    /* Environment specular - RENDERING_PLAN.md 7.4. Added rather than folded
+       into ShadeSurface's parentheses: it is light reflected *off* this
+       surface, so the albedo does not multiply it. */
+    v3Radiance += GetConeSpecular(marchDiffuse.SmoothPosition, marchDiffuse.Normal, rayDirection);
 
     /* Fake specular "shine line" on lit voxel edges - see GetShineLine in
        AmbientOcclusion.hlsl. */
     v3Radiance *= GammaGainToLinear(GetShineLine(marchDiffuse.Position, marchDiffuse.Normal, marchDiffuse.UV, lightDirection.xyz, difference));
+
+    /* Aerial perspective - RENDERING_PLAN.md 6.1. From the *camera*, not
+       marchDiffuse.Distance: this pass rasterizes AABB proxies and the ray
+       started where its own box was entered, so the marcher's distance is not
+       the one fog is a function of. */
+    v3Radiance = ApplyAerialPerspective(v3Radiance, distance(marchDiffuse.SmoothPosition + camOffset.xyz, camPosition.xyz));
 
     marchDiffuse.Color.xyz = EncodeSceneColor(v3Radiance);
     marchDiffuse.Color.a = 1.0;

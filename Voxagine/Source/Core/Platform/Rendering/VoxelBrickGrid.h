@@ -4,6 +4,7 @@
 #include "Core/Platform/Rendering/RenderDefines.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <memory>
@@ -49,9 +50,17 @@
  * respect to the mapping. 768x128x768 bits is 9.4 MiB a buffer.
  *
  * There is a fourth, and it is the only one the GPU filters: m_pDensity, the
- * finest pyramid level as one unorm byte a cell, staged for the 3D texture the
- * ambient-occlusion cones sample (RENDERING_PLAN.md 7.1b route B). See
- * SetDensityBuffers.
+ * finest pyramid level as one RGBA texel a cell, staged for the 3D texture the
+ * ambient-occlusion and diffuse cones sample (RENDERING_PLAN.md 7.1b route B
+ * and 7.3). Alpha is the occupied fraction; RGB is the cell's albedo, linear
+ * and premultiplied by that fraction. See SetDensityBuffers.
+ *
+ * And a fifth, which exists only to feed the fourth: m_pColor, one packed
+ * linear albedo per *brick*. A cone gathering bounce light needs to know what
+ * colour the matter it hit is, and neither the counts nor the bitmap carry
+ * that. Per brick rather than per level-0 cell because a diffuse bounce does
+ * not resolve four voxels - it is 9.4 MiB against the 75 MiB the fine version
+ * would have cost, for a difference no cone can see.
  *
  * It is exact where the counts are allowed to be conservative: EndRegion may
  * mark a straddling brick fully occupied, but a bit that claims a voxel is
@@ -114,6 +123,19 @@ public:
 		return LevelSize(uiLevel) * LevelSize(uiLevel) * LevelSize(uiLevel);
 	}
 
+	/* A voxel word (R, G, B, rendererState + 1 from the low byte up) to the low
+	   three bytes of a linear albedo, alpha dropped. The table is the exact sRGB
+	   transfer function, the same curve Color.hlsl applies to everything else -
+	   see SetDensityBuffers for why the decode happens here rather than in the
+	   cone. Public so that a test can state the expected texel in terms of it
+	   rather than restating the curve. */
+	static inline uint32_t PackLinearAlbedo(uint32_t uiColor)
+	{
+		return uint32_t(k_LinearFromSrgb[uiColor & 0xFFu])
+			| (uint32_t(k_LinearFromSrgb[(uiColor >> 8) & 0xFFu]) << 8)
+			| (uint32_t(k_LinearFromSrgb[(uiColor >> 16) & 0xFFu]) << 16);
+	}
+
 	/* Cells across each axis at a level, and how many in total. Ceil-div, so a
 	   window that is not a whole number of cells gets a partial one rather than
 	   losing its edge - HLSL's own GetBrickGridSize does the same. */
@@ -142,9 +164,21 @@ public:
 	   on the GPU. Two mirrors for the same reason the counts have two: the
 	   window's front and back buffers describe different voxels.
 
+	   **RGBA rather than R as of 7.3**, packed as the texture's own byte order
+	   (R, G, B, A from the low byte up): alpha is the density above, and RGB is
+	   the cell's albedo in *linear* light, premultiplied by that density.
+
+	   Both halves of that are load-bearing. Premultiplied, because the coarser
+	   levels are a box average of their eight children and an average of
+	   premultiplied radiance is exactly the right answer where an average of
+	   raw colours would let one lit voxel in an empty cell speak for all eight.
+	   Linear, because the alternative is a pow per cone sample and there are
+	   thirty-five of those a pixel; the cost is that 8-bit linear quantizes the
+	   darks coarsely, which a bounce term does not resolve.
+
 	   Null for a grid with no texture behind it - the far field, and every
 	   headless test - and every path here checks. */
-	void SetDensityBuffers(uint8_t* pFront, uint8_t* pBack);
+	void SetDensityBuffers(uint32_t* pFront, uint32_t* pBack);
 
 	/* Cells the level-0 density mirror has to hold, i.e. the texel count of
 	   the texture's mip 0. */
@@ -260,9 +294,23 @@ public:
 	   never simply 1).
 
 	   The old occupancy is read here rather than passed in, so the bitmap and
-	   the counts are updated from the same value and cannot drift apart. */
-	inline void SetVoxel(uint32_t uiVoxelID, bool bIsOccupied)
+	   the counts are updated from the same value and cannot drift apart.
+
+	   **Takes the colour rather than a bool as of 7.3.** Occupancy is still
+	   alpha > 0 and is derived here, for the same reason the old occupancy is;
+	   what the colour buys is the brick albedo the bounce cones read. Every
+	   caller already had the word in hand. */
+	/* Deleted rather than left to the implicit conversion. This took a bool
+	   until 7.3, every caller spelled it `(uiColor >> 24) != 0`, and a call site
+	   that kept doing so would compile - passing 1 as the colour, whose alpha
+	   byte is zero, so *every voxel would read as empty* and nothing would say
+	   so. Two call sites did exactly that. */
+	void SetVoxel(uint32_t uiVoxelID, bool bIsOccupied) = delete;
+
+	inline void SetVoxel(uint32_t uiVoxelID, uint32_t uiColor)
 	{
+		const bool bIsOccupied = (uiColor >> 24) != 0;
+
 		if (uiVoxelID >= m_uiVoxelCount || IsOccupied(uiVoxelID) == bIsOccupied)
 			return;
 
@@ -272,6 +320,13 @@ public:
 
 		if (uiBrickID >= m_uiBrickCount)
 			return;
+
+		/* On the transition into occupied only, so that a re-stamp of a voxel
+		   that was already there costs nothing. The brick then carries the
+		   colour of the last voxel to *appear* in it, which is what a 4-voxel
+		   cell of a bounce field can represent anyway. */
+		if (bIsOccupied)
+			SetBrickColor(m_uiFront, uiBrickID, uiColor);
 
 		std::atomic<uint16_t>& count = m_pLevels[k_uiBrickLevel][m_uiFront][uiBrickID];
 
@@ -309,7 +364,7 @@ public:
 	void BeginRegion(bool bBack, const UVector3& v3Min, const UVector3& v3Size);
 	void EndRegion(bool bBack, const UVector3& v3Min, const UVector3& v3Size);
 
-	inline void AddVoxel(bool bBack, uint32_t uiX, uint32_t uiY, uint32_t uiZ)
+	inline void AddVoxel(bool bBack, uint32_t uiX, uint32_t uiY, uint32_t uiZ, uint32_t uiColor)
 	{
 		const uint32_t uiBuffer = Index(bBack);
 
@@ -319,6 +374,8 @@ public:
 
 		if (uiBrickID >= m_uiBrickCount)
 			return;
+
+		SetBrickColor(uiBuffer, uiBrickID, uiColor);
 
 		/* Non-atomic on purpose: a region is owned by exactly one thread for
 		   the length of a Begin/End pair, and the two buffers are disjoint.
@@ -407,6 +464,19 @@ private:
 		return (uiX >> 1) + (uiY >> 1) * v3Parent.x + (uiZ >> 1) * v3Parent.x * v3Parent.y;
 	}
 
+	inline void SetBrickColor(uint32_t uiBuffer, uint32_t uiBrickID, uint32_t uiColor)
+	{
+		std::atomic<uint32_t>* pColor = m_pColor[uiBuffer].get();
+
+		if (pColor == nullptr)
+			return;
+
+		/* Relaxed and last-writer-wins. Two threads stamping into the same brick
+		   disagree about its colour and either answer is one of the colours
+		   actually there, which is the whole accuracy this level claims. */
+		pColor[uiBrickID].store(PackLinearAlbedo(uiColor), std::memory_order_relaxed);
+	}
+
 	inline void WriteMirror(uint32_t uiBuffer, uint32_t uiLevel, uint32_t uiCellID, uint16_t uiValue)
 	{
 		/* Bricks only. Everything the marcher reads is this level and it reads
@@ -416,15 +486,31 @@ private:
 		   measured when it maintained five levels in this mirror. */
 		if (uiLevel == k_uiBrickLevel && m_pGPU[uiBuffer] != nullptr)
 			m_pGPU[uiBuffer][uiCellID] = uiValue;
+	}
 
-		/* Level 0 also goes out as a density byte, which is what the texture
-		   holds. A level-0 cell is LevelVolume(0) voxels, so the count and the
-		   byte are exactly inter-convertible and the quantization is free. */
-		if (uiLevel == 0 && m_pDensity[uiBuffer] != nullptr)
-		{
-			m_pDensity[uiBuffer][uiCellID] = static_cast<uint8_t>(
-				(static_cast<uint32_t>(uiValue) * 255u + k_uiFineVolume / 2u) / k_uiFineVolume);
-		}
+	/* Level 0's texel, which is what the texture holds and the only level that
+	   is uploaded. Alpha is the density: a level-0 cell is LevelVolume(0)
+	   voxels, so the count and the byte are exactly inter-convertible and the
+	   quantization is free. RGB is the containing brick's linear albedo scaled
+	   by that density - premultiplied, so the blit chain that averages eight
+	   children stays exact. See SetDensityBuffers.
+
+	   Split out of WriteMirror because only RebuildFineCells reaches level 0,
+	   and it is the only caller that knows which brick a cell belongs to
+	   without recovering it from the cell id. */
+	inline void WriteDensityMirror(uint32_t uiBuffer, uint32_t uiCellID, uint16_t uiValue, uint32_t uiAlbedo)
+	{
+		if (m_pDensity[uiBuffer] == nullptr)
+			return;
+
+		const uint32_t uiDensity =
+			(static_cast<uint32_t>(uiValue) * 255u + k_uiFineVolume / 2u) / k_uiFineVolume;
+
+		const uint32_t uiRed = ((uiAlbedo & 0xFFu) * uiDensity + 127u) / 255u;
+		const uint32_t uiGreen = (((uiAlbedo >> 8) & 0xFFu) * uiDensity + 127u) / 255u;
+		const uint32_t uiBlue = (((uiAlbedo >> 16) & 0xFFu) * uiDensity + 127u) / 255u;
+
+		m_pDensity[uiBuffer][uiCellID] = uiRed | (uiGreen << 8) | (uiBlue << 16) | (uiDensity << 24);
 	}
 
 	/* Records that a brick's eight level-0 cells have to reach the texture.
@@ -490,6 +576,7 @@ private:
 	}
 
 	void ZeroCounts();
+	void ZeroColors();
 	void ZeroOccupancy();
 	void ClearDirty();
 
@@ -528,9 +615,20 @@ private:
 	std::unique_ptr<std::atomic<uint64_t>[]> m_pOccupancy[2];
 	uint32_t* m_pGPU[2] = { nullptr, nullptr };
 
-	/* Level 0 as unorm-byte densities, one mirror a buffer: the staging side
-	   of the coverage texture. See SetDensityBuffers. */
-	uint8_t* m_pDensity[2] = { nullptr, nullptr };
+	/* Level 0 as RGBA texels - linear premultiplied albedo and a density - one
+	   mirror a buffer: the staging side of the coverage texture. See
+	   SetDensityBuffers. */
+	uint32_t* m_pDensity[2] = { nullptr, nullptr };
+
+	/* One packed linear albedo per brick per buffer, the source of the RGB
+	   above. Brick resolution rather than level 0's, which is 9.4 MiB instead
+	   of 75 - see the class comment. */
+	std::unique_ptr<std::atomic<uint32_t>[]> m_pColor[2];
+
+	/* sRGB byte to linear byte, the exact piecewise curve. A class member and
+	   not a function-local static so that the per-voxel path has no
+	   thread-safe-initialization guard to test. */
+	static const std::array<uint8_t, 256> k_LinearFromSrgb;
 
 	/* Voxels in a level-0 cell, i.e. what a density byte is a fraction of.
 	   Spelled out rather than LevelVolume(0) because a constexpr member

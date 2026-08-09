@@ -251,7 +251,7 @@ public:
 			return false;
 
 		m_pVoxelData[uiID] = uiColor;
-		m_BrickGrid.SetVoxel(uiID, (uiColor >> 24) != 0);
+		m_BrickGrid.SetVoxel(uiID, uiColor);
 
 		return true;
 	}
@@ -265,7 +265,7 @@ public:
 		   old occupancy the brick count needs comes from the bitmap, in
 		   ordinary cached memory. See ModifyVoxel above. */
 		m_pVoxelData[uiID] = uiColor;
-		m_BrickGrid.SetVoxel(uiID, (uiColor >> 24) != 0);
+		m_BrickGrid.SetVoxel(uiID, uiColor);
 	}
 
 	uint32_t GetVoxelDataSize() const { return m_pVoxelMapper->GetInfo().m_uiElementCount; }

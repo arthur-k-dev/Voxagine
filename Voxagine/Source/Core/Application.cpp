@@ -295,4 +295,24 @@ void Application::LoadSettings()
 	{
 		GetSerializer().ToJsonFile(m_Settings, "Settings.vgs", true);
 	}
+
+	/* --uncapped, after the file so that it overrides it - RENDERING_PLAN.md
+	   phase 0b, and it should have been there from the start.
+
+	   Settings.vgs asks for FIFO at the display's 60 Hz, which means a headless
+	   benchmark run leaves the GPU idle for most of every frame. That is not a
+	   neutral way to measure: at 1080p the voxel pass is about two milliseconds
+	   of a sixteen-millisecond frame, the card clocks down accordingly, and the
+	   same pass at 4K - which keeps it busy - runs at a *higher* clock. Costs
+	   measured that way are not comparable across resolutions, and comparing
+	   them across resolutions is exactly what this plan does. 7.3 found it by
+	   sweeping a cone whose cost came out flat over a 4x change in pixel count.
+
+	   Nothing is written back, so the file is untouched - the whole point of
+	   LaunchOptions. */
+	if (LaunchOptions::Get().IsUncapped())
+	{
+		m_Settings.SetVSync(false);
+		m_Settings.SetFrameLimit(0.0);
+	}
 }

@@ -96,20 +96,34 @@ float3 GetSkyLight(float3 v3Normal)
 /* v3Albedo        - as stored: an 8-bit sRGB palette colour, decoded here.
    fSunVisibility  - 1 lit, 0 fully shadowed. The shadow map's transmittance.
    fSkyVisibility  - 1 open to the sky, 0 fully enclosed. Ambient occlusion,
-                     and the term phase 7.1 replaces with a cone trace.
+                     from the cone trace of 7.1b.
+   v3Bounce        - linear irradiance arriving from nearby lit geometry, from
+                     the same cones (7.3). Zero for the callers that have no
+                     pyramid to trace: the far field, the ground plane and
+                     particles.
 
-   Returns **linear radiance**, not something that can be written to a target.
-   Every caller passes it through EncodeSceneColor; phase 7.3's bounce term adds
-   into the sum below, before that encode, which is the whole reason this
-   returns linear rather than doing the encode itself. */
-float3 ShadeSurface(float3 v3Albedo, float3 v3Normal, float fSunVisibility, float fSkyVisibility)
+   Returns **linear radiance**, not something that can be written to a target;
+   every caller passes it through EncodeSceneColor.
+
+   The bounce is a third *irradiance*, summed with the other two inside the
+   parentheses rather than added to the result - so it is reflected by this
+   surface's albedo, which is what makes red light on a white wall read as red
+   and on a blue wall read as nothing. Adding it outside would have painted the
+   emitter's colour over the receiver regardless of what the receiver is.
+
+   It is deliberately not occluded by fSkyVisibility. The two are alternatives,
+   not factors: ambient occlusion is the admission that the flat sky term
+   over-lights an enclosed place, and a bounce term computed by tracing that
+   same enclosure already knows what is there. Multiplying by AO as well would
+   darken a crevice twice for the one reason. */
+float3 ShadeSurface(float3 v3Albedo, float3 v3Normal, float fSunVisibility, float fSkyVisibility, float3 v3Bounce)
 {
 	float fNdotL = clamp(dot(v3Normal, -lightDirection.xyz), 0.0, 1.0);
 
 	float3 v3Sun = SUN_COLOR * fNdotL * fSunVisibility;
 	float3 v3Sky = GetSkyLight(v3Normal) * lerp(1.0, pow(fSkyVisibility, SKY_AO_CURVE), SKY_AO_STRENGTH);
 
-	return SrgbToLinear(v3Albedo) * (v3Sun + v3Sky);
+	return SrgbToLinear(v3Albedo) * (v3Sun + v3Sky + v3Bounce);
 }
 
 #endif

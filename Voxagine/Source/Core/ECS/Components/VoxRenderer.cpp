@@ -20,7 +20,8 @@ RTTR_REGISTRATION
 		.constructor<Entity*>()(rttr::policy::ctor::as_raw_ptr)
 		.property("File", &VoxRenderer::GetModelFilePath, &VoxRenderer::SetModelFilePath) (RTTR_PUBLIC, RTTR_RESOURCE("vox"))
 		.property("Round on Axis", &VoxRenderer::IsAxisRounded, &VoxRenderer::SetAxisRounded) (RTTR_PUBLIC)
-		.property("Limit Rotation Angle", &VoxRenderer::GetRotationAngleLimit, &VoxRenderer::SetRotationAngleLimit) (RTTR_PUBLIC);
+		.property("Limit Rotation Angle", &VoxRenderer::GetRotationAngleLimit, &VoxRenderer::SetRotationAngleLimit) (RTTR_PUBLIC)
+		.property("Emissive", &VoxRenderer::IsEmissive, &VoxRenderer::SetEmissive) (RTTR_PUBLIC);
 }
 
 VoxRenderer::VoxRenderer(Entity * pOwner) :

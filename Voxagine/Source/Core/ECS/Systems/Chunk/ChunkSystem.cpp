@@ -519,7 +519,7 @@ void ChunkSystem::RenderChunk(ChunkUpdateGroup::Item& updateItem, uint32_t* view
 					/* Occupancy is alpha > 0 (rule 3) - the byte is a
 					   rendererState tag, not an opacity. */
 					if ((uiColor >> 24) != 0)
-						brickGrid.AddVoxel(bBackBuffer, x, y, z);
+						brickGrid.AddVoxel(bBackBuffer, x, y, z, uiColor);
 
 					++ptr;
 					++voxPtr;

@@ -81,6 +81,10 @@ public:
 	double GetFixedTimeStep() const { return m_dFixedTimeStep; }
 	double GetFrameLimit() const { return m_dFrameLimit; }
 
+	/* Seconds per frame, or 0 for no limit. Only --uncapped sets it; the
+	   serialized value is the one the game runs with. */
+	void SetFrameLimit(double dSeconds) { m_dFrameLimit = dSeconds; }
+
 	UVector2 m_v2InitialWindowSize = UVector2(1280, 720);
 
 	/* Event list */

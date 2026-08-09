@@ -260,11 +260,11 @@ bool RenderContext::ResizeWorldBuffer()
 	   extent is that level's grid rather than the window's. */
 	if (m_BrickGrid.GetFineCellCount() > 0)
 	{
-		m_pPyramidStaging->Resize(m_BrickGrid.GetFineCellCount(), sizeof(uint8_t));
+		m_pPyramidStaging->Resize(m_BrickGrid.GetFineCellCount(), sizeof(uint32_t));
 
 		m_BrickGrid.SetDensityBuffers(
-			reinterpret_cast<uint8_t*>(m_pPyramidStaging->GetData()),
-			reinterpret_cast<uint8_t*>(m_pPyramidStaging->GetBackBufferData()));
+			m_pPyramidStaging->GetData(),
+			m_pPyramidStaging->GetBackBufferData());
 
 		m_pPyramidView->Resize(m_BrickGrid.GetFineGridSize());
 	}
@@ -317,7 +317,7 @@ uint32_t RenderContext::ValidateVoxelPyramid()
 	readbackDesc.m_GPUAccessType = E_READ_ONLY;
 
 	std::unique_ptr<Mapper> pReadback = std::make_unique<Mapper>(Get(), readbackDesc, false);
-	pReadback->Resize(static_cast<uint32_t>(uiTotal), sizeof(uint8_t));
+	pReadback->Resize(static_cast<uint32_t>(uiTotal), sizeof(uint32_t));
 
 	/* The uploads are recorded on VDirect and read back here on Texture, and
 	   two submissions to the same queue carry no dependency on each other. A
@@ -329,14 +329,14 @@ uint32_t RenderContext::ValidateVoxelPyramid()
 	PCommandEngine* pEngine = m_pCommandEngines["Texture"]->Get();
 
 	if (pReadback->GetNative() == nullptr ||
-		!pEngine->ReadbackImageMips(m_pPyramidView->GetNative(), pReadback->GetNative(), sizeof(uint8_t)))
+		!pEngine->ReadbackImageMips(m_pPyramidView->GetNative(), pReadback->GetNative(), sizeof(uint32_t)))
 	{
 		fprintf(stderr, "[pyramid] readback of the coverage texture failed\n");
 		return 0;
 	}
 
-	const uint8_t* pRead = reinterpret_cast<const uint8_t*>(pReadback->GetData());
-	const uint8_t* pMirror = reinterpret_cast<const uint8_t*>(m_pPyramidStaging->GetData());
+	const uint32_t* pRead = pReadback->GetData();
+	const uint32_t* pMirror = m_pPyramidStaging->GetData();
 
 	uint32_t uiMismatches = 0;
 
@@ -365,8 +365,8 @@ uint32_t RenderContext::ValidateVoxelPyramid()
 
 		if (uiBad > 0)
 		{
-			fprintf(stderr, "[pyramid] mip 0 disagrees with the staging mirror for %u of %zu cells, "
-			                "first at %zu (texture %u, mirror %u)\n",
+			fprintf(stderr, "[pyramid] mip 0 disagrees with the staging mirror for %u of %zu texels, "
+			                "first at %zu (texture %08X, mirror %08X)\n",
 			        uiBad, uiFine, uiFirst, pRead[uiFirst], pMirror[uiFirst]);
 		}
 
@@ -390,8 +390,8 @@ uint32_t RenderContext::ValidateVoxelPyramid()
 			continue;
 		}
 
-		const uint8_t* pLevel = pRead + levelOffset[uiLevel];
-		const uint8_t* pBelow = pRead + levelOffset[uiLevel - 1];
+		const uint32_t* pLevel = pRead + levelOffset[uiLevel];
+		const uint32_t* pBelow = pRead + levelOffset[uiLevel - 1];
 
 		uint32_t uiBad = 0;
 
@@ -399,25 +399,39 @@ uint32_t RenderContext::ValidateVoxelPyramid()
 		for (uint32_t uiY = 0; uiY < v3Size.y; ++uiY)
 		for (uint32_t uiX = 0; uiX < v3Size.x; ++uiX)
 		{
-			uint32_t uiSum = 0;
+			/* Per channel: the radiance the cones gather is in RGB and the
+			   occlusion in A, and a blit that got one right and the other wrong
+			   is exactly the kind of thing this exists to catch. */
+			uint32_t uiSum[4] = {};
 
 			for (uint32_t uiChildZ = 0; uiChildZ < 2; ++uiChildZ)
 			for (uint32_t uiChildY = 0; uiChildY < 2; ++uiChildY)
 			for (uint32_t uiChildX = 0; uiChildX < 2; ++uiChildX)
 			{
-				uiSum += pBelow[(uiX * 2 + uiChildX)
+				const uint32_t uiChild = pBelow[(uiX * 2 + uiChildX)
 					+ (uiY * 2 + uiChildY) * v3Child.x
 					+ (uiZ * 2 + uiChildZ) * v3Child.x * v3Child.y];
+
+				for (uint32_t uiChannel = 0; uiChannel < 4; ++uiChannel)
+					uiSum[uiChannel] += (uiChild >> (uiChannel * 8)) & 0xFFu;
 			}
 
-			const int32_t iExpected = static_cast<int32_t>((uiSum + 4) / 8);
-			const int32_t iActual = pLevel[uiX + uiY * v3Size.x + uiZ * v3Size.x * v3Size.y];
+			const uint32_t uiActual = pLevel[uiX + uiY * v3Size.x + uiZ * v3Size.x * v3Size.y];
 
-			/* Two, not zero: the hardware filter rounds its own way and the
-			   reference above rounds to nearest. A stale level is off by far
-			   more than the rounding of an eight-way mean. */
-			if (std::abs(iActual - iExpected) > 2)
-				++uiBad;
+			for (uint32_t uiChannel = 0; uiChannel < 4; ++uiChannel)
+			{
+				const int32_t iExpected = static_cast<int32_t>((uiSum[uiChannel] + 4) / 8);
+				const int32_t iChannel = static_cast<int32_t>((uiActual >> (uiChannel * 8)) & 0xFFu);
+
+				/* Two, not zero: the hardware filter rounds its own way and the
+				   reference above rounds to nearest. A stale level is off by far
+				   more than the rounding of an eight-way mean. */
+				if (std::abs(iChannel - iExpected) > 2)
+				{
+					++uiBad;
+					break;
+				}
+			}
 		}
 
 		if (uiBad > 0)
@@ -465,7 +479,7 @@ void RenderContext::UploadVoxelPyramid(PCommandEngine* pEngine)
 	pEngine->UploadImageRegions(
 		m_pPyramidView->GetNative(), m_pPyramidStaging->GetNative(),
 		m_PyramidRegions.data(), static_cast<uint32_t>(m_PyramidRegions.size()),
-		sizeof(uint8_t));
+		sizeof(uint32_t));
 }
 
 uint32_t RenderContext::ValidateFarField()
@@ -1161,8 +1175,8 @@ void RenderContext::InitializeRenderLoop()
 			m_BrickGrid.SetBuffers(m_pBrickMapper->GetData(), m_pBrickMapper->GetBackBufferData());
 
 			m_BrickGrid.SetDensityBuffers(
-				reinterpret_cast<uint8_t*>(m_pPyramidStaging->GetData()),
-				reinterpret_cast<uint8_t*>(m_pPyramidStaging->GetBackBufferData()));
+				m_pPyramidStaging->GetData(),
+				m_pPyramidStaging->GetBackBufferData());
 		}, this);
 	}
 
@@ -1189,11 +1203,15 @@ void RenderContext::InitializeRenderLoop()
 		m_pBrickMapper = m_pMappers.back().get();
 	}
 
-	/* Coverage pyramid texture (RENDERING_PLAN.md 7.1b route B)
+	/* Coverage and radiance pyramid texture (RENDERING_PLAN.md 7.1b route B,
+	 * and 7.3)
 	 *
-	 * Mip L is pyramid level L: a single channel holding the occupied fraction
-	 * of the cell, which is all an occlusion term needs and quantizes exactly
-	 * at the finest level (a 2^3 cell holds at most eight voxels).
+	 * Mip L is pyramid level L. Alpha is the occupied fraction of the cell,
+	 * which is all an occlusion term needs and quantizes exactly at the finest
+	 * level (a 2^3 cell holds at most eight voxels); RGB is that cell's albedo
+	 * in linear light, premultiplied by the fraction, which is what a bounce
+	 * cone gathers. One fetch answers both, which is why 7.3 widened this
+	 * texture rather than adding a second one beside it.
 	 *
 	 * One element and 1x1x1 until a world is loaded, so the descriptor and the
 	 * image layout are valid from the first frame. ResizeWorldBuffer gives both
@@ -1207,12 +1225,12 @@ void RenderContext::InitializeRenderLoop()
 
 		m_pMappers.push_back(std::make_unique<Mapper>(Get(), pyramidStagingDesc, false));
 		m_pPyramidStaging = m_pMappers.back().get();
-		m_pPyramidStaging->Resize(1, sizeof(uint8_t));
+		m_pPyramidStaging->Resize(1, sizeof(uint32_t));
 
 		View::Info pyramidDesc;
 		pyramidDesc.m_Name = "Voxel Pyramid";
 		pyramidDesc.m_DimensionType = E_TEXTURE_3D;
-		pyramidDesc.m_ColorFormat = E_R8_UNORM;
+		pyramidDesc.m_ColorFormat = E_R8G8B8A8_UNORM;
 		pyramidDesc.m_Size = UVector3(1, 1, 1);
 		pyramidDesc.m_Type = View::E_SHADER_RESOURCE_VIEW;
 		pyramidDesc.m_State = E_STATE_PIXEL_SHADER_RESOURCE;

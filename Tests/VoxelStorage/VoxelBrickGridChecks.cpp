@@ -51,7 +51,7 @@ namespace
 				m_Words[ID(uiX, uiY, uiZ)] = uiColor;
 
 				if ((uiColor >> 24) != 0)
-					m_Grid.AddVoxel(false, uiX, uiY, uiZ);
+					m_Grid.AddVoxel(false, uiX, uiY, uiZ, uiColor);
 			}
 
 			m_Grid.EndRegion(false, v3Min, v3Size);
@@ -62,7 +62,7 @@ namespace
 		void Write(uint32_t uiX, uint32_t uiY, uint32_t uiZ, uint32_t uiColor)
 		{
 			m_Words[ID(uiX, uiY, uiZ)] = uiColor;
-			m_Grid.SetVoxel(ID(uiX, uiY, uiZ), (uiColor >> 24) != 0);
+			m_Grid.SetVoxel(ID(uiX, uiY, uiZ), uiColor);
 		}
 
 		uint32_t Validate() { return m_Grid.Validate(false, m_Words.data()); }
@@ -73,14 +73,35 @@ namespace
 		const uint32_t* Mirror() const { return m_Front.data(); }
 
 		/* The staging side of the coverage texture: the finest level as one
-		   unorm byte a cell. */
-		const uint8_t* Density() const { return m_Density.data(); }
+		   RGBA texel a cell, alpha the occupied fraction and RGB the linear
+		   albedo premultiplied by it (RENDERING_PLAN.md 7.3). */
+		uint32_t Density(uint32_t uiCell) const { return (m_Density[uiCell] >> 24) & 0xFFu; }
+		uint32_t Albedo(uint32_t uiCell) const { return m_Density[uiCell] & 0x00FFFFFFu; }
 
-		static uint8_t DensityOf(uint32_t uiCount)
+		static uint32_t DensityOf(uint32_t uiCount)
 		{
 			const uint32_t uiVolume = VoxelBrickGrid::LevelVolume(0);
 
-			return static_cast<uint8_t>((uiCount * 255u + uiVolume / 2u) / uiVolume);
+			return (uiCount * 255u + uiVolume / 2u) / uiVolume;
+		}
+
+		/* What WriteDensityMirror should have produced for a cell of this
+		   density holding voxels of this colour: the sRGB colour decoded to
+		   linear, then scaled by the density. */
+		static uint32_t PremultipliedOf(uint32_t uiColor, uint32_t uiDensity)
+		{
+			const uint32_t uiLinear = VoxelBrickGrid::PackLinearAlbedo(uiColor);
+
+			uint32_t uiPacked = 0;
+
+			for (uint32_t uiChannel = 0; uiChannel < 3; ++uiChannel)
+			{
+				const uint32_t uiValue = ((uiLinear >> (uiChannel * 8)) & 0xFFu) * uiDensity;
+
+				uiPacked |= ((uiValue + 127u) / 255u) << (uiChannel * 8);
+			}
+
+			return uiPacked;
 		}
 
 	private:
@@ -88,8 +109,8 @@ namespace
 		VoxelBrickGrid m_Grid;
 		std::vector<uint32_t> m_Front;
 		std::vector<uint32_t> m_Back;
-		std::vector<uint8_t> m_Density;
-		std::vector<uint8_t> m_DensityBack;
+		std::vector<uint32_t> m_Density;
+		std::vector<uint32_t> m_DensityBack;
 		std::vector<uint32_t> m_Words;
 	};
 
@@ -159,8 +180,8 @@ VOXAGINE_CHECK(VoxelBrickGrid, OutOfRangeVoxelsAreIgnored)
 
 	const uint64_t uiVoxels = static_cast<uint64_t>(k_v3Size.x) * k_v3Size.y * k_v3Size.z;
 
-	grid->SetVoxel(static_cast<uint32_t>(uiVoxels), true);
-	grid->SetVoxel(0xFFFFFFFFu, true);
+	grid->SetVoxel(static_cast<uint32_t>(uiVoxels), k_uiStone);
+	grid->SetVoxel(0xFFFFFFFFu, k_uiStone);
 
 	CHECK_FALSE(grid->IsOccupied(static_cast<uint32_t>(uiVoxels)));
 	CHECK_EQ(grid.Validate(), 0u);
@@ -254,10 +275,84 @@ VOXAGINE_CHECK(VoxelBrickGrid, OneVoxelIsCountedOnceAtEveryLevel)
 			CHECK_EQ(grid.Mirror()[uiCellID], 1u);
 
 		if (uiLevel == 0)
-			CHECK_EQ(uint32_t(grid.Density()[uiCellID]), uint32_t(BrickGrid::DensityOf(1)));
+			CHECK_EQ(grid.Density(uiCellID), BrickGrid::DensityOf(1));
 	}
 
 	CHECK_EQ(grid.Validate(), 0u);
+}
+
+/* RENDERING_PLAN.md 7.3. The texel a bounce cone samples is the brick's albedo
+   in linear light, scaled by how full the cell is - so a half-empty cell of a
+   red wall reads as half as much red, and the box average that builds the
+   coarser mips stays exact without knowing anything about coverage. */
+VOXAGINE_CHECK(VoxelBrickGrid, TheFineTexelCarriesPremultipliedLinearAlbedo)
+{
+	BrickGrid grid;
+
+	const uint32_t uiRed = 0xFF2040C0u;
+
+	/* One voxel of a two-voxel-per-axis cell: LevelVolume(0) is 8, so this is
+	   an eighth full and the colour arrives at an eighth of its strength. */
+	grid.Write(9, 9, 9, uiRed);
+	grid->FlushDirty();
+
+	const UVector3& v3Fine = grid->GetLevelGridSize(0);
+
+	const uint32_t uiCellID = (9u >> VoxelBrickGrid::k_uiFineShift)
+		+ (9u >> VoxelBrickGrid::k_uiFineShift) * v3Fine.x
+		+ (9u >> VoxelBrickGrid::k_uiFineShift) * v3Fine.x * v3Fine.y;
+
+	const uint32_t uiDensity = BrickGrid::DensityOf(1);
+
+	CHECK_EQ(grid.Density(uiCellID), uiDensity);
+	CHECK_EQ(grid.Albedo(uiCellID), BrickGrid::PremultipliedOf(uiRed, uiDensity));
+
+	/* Filling the rest of the cell leaves the colour alone and takes the
+	   density to full, which is the only way the two can be told apart. */
+	for (uint32_t uiZ = 8; uiZ < 10; ++uiZ)
+	for (uint32_t uiY = 8; uiY < 10; ++uiY)
+	for (uint32_t uiX = 8; uiX < 10; ++uiX)
+		grid.Write(uiX, uiY, uiZ, uiRed);
+
+	grid->FlushDirty();
+
+	CHECK_EQ(grid.Density(uiCellID), 255u);
+	CHECK_EQ(grid.Albedo(uiCellID), VoxelBrickGrid::PackLinearAlbedo(uiRed));
+
+	/* And emptying it takes the premultiplied colour to black with it, rather
+	   than leaving a lit cell where there is no longer anything to light. */
+	for (uint32_t uiZ = 8; uiZ < 10; ++uiZ)
+	for (uint32_t uiY = 8; uiY < 10; ++uiY)
+	for (uint32_t uiX = 8; uiX < 10; ++uiX)
+		grid.Write(uiX, uiY, uiZ, 0u);
+
+	grid->FlushDirty();
+
+	CHECK_EQ(grid.Density(uiCellID), 0u);
+	CHECK_EQ(grid.Albedo(uiCellID), 0u);
+
+	CHECK_EQ(grid.Validate(), 0u);
+}
+
+/* The decode has to be the same curve the shaders use, or the bounce arrives in
+   a different colour space from everything it is added to. Endpoints are exact;
+   mid grey is the value Color.hlsl's SrgbToLinear produces. */
+VOXAGINE_CHECK(VoxelBrickGrid, TheAlbedoDecodeIsTheSrgbCurve)
+{
+	CHECK_EQ(VoxelBrickGrid::PackLinearAlbedo(0xFF000000u) & 0xFFu, 0u);
+	CHECK_EQ(VoxelBrickGrid::PackLinearAlbedo(0xFFFFFFFFu) & 0xFFu, 255u);
+
+	/* 0.5 sRGB is 0.2140 linear, which is 55 of 255. */
+	CHECK_EQ(VoxelBrickGrid::PackLinearAlbedo(0xFF808080u) & 0xFFu, 55u);
+
+	/* Channels do not bleed into each other, and they keep the voxel word's own
+	   order: red is the *low* byte and the tag is the high one, which is the
+	   layout an R8G8B8A8_UNORM texel wants anyway. */
+	const uint32_t uiPacked = VoxelBrickGrid::PackLinearAlbedo(0xFF0000FFu);
+
+	CHECK_EQ(uiPacked & 0xFFu, 255u);
+	CHECK_EQ((uiPacked >> 8) & 0xFFu, 0u);
+	CHECK_EQ((uiPacked >> 16) & 0xFFu, 0u);
 }
 
 VOXAGINE_CHECK(VoxelBrickGrid, ACoarseCellSumsTheFineOnesUnderIt)
@@ -324,7 +419,7 @@ VOXAGINE_CHECK(VoxelBrickGrid, TheBulkRegionPathMaintainsEveryLevel)
 			   that the count-to-byte conversion is exact at full occupancy
 			   rather than one short of it. */
 			if (uiLevel == 0)
-				CHECK_EQ(uint32_t(grid.Density()[uiCell]), 255u) << "cell " << uiCell;
+				CHECK_EQ(grid.Density(uiCell), 255u) << "cell " << uiCell;
 		}
 	}
 
@@ -342,7 +437,7 @@ VOXAGINE_CHECK(VoxelBrickGrid, TheBulkRegionPathMaintainsEveryLevel)
 			CHECK_EQ(grid->GetLevelCount(false, uiLevel, uiCell), 0u) << "level " << uiLevel;
 
 			if (uiLevel == 0)
-				CHECK_EQ(uint32_t(grid.Density()[uiCell]), 0u) << "cell " << uiCell;
+				CHECK_EQ(grid.Density(uiCell), 0u) << "cell " << uiCell;
 		}
 	}
 

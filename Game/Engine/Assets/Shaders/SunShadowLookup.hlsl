@@ -53,6 +53,29 @@ float2 SunShadowTap(uint uiIndex, uint uiCount, float fRotation)
    into the neighbouring column instead, so the bias only has to absorb what is
    left. Voxel faces are axis aligned, so one voxel of offset is exact rather
    than a tuned fudge. */
+/* One tap, no blocker search, no filter: is this *point* lit? For the bounce
+   cones of RENDERING_PLAN.md 7.3, which ask it of every cone sample and would
+   pay for PCSS thirty-five times a pixel.
+
+   A cone sample has no normal to offset along, so the bias is a tolerance along
+   the light instead - see GI_SUN_TOLERANCE for why one is needed at all, and
+   why it is not the receiver bias above. A hard 0-or-1 rather than a filtered
+   edge is deliberate: the cone averages tens of these and the aggregate is
+   smooth, where filtering each one would cost taps for softness nothing sees.
+   Off the map is lit, exactly as the receiver lookup assumes. */
+float GetSunVisibilityAt(float3 v3Position)
+{
+	float3 v3Light = SunShadowToLightSpace(v3Position);
+	float2 v2UV = SunShadowUV(v3Light.xy);
+
+	if (any(v2UV < 0.0) || any(v2UV > 1.0))
+		return 1.0;
+
+	float fDepth = sunShadowMap.SampleLevel(s0, v2UV, 0);
+
+	return (v3Light.z - GI_SUN_TOLERANCE <= fDepth) ? 1.0 : 0.0;
+}
+
 float GetSunVisibility(float3 v3Position, float3 v3Normal, float2 v2ScreenPosition)
 {
 	/* Both the offset and the depth bias scale with how edge-on this surface is

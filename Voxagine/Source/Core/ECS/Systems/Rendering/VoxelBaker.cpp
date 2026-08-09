@@ -175,7 +175,11 @@ namespace
 
 		out.Frame = pRenderer->GetFrame();
 		out.OverrideColor = pRenderer->GetOverrideColor().inst.Color;
-		out.State = static_cast<int32_t>(pRenderer->GetState());
+		/* The whole tag byte rather than the state alone, so that toggling
+		   Emissive counts as a changed stamp - the key's contract is "everything
+		   the stamped voxels are a function of", and the tag is one of them
+		   (RENDERING_PLAN.md 7.4). */
+		out.State = static_cast<int32_t>(VoxelStateTag(pRenderer->GetState(), pRenderer->IsEmissive()));
 	}
 }
 

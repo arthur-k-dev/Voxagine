@@ -264,8 +264,117 @@
    "full of black triangles" was. */
 #define AO_SURFACE_OFFSET 2.0
 
+/* --- Diffuse bounce light (RENDERING_PLAN.md 7.3) -------------------------
+   One bounce, gathered by the *same* cones that gather ambient occlusion. That
+   is the whole reason this phase is cheap: the pyramid texel is RGBA, so one
+   SampleLevel returns the coverage the occlusion term wants and the albedo the
+   bounce term wants together, and a second set of cones is never traced.
+
+   It is also why the plan's quarter-resolution GI pass and its bilateral
+   upsample are not here. Both were budgeted against bounce cones being *extra*
+   to the AO cones; they are not, and a quarter-res pass would need a G-buffer
+   the voxel pass does not produce - it shades inside the AABB proxies, so
+   position and normal exist only at hit time. Full resolution, sharing the
+   trace, measured cheaper than the upsample machinery would have cost. */
+#define GI_BOUNCE_ENABLED 1
+
+/* Irradiance gain on the gathered bounce, before the receiver's own albedo
+   multiplies it. Linear - this is not one of 7.2's converted constants, it is
+   authored against linear radiance.
+
+   Above 1 because a single bounce off a pyramid that only knows albedo is a
+   long way short of what a real second and third bounce deliver, and because
+   the cone samples one point of a footprint that is mostly not that point -
+   the same argument AO_CONE_STRENGTH makes. */
+#define GI_STRENGTH 2.0
+
+/* How much of the sun a cell that faces it receives, as a fraction. A pyramid
+   cell has no normal - it is a density and a colour - so there is nothing to
+   take an N.L against, and this is the one number standing in for the average
+   over whatever faces are in there. Half is the cosine-weighted average over a
+   hemisphere pointing at the light. */
+#define GI_SUN_WRAP 0.5
+
+/* Sky light reaching a bouncing cell. Flat rather than GetSkyLight's
+   normal-dependent lerp, for the same reason: no normal. It is the hemisphere's
+   average, which is the mean of its two colours. */
+#define GI_SKY_WRAP 0.5
+
+/* How far along the light a cell's own depth may exceed the first blocker in
+   its column and still count as lit. The shadow map records the front-most
+   surface, and a bouncing cell *is* usually that surface, one cell thick - so
+   without a tolerance every emitter shadows itself and the bounce is black.
+   Four voxels covers a level-0 cell read at any mip up to the third. */
+#define GI_SUN_TOLERANCE 4.0
+
+/* --- The voxel word's tag byte (RENDERING_PLAN.md 7.4) --------------------
+   A voxel is 0xTTBBGGRR and this is TT, reaching the shader as `.a` in 0..1.
+   Occupancy is `a > 0` (rule 3) and that is unchanged; what 7.4 added is that
+   the byte now actually holds what rule 3 always claimed, and has bits to
+   spare. These two are VoxRenderer.h's VOXEL_STATE_MASK and
+   VOXEL_EMISSIVE_TAG - change both sides or neither.
+
+   Compared as a scaled byte rather than against a float constant: a unorm 8-bit
+   value round-trips exactly through `a * 255`, and every alternative spelling
+   of this test invites an epsilon. */
+#define VOXEL_TAG_BYTE(a) ((uint)((a) * 255.0 + 0.5))
+#define VOXEL_EMISSIVE_TAG 0x80u
+
+#define IsEmissiveVoxel(a) ((VOXEL_TAG_BYTE(a) & VOXEL_EMISSIVE_TAG) != 0u)
+
+/* How much light an emissive voxel emits, as linear radiance, per unit of its
+   stored colour. Above 1 so that a mid-tone emissive palette entry reads as a
+   light source rather than as a surface that forgot to be shaded - it has to
+   out-run SUN_COLOR (0.69) on the same screen. */
+#define EMISSIVE_GAIN 2.5
+
+/* --- Environment specular (RENDERING_PLAN.md 7.4) -------------------------
+   One narrow cone along the reflected view ray, through the same pyramid the
+   diffuse cones read. Phase 5's point-light specular is a different thing and
+   is still unbuilt: that is a highlight from a lamp, this is a reflection of
+   the place.
+
+   Half-angle as a radius-over-distance ratio, well under AO_CONE_APERTURE
+   because a reflection that is as wide as an ambient cone is not a reflection.
+   The cost of narrowness is that it resolves to the fine pyramid levels for
+   most of its length - see GetConeSpecular - which is why it gets its own,
+   shorter step count rather than AO_CONE_STEPS. */
+#define SPEC_CONE_ENABLED 1
+#define SPEC_CONE_APERTURE 0.12
+#define SPEC_CONE_STEPS 5
+
+/* Reflectance at normal incidence. 0.04 is the standard dielectric value and
+   this art is stone, wood, cloth and sand - there is no metal in it. */
+#define SPEC_F0 0.04
+
+/* Below this Fresnel the cone is skipped entirely. At F0 = 0.04 a face within
+   about 50 degrees of head-on is under 0.06 and contributes less than a code of
+   8-bit output, so this is most of the screen not tracing a cone at all. */
+#define SPEC_CUTOFF 0.06
+
+/* Gain on the reflected radiance. Unturned by any eye. */
+#define SPEC_STRENGTH 1.0
+
+/* --- Aerial perspective (RENDERING_PLAN.md 6.1) ---------------------------
+   See Fog.hlsl for the shape of the curve and why it is applied to linear
+   radiance. These two are the whole tuning surface.
+
+   FOG_START is where it begins to bite, in world units from the camera. It is
+   set past the far side of the resident window at the game's usual camera
+   distance, so the fade begins on far-field geometry rather than on anything
+   the window is drawing in detail - which is what makes this a seam-hider
+   rather than a haze over the playfield.
+
+   FOG_DENSITY is the reciprocal of the distance *beyond* FOG_START at which
+   1 - 1/e of the surface is gone. At 0.0009 that is about 1100 units, so the
+   level's own far edge - roughly 2000 out - is nearly sky, and the endless
+   ground plane past it is entirely sky. */
+#define FOG_ENABLED 1
+#define FOG_START 200.0
+#define FOG_DENSITY 0.0014
+
 /* Sky colour for rays that leave the world without hitting anything or the
-   ground plane. Becomes fog input in RENDERING_PLAN.md phase 6.1. */
+   ground plane, and the colour everything fades toward - see Fog.hlsl. */
 #define SKY_COLOR float4(150.0 / 255.0, 230.0 / 255.0, 255.0 / 255.0, 1.0)
 
 /* How far inside the resident window an entry point computed on one of its

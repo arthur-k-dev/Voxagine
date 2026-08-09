@@ -64,6 +64,12 @@ public:
 	const std::string& GetScreenshot() const { return m_Screenshot; }
 	bool HasScreenshot() const { return !m_Screenshot.empty(); }
 
+	/* Ignore Settings' EnableVSync and FrameLimit and run the frame loop flat
+	   out. For measurement: a vsync-locked run leaves the GPU idle most of the
+	   frame, which lets it clock down, and a pass measured at two resolutions
+	   is then measured at two clocks. See Application::LoadSettings. */
+	bool IsUncapped() const { return m_bUncapped; }
+
 	/* Which pass's target the capture reads. The default is the composited
 	   image; naming an earlier pass is how an intermediate gets inspected
 	   without a debug shader - "Sun Shadow" dumps the shadow map itself. */
@@ -79,4 +85,5 @@ private:
 	uint32_t m_uiHeight = 0;
 
 	bool m_bHidden = false;
+	bool m_bUncapped = false;
 };

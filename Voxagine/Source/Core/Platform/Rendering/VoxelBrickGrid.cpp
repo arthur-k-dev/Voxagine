@@ -5,6 +5,7 @@
 #include "Core/Platform/Rendering/FrameProfiler.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <vector>
@@ -15,7 +16,30 @@ namespace
 	{
 		return (uiValue + uiDivisor - 1) / uiDivisor;
 	}
+
+	/* The same piecewise curve Color.hlsl's SrgbToLinear applies, evaluated once
+	   per code rather than per cone sample. Rounded to nearest, so a mid grey
+	   round-trips to within half a code of where the shader would have put it. */
+	std::array<uint8_t, 256> BuildLinearFromSrgb()
+	{
+		std::array<uint8_t, 256> table = {};
+
+		for (uint32_t i = 0; i < 256; ++i)
+		{
+			const double dSrgb = double(i) / 255.0;
+
+			const double dLinear = dSrgb <= 0.04045
+				? dSrgb / 12.92
+				: std::pow((dSrgb + 0.055) / 1.055, 2.4);
+
+			table[i] = static_cast<uint8_t>(dLinear * 255.0 + 0.5);
+		}
+
+		return table;
+	}
 }
+
+const std::array<uint8_t, 256> VoxelBrickGrid::k_LinearFromSrgb = BuildLinearFromSrgb();
 
 void VoxelBrickGrid::Resize(const UVector3& v3WorldSize)
 {
@@ -83,6 +107,22 @@ void VoxelBrickGrid::Resize(const UVector3& v3WorldSize)
 		ZeroCounts();
 	}
 
+	/* Reallocated whenever the levels were, and zeroed either way: a brick with
+	   no voxels in it contributes nothing whatever colour it names, but a stale
+	   colour surviving a world change would reach the first cone that finds
+	   geometry there before anything overwrote it. */
+	if (bLevelsChanged)
+	{
+		for (uint32_t i = 0; i < 2; ++i)
+			m_pColor[i] = m_uiBrickCount > 0
+				? std::unique_ptr<std::atomic<uint32_t>[]>(new std::atomic<uint32_t>[m_uiBrickCount]())
+				: nullptr;
+	}
+	else
+	{
+		ZeroColors();
+	}
+
 	ClearDirty();
 
 	/* Sized off the voxel count rather than the brick count: a window can keep
@@ -124,7 +164,7 @@ void VoxelBrickGrid::SetBuffers(uint32_t* pFront, uint32_t* pBack)
 	m_pGPU[m_uiFront ^ 1u] = pBack;
 }
 
-void VoxelBrickGrid::SetDensityBuffers(uint8_t* pFront, uint8_t* pBack)
+void VoxelBrickGrid::SetDensityBuffers(uint32_t* pFront, uint32_t* pBack)
 {
 	/* Here rather than at file scope because k_uiFineVolume is private, and in
 	   the class because a constexpr member function is not complete there. */
@@ -250,6 +290,18 @@ void VoxelBrickGrid::ZeroCounts()
 	}
 }
 
+void VoxelBrickGrid::ZeroColors()
+{
+	for (uint32_t i = 0; i < 2; ++i)
+	{
+		if (m_pColor[i] == nullptr)
+			continue;
+
+		for (uint32_t uiBrick = 0; uiBrick < m_uiBrickCount; ++uiBrick)
+			m_pColor[i][uiBrick].store(0, std::memory_order_relaxed);
+	}
+}
+
 void VoxelBrickGrid::ZeroOccupancy()
 {
 	for (uint32_t i = 0; i < 2; ++i)
@@ -332,8 +384,38 @@ void VoxelBrickGrid::Flush()
 			if (pCounts == nullptr)
 				continue;
 
-			for (uint32_t uiCell = 0; uiCell < m_uiLevelCells[uiLevel]; ++uiCell)
-				WriteMirror(i, uiLevel, uiCell, pCounts[uiCell].load(std::memory_order_relaxed));
+			if (uiLevel != 0)
+			{
+				for (uint32_t uiCell = 0; uiCell < m_uiLevelCells[uiLevel]; ++uiCell)
+					WriteMirror(i, uiLevel, uiCell, pCounts[uiCell].load(std::memory_order_relaxed));
+
+				continue;
+			}
+
+			/* Level 0 needs the albedo of the brick each cell sits in, which
+			   RebuildFineCells has in hand and a flat walk does not - so the
+			   cell coordinate is recovered and shifted down. The shift is the
+			   number of level doublings between the finest cell and a brick,
+			   which is what k_uiBrickLevel counts. */
+			const UVector3& v3Fine = m_v3LevelGrid[0];
+			const UVector3& v3Bricks = m_v3LevelGrid[k_uiBrickLevel];
+
+			for (uint32_t uiZ = 0; uiZ < v3Fine.z; ++uiZ)
+			for (uint32_t uiY = 0; uiY < v3Fine.y; ++uiY)
+			for (uint32_t uiX = 0; uiX < v3Fine.x; ++uiX)
+			{
+				const uint32_t uiCell = uiX + uiY * v3Fine.x + uiZ * v3Fine.x * v3Fine.y;
+
+				const uint32_t uiBrickID = (uiX >> k_uiBrickLevel)
+					+ (uiY >> k_uiBrickLevel) * v3Bricks.x
+					+ (uiZ >> k_uiBrickLevel) * v3Bricks.x * v3Bricks.y;
+
+				const uint32_t uiAlbedo = (m_pColor[i] != nullptr && uiBrickID < m_uiBrickCount)
+					? m_pColor[i][uiBrickID].load(std::memory_order_relaxed)
+					: 0u;
+
+				WriteDensityMirror(i, uiCell, pCounts[uiCell].load(std::memory_order_relaxed), uiAlbedo);
+			}
 		}
 	}
 
@@ -348,6 +430,7 @@ void VoxelBrickGrid::ClearAll()
 {
 	ZeroCounts();
 	ZeroOccupancy();
+	ZeroColors();
 
 	for (uint32_t i = 0; i < 2; ++i)
 	{
@@ -355,7 +438,7 @@ void VoxelBrickGrid::ClearAll()
 			memset(m_pGPU[i], 0, m_uiBrickCount * sizeof(uint32_t));
 
 		if (m_pDensity[i] != nullptr)
-			memset(m_pDensity[i], 0, m_uiLevelCells[0]);
+			memset(m_pDensity[i], 0, size_t(m_uiLevelCells[0]) * sizeof(uint32_t));
 	}
 
 	m_bDensityFull[0] = true;
@@ -487,6 +570,13 @@ void VoxelBrickGrid::RebuildFineCells(uint32_t uiBuffer, uint32_t uiBrickID)
 	const UVector3& v3Bricks = m_v3LevelGrid[k_uiBrickLevel];
 	const UVector3& v3Fine = m_v3LevelGrid[0];
 
+	/* One load for all eight cells: the albedo is carried per brick, so every
+	   cell under this one gets the same RGB and differs only in its density.
+	   See SetDensityBuffers on why that resolution is enough. */
+	const uint32_t uiAlbedo = m_pColor[uiBuffer] != nullptr
+		? m_pColor[uiBuffer][uiBrickID].load(std::memory_order_relaxed)
+		: 0u;
+
 	const uint32_t uiBrickX = uiBrickID % v3Bricks.x;
 	const uint32_t uiBrickY = (uiBrickID / v3Bricks.x) % v3Bricks.y;
 	const uint32_t uiBrickZ = uiBrickID / (v3Bricks.x * v3Bricks.y);
@@ -544,7 +634,7 @@ void VoxelBrickGrid::RebuildFineCells(uint32_t uiBuffer, uint32_t uiBrickID)
 				const uint16_t uiCount = uiCounts[uiX + uiY * uiPerAxis + uiZ * uiPerAxis * uiPerAxis];
 
 				pFine[uiCellID].store(uiCount, std::memory_order_relaxed);
-				WriteMirror(uiBuffer, 0, uiCellID, uiCount);
+				WriteDensityMirror(uiBuffer, uiCellID, uiCount, uiAlbedo);
 			}
 		}
 	}

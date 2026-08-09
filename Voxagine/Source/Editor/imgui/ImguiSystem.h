@@ -25,9 +25,13 @@ public:
 
 protected:
 	void InitStyle();
+	void UpdateDpiScale();
 
 	RenderContext* m_pRenderContext = nullptr;
 
 	ImPlatform* m_pPlatform = nullptr;
 	ImContext* m_pContext = nullptr;
+
+	float m_fDpiScale = 1.0f;
+	float m_fFontDpiScale = 1.0f;
 };

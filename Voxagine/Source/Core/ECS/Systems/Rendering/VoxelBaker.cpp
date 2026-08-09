@@ -235,6 +235,11 @@ uint32_t* VoxelBaker::Occupy(VoxRenderer* pRenderer, VoxRenderer::BakeData* pBak
 	   as well as an id does. See RENDERING_PLAN.md phase 4d. */
 	const uint16_t uiOwnerSlot = bIsStatic ? grid.AcquireOwnerSlot(uiEntityID) : VoxelOwnerVolume::k_uiNoOwnerSlot;
 
+	/* Counted so the drop below stops being silent. See the report after the
+	   loop for why this is worth four bytes of stack. */
+	uint32_t uiDropped = 0;
+	uint32_t uiPlaced = 0;
+
 	ForEachStampedVoxel(pRenderer, stamp, [&](const Vector3& worldPosition, uint32_t uiColor)
 	{
 		/* Written as an in-range test rather than a rejection test so a
@@ -263,8 +268,11 @@ uint32_t* VoxelBaker::Occupy(VoxRenderer* pRenderer, VoxRenderer::BakeData* pBak
 				        worldPosition.x, worldPosition.y, worldPosition.z);
 			}
 
+			++uiDropped;
 			return;
 		}
+
+		++uiPlaced;
 
 		// World space ID
 		const uint32_t uiWorldID = static_cast<uint32_t>(
@@ -346,6 +354,32 @@ uint32_t* VoxelBaker::Occupy(VoxRenderer* pRenderer, VoxRenderer::BakeData* pBak
 			uiBakedID++;
 		}
 	});
+
+	/* Voxels dropped for landing outside the world, reported once per renderer.
+	 *
+	 * This used to be entirely silent, and it hides a real authoring defect:
+	 * ComputeVoxelStampTransform centres a model on its transform, so a
+	 * renderer whose y is less than half its model's height has its base
+	 * clipped away with nothing said. A survey found 853 of 8039 renderers
+	 * across 21 levels clipped, 141 of them destructible - and in the arena a
+	 * walking monster was reduced to a 1-voxel sliver, which reads on screen as
+	 * a character that has partly disappeared.
+	 *
+	 * Most of the non-destructible ones are deliberate: burying a foundation is
+	 * how you hide a seam. So this warns rather than corrects - the fix for any
+	 * given entity is a level edit, and which ones are wrong is a judgement
+	 * nobody can make from in here. Once per renderer, because it happens every
+	 * time the thing is re-stamped. */
+	if (uiDropped > 0 && !pRenderer->m_BakeData.bWarnedClipped)
+	{
+		pRenderer->m_BakeData.bWarnedClipped = true;
+
+		fprintf(stderr, "[bake] '%s' (%s): %u of %u voxels are outside the world and were dropped%s\n",
+		        pRenderer->GetOwner() ? pRenderer->GetOwner()->GetName().c_str() : "?",
+		        pRenderer->GetFrame() ? "model" : "?",
+		        uiDropped, uiDropped + uiPlaced,
+		        uiPlaced == 0 ? " - nothing of it is drawn" : "");
+	}
 
 	pBakeData = pBakeData ? pBakeData : &pRenderer->m_BakeData;
 

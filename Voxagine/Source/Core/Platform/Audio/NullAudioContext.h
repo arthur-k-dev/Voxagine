@@ -4,9 +4,10 @@
 
 /* Silent AudioContext.
  *
- * FMOD ships as a proprietary SDK that has to be downloaded by hand, so it is
- * off by default and this stands in. Everything that plays a sound keeps
- * working; nothing is audible.
+ * Selected by AA_NONE, and the fallback when the engine is built with
+ * VOXAGINE_AUDIO_BACKEND=NONE. Everything that plays a sound keeps working;
+ * nothing is audible. Kept deliberately - CI and every --hidden capture run
+ * want it, and it is the cheapest way to prove a bug is not the audio backend.
  *
  * Channel handles are the SoundReference pointer itself rather than null, so
  * callers that compare or store handles still behave sensibly, and
@@ -21,6 +22,7 @@ public:
 	virtual void Update() override;
 
 	virtual bool CreateSound(const std::string& soundPath, void*& pSound, bool bIs3D = true) override;
+	virtual void DestroySound(void*& pSound) override;
 
 	virtual void PlaySound(const SoundReference* pSoundReference, void*& pChannel,
 	                       const Vector3& v3Position = Vector3(0.f), float fVolume = 1.0f,

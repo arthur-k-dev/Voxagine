@@ -35,9 +35,9 @@ TextureReference* ResourceManager::LoadTexture(const std::string& filePath)
 	return pTextureRef;
 }
 
-FMODSoundReference* ResourceManager::LoadSound(const std::string& filePath)
+PlatformSoundReference* ResourceManager::LoadSound(const std::string& filePath)
 {
-	FMODSoundReference* pSoundRef = m_soundManager.AddReference(filePath);
+	PlatformSoundReference* pSoundRef = m_soundManager.AddReference(filePath);
 	AudioContext* pAudioContext = m_pApp->GetPlatform().GetAudioContext();
 
 	if (!pSoundRef->IsLoaded() && pAudioContext)

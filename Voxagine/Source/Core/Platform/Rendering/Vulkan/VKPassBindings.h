@@ -3,7 +3,7 @@
 #include "Core/Platform/Rendering/RenderPass.h"
 #include "Core/Platform/Rendering/ComputePass.h"
 
-#include <vulkan/vulkan.h>
+#include <Core/Platform/Rendering/Vulkan/VulkanAPI.h>
 
 #include <cstdint>
 #include <string>

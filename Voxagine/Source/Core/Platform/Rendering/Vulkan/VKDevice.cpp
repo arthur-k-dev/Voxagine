@@ -21,6 +21,98 @@ namespace
 		return VK_FALSE;
 	}
 
+	/* Everything this renderer cannot run without, checked up front so the
+	   failure names itself.
+	 *
+	 * Before this, a device that was missing any of it got as far as
+	 * vkCreateDevice and failed with "vkCreateDevice failed" - and on a phone
+	 * that is the entire diagnostic the user or the crash report would carry.
+	 * The floor is deliberately hard: MOBILE_PORT_PLAN.md phase 4 rejected
+	 * building a reduced-feature path for older hardware, so the useful thing
+	 * to do about an unsupported device is say precisely which capability is
+	 * absent.
+	 *
+	 * Returns true if the device qualifies; otherwise fills `missing` with the
+	 * names of what it lacks. */
+	bool HasRequiredCapabilities(VkPhysicalDevice device, std::vector<const char*>& missing)
+	{
+		missing.clear();
+
+		VkPhysicalDeviceProperties props{};
+		vkGetPhysicalDeviceProperties(device, &props);
+
+		/* VKSwapchain records with vkCmdPipelineBarrier2/vkQueueSubmit2 and the
+		   passes use dynamic rendering, both core in 1.3 with no fallback path
+		   anywhere in this backend. */
+		if (props.apiVersion < VK_API_VERSION_1_3)
+			missing.push_back("Vulkan 1.3");
+
+		VkPhysicalDeviceScalarBlockLayoutFeatures scalar{};
+		scalar.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SCALAR_BLOCK_LAYOUT_FEATURES;
+
+		VkPhysicalDeviceSynchronization2Features sync2{};
+		sync2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES;
+		sync2.pNext = &scalar;
+
+		VkPhysicalDeviceTimelineSemaphoreFeatures timeline{};
+		timeline.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES;
+		timeline.pNext = &sync2;
+
+		VkPhysicalDeviceBufferDeviceAddressFeatures bufferAddress{};
+		bufferAddress.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES;
+		bufferAddress.pNext = &timeline;
+
+		VkPhysicalDeviceDescriptorIndexingFeatures descriptorIndexing{};
+		descriptorIndexing.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES;
+		descriptorIndexing.pNext = &bufferAddress;
+
+		VkPhysicalDeviceDynamicRenderingFeatures dynamicRendering{};
+		dynamicRendering.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES;
+		dynamicRendering.pNext = &descriptorIndexing;
+
+		VkPhysicalDeviceFeatures2 features{};
+		features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+		features.pNext = &dynamicRendering;
+
+		vkGetPhysicalDeviceFeatures2(device, &features);
+
+		if (!sync2.synchronization2)
+			missing.push_back("synchronization2");
+
+		if (!dynamicRendering.dynamicRendering)
+			missing.push_back("dynamicRendering");
+
+		if (!timeline.timelineSemaphore)
+			missing.push_back("timelineSemaphore");
+
+		if (!bufferAddress.bufferDeviceAddress)
+			missing.push_back("bufferDeviceAddress");
+
+		if (!descriptorIndexing.runtimeDescriptorArray ||
+			!descriptorIndexing.descriptorBindingVariableDescriptorCount ||
+			!descriptorIndexing.descriptorBindingPartiallyBound)
+			missing.push_back("descriptorIndexing (bindless textures)");
+
+		/* The shaders are compiled with -fvk-use-dx-layout because the engine
+		   memcpys tightly packed C++ structs into structured buffers, and the
+		   packed float3s that produces straddle 16-byte boundaries. Without
+		   scalarBlockLayout every element after the first is read from the
+		   wrong offset - which does not fail, it draws garbage. */
+		if (!scalar.scalarBlockLayout)
+			missing.push_back("scalarBlockLayout (needed by -fvk-use-dx-layout)");
+
+		if (!features.features.fragmentStoresAndAtomics)
+			missing.push_back("fragmentStoresAndAtomics");
+
+		if (!features.features.vertexPipelineStoresAndAtomics)
+			missing.push_back("vertexPipelineStoresAndAtomics");
+
+		if (!features.features.shaderStorageImageWriteWithoutFormat)
+			missing.push_back("shaderStorageImageWriteWithoutFormat");
+
+		return missing.empty();
+	}
+
 	bool HasLayer(const char* pName)
 	{
 		uint32_t uiCount = 0;
@@ -46,6 +138,16 @@ VKDevice::~VKDevice()
 
 bool VKDevice::CreateInstance(const std::vector<const char*>& a_InstanceExtensions, bool bEnableValidation)
 {
+	/* Nothing Vulkan can be called before this: with volk every entry point is
+	   a null function pointer until the loader has been opened. See
+	   VulkanAPI.h for why the engine loads Vulkan dynamically at all - the
+	   short version is that Android's libvulkan.so exports nothing past 1.1. */
+	if (volkInitialize() != VK_SUCCESS)
+	{
+		fprintf(stderr, "[vulkan] no Vulkan loader on this system\n");
+		return false;
+	}
+
 	m_bValidationEnabled = bEnableValidation && HasLayer(kValidationLayer);
 
 	if (bEnableValidation && !m_bValidationEnabled)
@@ -80,6 +182,11 @@ bool VKDevice::CreateInstance(const std::vector<const char*>& a_InstanceExtensio
 		fprintf(stderr, "[vulkan] vkCreateInstance failed\n");
 		return false;
 	}
+
+	/* Promotes the entry points from the loader's trampolines to this
+	   instance's, and is what makes every 1.1+ instance-level function
+	   non-null. Everything below this line depends on it. */
+	volkLoadInstance(m_Instance);
 
 	if (m_bValidationEnabled)
 	{
@@ -168,6 +275,11 @@ bool VKDevice::PickPhysicalDevice(VkSurfaceKHR surface)
 	uint32_t uiFallbackGraphics = UINT32_MAX;
 	uint32_t uiFallbackPresent = UINT32_MAX;
 
+	/* Collected so that "no usable device" can say what each candidate was
+	   short of, rather than just that there wasn't one. On a phone this
+	   message is the whole bug report. */
+	std::string rejections;
+
 	for (VkPhysicalDevice device : devices)
 	{
 		uint32_t uiGraphics = 0;
@@ -181,6 +293,18 @@ bool VKDevice::PickPhysicalDevice(VkSurfaceKHR surface)
 
 		VkPhysicalDeviceProperties props{};
 		vkGetPhysicalDeviceProperties(device, &props);
+
+		std::vector<const char*> missing;
+
+		if (!HasRequiredCapabilities(device, missing))
+		{
+			rejections += std::string("\n  ") + props.deviceName + " lacks:";
+
+			for (const char* pMissing : missing)
+				rejections += std::string(" ") + pMissing + ";";
+
+			continue;
+		}
 
 		/* Prefer a discrete GPU, but take whatever presents if there is none. */
 		if (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU)
@@ -209,7 +333,14 @@ bool VKDevice::PickPhysicalDevice(VkSurfaceKHR surface)
 
 	if (fallback == VK_NULL_HANDLE)
 	{
-		fprintf(stderr, "[vulkan] no device can present to this surface\n");
+		if (rejections.empty())
+			fprintf(stderr, "[vulkan] no device can present to this surface\n");
+		else
+			fprintf(stderr,
+				"[vulkan] no device meets this renderer's requirements.%s\n"
+				"[vulkan] Bit Buster needs Vulkan 1.3; there is no fallback path.\n",
+				rejections.c_str());
+
 		return false;
 	}
 
@@ -310,6 +441,11 @@ bool VKDevice::CreateDevice(VkSurfaceKHR surface)
 		fprintf(stderr, "[vulkan] vkCreateDevice failed\n");
 		return false;
 	}
+
+	/* Swaps the device-level entry points for this device's own, skipping the
+	   loader's dispatch on every draw call. Safe because this engine creates
+	   exactly one device; a second one would need volkLoadDeviceTable instead. */
+	volkLoadDevice(m_Device);
 
 	vkGetDeviceQueue(m_Device, m_uiGraphicsFamily, 0, &m_GraphicsQueue);
 	vkGetDeviceQueue(m_Device, m_uiPresentFamily, 0, &m_PresentQueue);

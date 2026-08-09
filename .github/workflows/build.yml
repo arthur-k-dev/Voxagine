@@ -25,9 +25,17 @@ jobs:
                                   libxrandr-dev libxi-dev libxcursor-dev
 
       # Ubuntu does not package SDL3 yet, so build the release tag we target.
+      #
+      # The tag is read out of CMake/SDL3.cmake rather than written here. It
+      # used to be a literal, and it had already drifted a long way behind the
+      # one the tree actually asks for - which is the sort of thing that turns
+      # into "works locally, fails in CI" for a reason nobody can see in the
+      # diff.
       - name: Build SDL3
         run: |
-          git clone --depth 1 --branch release-3.2.0 https://github.com/libsdl-org/SDL.git sdl3
+          SDL_TAG=$(sed -n 's/^set(VOXAGINE_SDL3_TAG "\([^"]*\)".*/\1/p' CMake/SDL3.cmake)
+          echo "Building SDL3 $SDL_TAG"
+          git clone --depth 1 --branch "$SDL_TAG" https://github.com/libsdl-org/SDL.git sdl3
           cmake -S sdl3 -B sdl3/build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release -DSDL_SHARED=ON -DSDL_STATIC=OFF
           cmake --build sdl3/build
@@ -39,7 +47,7 @@ jobs:
       # VOXAGINE_BUILD_ENGINE was off here for the whole port, which meant the
       # only C++ CI compiled was VulkanBringup.cpp plus Core/Settings.cpp for
       # the RTTR check - the engine, the game and the editor were not covered at
-      # all. Turning it on is what DESTRUCTION_PLAN.md phase 0 needs (the unit
+      # all. Turning it on is what Docs/DESTRUCTION_PLAN.md phase 0 needs (the unit
       # tests and the gauntlet link the engine) and is what CLAUDE.md already
       # called the single highest-value change to this workflow.
       #
@@ -73,3 +81,63 @@ jobs:
       - name: Test
         working-directory: Build/ci
         run: ctest --output-on-failure
+
+  # ---------------------------------------------------------------------------
+  # Android, compile only.
+  #
+  # Same philosophy as the Linux job: no GPU, no display, no device - this
+  # proves the engine cross-compiles and links for arm64, which is the thing
+  # that actually breaks. Three real defects turned up the first time it was
+  # done by hand (an <emmintrin.h> in Core/Math.h, an abs() on a float that
+  # header had been hiding, and a format string that is -Werror here and not on
+  # GCC), and every one of them was invisible to the Linux job.
+  #
+  # The NDK is preinstalled on GitHub's ubuntu runners. SDL3 and RTTR are built
+  # from source by the CMake configure, with the same toolchain - see
+  # CMake/SDL3.cmake for why find_package cannot be used on a cross build.
+  #
+  # No Gradle and no APK. The Java half of Platforms/Android/ has never been run
+  # anywhere, so a job asserting it works would be asserting something nobody
+  # has established; see Docs/MOBILE_PORT_LOG.md.
+  android:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        build_type: [Debug, Release]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build
+
+      - name: Configure
+        run: |
+          cmake -S . -B Build/ci-android -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_LATEST_HOME/build/cmake/android.toolchain.cmake \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-31 \
+            -DANDROID_STL=c++_shared \
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+            -DVOXAGINE_BUILD_ENGINE=ON \
+            -DVOXAGINE_BUILD_EDITOR=OFF \
+            -DVOXAGINE_BUILD_BRINGUP=OFF
+
+      - name: Build
+        run: cmake --build Build/ci-android
+
+      # The whole point of the job: libmain.so exists and nothing is unresolved.
+      # Android's libvulkan.so exports nothing past Vulkan 1.1, so a renderer
+      # built on core-1.3 sync2 would leave undefined symbols here - see
+      # Vulkan/VulkanAPI.h for why the engine loads Vulkan through volk.
+      - name: Check the library links clean
+        run: |
+          test -f Build/ci-android/libmain.so
+          NM=$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm
+          if $NM -D --undefined-only Build/ci-android/libmain.so | grep ' vk'; then
+            echo "::error::libmain.so has undefined Vulkan symbols - see Vulkan/VulkanAPI.h"
+            exit 1
+          fi

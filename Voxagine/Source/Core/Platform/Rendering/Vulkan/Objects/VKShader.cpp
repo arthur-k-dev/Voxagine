@@ -8,7 +8,7 @@
 #include <fstream>
 
 /* DX12 compiled HLSL at load time with D3DCompileFromFile. Shaders are now
-   compiled to SPIR-V ahead of time by cmake/Shaders.cmake, so this only has to
+   compiled to SPIR-V ahead of time by CMake/Shaders.cmake, so this only has to
    read the .spv next to the .hlsl and build a module from it. */
 
 namespace

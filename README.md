@@ -43,12 +43,13 @@ zenity or kdialog on Linux.
 ## Building & running
 
 Builds go through `CMakePresets.json`, which any recent CMake, CLion or Rider
-reads directly. Five presets - `game`, `game-release`, `editor`,
-`editor-release`, `bringup` - each writing to `Build/<preset>/`.
+reads directly. Five desktop presets - `game`, `game-release`, `editor`,
+`editor-release`, `bringup` - each writing to
+`Build/<Linux|Windows>/<Type>/<Debug|Release>/`.
 
 ```bash
 cmake --preset game && cmake --build --preset game
-cd Game && ../Build/game/bin/BitBuster    # run from Game/, asset paths are relative
+cd Game && ../Build/Linux/Game/Debug/bin/BitBuster    # run from Game/, asset paths are relative
 ```
 
 The editor is the same executable with the editor compiled in; swap `game` for
@@ -61,7 +62,7 @@ which makes it the quickest check that a toolchain is set up:
 
 ```bash
 cmake --preset bringup && cmake --build --preset bringup
-./Build/bringup/bin/voxagine_bringup --frames 120
+./Build/Linux/Bringup/Debug/bin/voxagine_bringup --frames 120
 ```
 
 ## Port status
@@ -102,7 +103,7 @@ this repository, on `std::filesystem` and the platform dialog APIs.
 | `Game/`                  | Bit Buster, built on Voxagine                         |
 | `SplodyMcSplodeFace/`    | An earlier game built on an earlier version of the engine |
 | `UnitTesting/`           | Unit tests (allocators, reflection, physics, pathfinding, lighting) |
-| `cmake/`                 | Build helper scripts                                  |
+| `CMake/`                 | Build helper scripts                                  |
 
 ## Status
 

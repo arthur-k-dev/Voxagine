@@ -7,7 +7,7 @@
         "FontPath": "Engine/Assets/Fonts/PressStart.spritefont",
         "PlatformType": "PT_WINDOWS",
         "RenderApiType": "RA_VULKAN",
-        "AudioApiType": "AA_FMOD",
+        "AudioApiType": "AA_MINIAUDIO",
         "FixedTimeStep": 0.016666666666666668,
         "FrameLimit": 0.0,
         "EnableVSync": true,

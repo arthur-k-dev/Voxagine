@@ -10,7 +10,6 @@
             "name": "base",
             "hidden": true,
             "generator": "Ninja",
-            "binaryDir": "${sourceDir}/Build/${presetName}",
             "cacheVariables": {
                 "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
             }
@@ -29,6 +28,7 @@
             "displayName": "Game (Debug)",
             "description": "BitBuster without the editor. Run it from Game/ - assets are relative.",
             "inherits": "engine",
+            "binaryDir": "${sourceDir}/Build/${hostSystemName}/Game/Debug",
             "cacheVariables": {
                 "VOXAGINE_BUILD_EDITOR": "OFF",
                 "CMAKE_BUILD_TYPE": "Debug"
@@ -39,6 +39,7 @@
             "displayName": "Game (Release)",
             "description": "As above, optimised and without the Vulkan validation layers.",
             "inherits": "game",
+            "binaryDir": "${sourceDir}/Build/${hostSystemName}/Game/Release",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Release"
             }
@@ -48,6 +49,7 @@
             "displayName": "Editor (Debug)",
             "description": "BitBuster with the editor. EDITOR is defined on the library, not just the executable.",
             "inherits": "engine",
+            "binaryDir": "${sourceDir}/Build/${hostSystemName}/Editor/Debug",
             "cacheVariables": {
                 "VOXAGINE_BUILD_EDITOR": "ON",
                 "CMAKE_BUILD_TYPE": "Debug"
@@ -58,6 +60,7 @@
             "displayName": "Editor (Release)",
             "description": "As above, optimised and without the Vulkan validation layers.",
             "inherits": "editor",
+            "binaryDir": "${sourceDir}/Build/${hostSystemName}/Editor/Release",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Release"
             }
@@ -67,9 +70,54 @@
             "displayName": "Bring-up (Debug)",
             "description": "Vulkan bring-up target only. No engine, so no RTTR fetch - this is the offline-capable build.",
             "inherits": "base",
+            "binaryDir": "${sourceDir}/Build/${hostSystemName}/Bringup/Debug",
             "cacheVariables": {
                 "VOXAGINE_BUILD_ENGINE": "OFF",
                 "VOXAGINE_BUILD_BRINGUP": "ON",
+                "CMAKE_BUILD_TYPE": "Debug"
+            }
+        },
+        {
+            "name": "android-arm64",
+            "displayName": "Android arm64 (Debug)",
+            "description": "BitBuster as libmain.so for arm64-v8a. Needs ANDROID_NDK_HOME (or -DCMAKE_ANDROID_NDK). SDL3 is built from source; see CMake/SDL3.cmake.",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/Build/Android/Game/Debug",
+            "toolchainFile": "$env{ANDROID_NDK_HOME}/build/cmake/android.toolchain.cmake",
+            "cacheVariables": {
+                "ANDROID_ABI": "arm64-v8a",
+                "ANDROID_PLATFORM": "android-31",
+                "ANDROID_STL": "c++_shared",
+                "VOXAGINE_BUILD_ENGINE": "ON",
+                "VOXAGINE_BUILD_EDITOR": "OFF",
+                "VOXAGINE_BUILD_BRINGUP": "OFF",
+                "CMAKE_BUILD_TYPE": "Debug",
+                "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+            }
+        },
+        {
+            "name": "android-arm64-release",
+            "displayName": "Android arm64 (Release)",
+            "description": "As above, optimised and without the Vulkan validation layers. This is the one to ship.",
+            "inherits": "android-arm64",
+            "binaryDir": "${sourceDir}/Build/Android/Game/Release",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release"
+            }
+        },
+        {
+            "name": "ios",
+            "displayName": "iOS (Debug) - UNVERIFIED",
+            "description": "Needs macOS, Xcode and a MoltenVK install (-DVOXAGINE_MOLTENVK_DIR). Never configured; see Docs/MOBILE_PORT_LOG.md.",
+            "generator": "Xcode",
+            "binaryDir": "${sourceDir}/Build/iOS/Game/Debug",
+            "cacheVariables": {
+                "CMAKE_SYSTEM_NAME": "iOS",
+                "CMAKE_OSX_DEPLOYMENT_TARGET": "16.0",
+                "CMAKE_OSX_ARCHITECTURES": "arm64",
+                "VOXAGINE_BUILD_ENGINE": "ON",
+                "VOXAGINE_BUILD_EDITOR": "OFF",
+                "VOXAGINE_BUILD_BRINGUP": "OFF",
                 "CMAKE_BUILD_TYPE": "Debug"
             }
         }
@@ -99,6 +147,21 @@
             "name": "bringup",
             "displayName": "Bring-up (Debug)",
             "configurePreset": "bringup"
+        },
+        {
+            "name": "android-arm64",
+            "displayName": "Android arm64 (Debug)",
+            "configurePreset": "android-arm64"
+        },
+        {
+            "name": "android-arm64-release",
+            "displayName": "Android arm64 (Release)",
+            "configurePreset": "android-arm64-release"
+        },
+        {
+            "name": "ios",
+            "displayName": "iOS (Debug) - UNVERIFIED",
+            "configurePreset": "ios"
         }
     ]
 }

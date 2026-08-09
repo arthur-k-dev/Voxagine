@@ -410,6 +410,13 @@ public:
 	/* Resizes the context, buffers and window */
 	virtual bool OnResize(uint32_t uiWidth, uint32_t uiHeight);
 
+	/* The app is about to lose (or has just regained) the window/surface -
+	   Android's onPause/onResume. Desktop never calls these; the default does
+	   nothing, which is correct there. VKRenderContext is the real
+	   implementation - see its header for why a resize is not enough. */
+	virtual void SuspendForBackground() {}
+	virtual bool ResumeFromBackground() { return true; }
+
 	Event<bool> FullscreenChanged;
 	Event<uint32_t, uint32_t, IVector2> SizeChanged;
 

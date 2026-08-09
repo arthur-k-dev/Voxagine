@@ -2,7 +2,7 @@
 
 #include "Core/Platform/Rendering/Vulkan/VKShaderBindings.h"
 
-#include <vulkan/vulkan.h>
+#include <Core/Platform/Rendering/Vulkan/VulkanAPI.h>
 
 #include <cstdint>
 #include <vector>

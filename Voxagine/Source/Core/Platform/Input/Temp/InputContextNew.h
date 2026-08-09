@@ -5,6 +5,7 @@
 #include "MouseController.h"
 #include "KeyboardController.h"
 #include "GamePadController.h"
+#include "TouchController.h"
 
 #include "MouseControllerInterface.h"
 #include "KeyboardControllerInterface.h"
@@ -91,6 +92,7 @@ private:
 	MouseController* GetMouseController() override;
 	KeyboardController* GetKeyBoardController() override;
 	GamePadController* GetGamePadController() override;
+	TouchController* GetTouchController() override;
 
 private:
 	WindowContext* m_WindowContext = nullptr;
@@ -102,4 +104,8 @@ private:
 	mutable std::vector<GamePadController> m_GamePadControllers;
 	mutable MouseController m_MouseController;
 	mutable KeyboardController m_KeyboardController;
+
+	/* One, not one per player: there is one screen. Only player one is given
+	   it - see Initialize. */
+	mutable TouchController m_TouchController;
 };

@@ -10,7 +10,7 @@
  * is an invalid descriptor set layout - VoxelRenderer.ps.hlsl does exactly
  * that. DXC's -fvk-*-shift options move each class into a disjoint range.
  *
- * These MUST match the shifts passed in cmake/Shaders.cmake. They are the
+ * These MUST match the shifts passed in CMake/Shaders.cmake. They are the
  * contract between the compiled SPIR-V and the descriptor set layouts built
  * on the C++ side. */
 namespace VKBindings

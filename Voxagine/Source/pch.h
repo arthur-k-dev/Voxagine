@@ -18,7 +18,9 @@
 #include "Core/Math.h"
 #include "Core/VColors.h"
 #include "Core/GameTimer.h"
-#include "Core/FileBrowser.h"
+/* Core/FileBrowser.h is deliberately not here. It pulls in nativefiledialog,
+   which has exactly one consumer (Editor.cpp) and no implementation on iOS or
+   Android - and a pch include put it in front of all 147 translation units. */
 
 #include "Core/ECS/Systems/ScriptSystem.h"
 

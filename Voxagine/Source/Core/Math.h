@@ -1,6 +1,13 @@
 #pragma once
 #include <cfloat>
-#include <emmintrin.h>
+
+/* Explicit, because <emmintrin.h> used to sit here and drag it in - so the
+   float overloads of abs/floor/sqrt were visible to every translation unit
+   that included this, by accident. Removing the SSE header for the arm64 build
+   turned one call site into `int abs(int)` on a float, which compiles and
+   silently truncates. Keeping <cmath> here keeps that from happening again to
+   the other ninety-odd files that assume it. */
+#include <cmath>
 
 // GLM
 #define GLM_FORCE_LEFT_HANDED
@@ -80,9 +87,14 @@ struct VColor
 	} inst;
 };
 
+/* Truncating float->int. This used to be _mm_cvtt_ss2si, which is exactly what
+   a C cast compiles to on x86 anyway - and the <emmintrin.h> it needed was the
+   single thing stopping this header, and so most of the engine, from compiling
+   for arm64. It has no callers; kept because the name is referenced in the
+   original coursework notes. */
 inline int ftoi_sse1(float f)
 {
-	return _mm_cvtt_ss2si(_mm_load_ss(&f));     // SSE1 instructions for float->int
+	return static_cast<int>(f);
 }
 /* glm::normalize divides by the length, so normalizing a zero-length vector
    produces NaN rather than failing. That NaN then spreads through whatever it

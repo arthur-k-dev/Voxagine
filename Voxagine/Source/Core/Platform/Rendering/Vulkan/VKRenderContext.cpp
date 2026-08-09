@@ -180,6 +180,80 @@ void VKRenderContext::Deinitialize()
 	m_bBackendReady = false;
 }
 
+void VKRenderContext::SuspendForBackground()
+{
+	if (!m_bBackendReady)
+		return;
+
+	/* Every command buffer this surface's images could still be referenced by
+	   has to be retired before the surface goes away under it - the same
+	   reason a resize waits, just triggered by onPause instead of a
+	   WM_SIZE-equivalent. */
+	WaitForGPU();
+
+	m_Swapchain.Destroy();
+
+	if (m_Surface != VK_NULL_HANDLE)
+	{
+		vkDestroySurfaceKHR(m_Device.GetInstance(), m_Surface, nullptr);
+		m_Surface = VK_NULL_HANDLE;
+	}
+
+	/* Clear()/Present() already early-out on this - the same guard that
+	   covers the window between InitializeBackend failing and the app giving
+	   up, now covers the window between backgrounding and returning. */
+	m_bBackendReady = false;
+
+	printf("[vulkan] surface and swapchain released for the background\n");
+}
+
+bool VKRenderContext::ResumeFromBackground()
+{
+	SDLWindowContext* pWindow = static_cast<SDLWindowContext*>(m_pPlatform->GetWindowContext());
+
+	if (pWindow == nullptr)
+		return false;
+
+	/* A fresh VkSurfaceKHR from whatever ANativeWindow the platform handed
+	   SDL this time - not necessarily the one destroyed in
+	   SuspendForBackground, and it does not need to be: nothing here assumes
+	   continuity with the old one. */
+	if (!pWindow->CreateSurface(m_Device.GetInstance(), &m_Surface))
+	{
+		fprintf(stderr, "[vulkan] could not recreate the surface on foreground re-entry\n");
+		return false;
+	}
+
+	const UVector2 size = pWindow->GetSize();
+
+	if (!m_Swapchain.Create(&m_Device, m_Surface, size.x, size.y,
+	                        m_pPlatform->GetApplication()->GetSettings().IsVSyncEnabled()))
+	{
+		fprintf(stderr, "[vulkan] could not recreate the swapchain on foreground re-entry\n");
+
+		vkDestroySurfaceKHR(m_Device.GetInstance(), m_Surface, nullptr);
+		m_Surface = VK_NULL_HANDLE;
+
+		return false;
+	}
+
+	m_v2ScreenResolution = UVector2(m_Swapchain.GetExtent().width, m_Swapchain.GetExtent().height);
+	m_bBackendReady = true;
+
+	/* The base implementation, deliberately not this class's own OnResize
+	   override: that one starts by recreating the swapchain, which was just
+	   built fresh above from a surface that did not exist a moment ago. This
+	   only has to do the other half - resize render targets and fire
+	   SizeChanged - and only if the size actually moved, which covers a
+	   rotation that happened while the app had no surface to notice it with. */
+	RenderContext::OnResize(m_v2ScreenResolution.x, m_v2ScreenResolution.y);
+
+	printf("[vulkan] surface and swapchain rebuilt on returning from background, %ux%u\n",
+	       m_v2ScreenResolution.x, m_v2ScreenResolution.y);
+
+	return true;
+}
+
 void VKRenderContext::Clear()
 {
 	if (!m_bBackendReady)
@@ -294,7 +368,7 @@ bool VKRenderContext::OnResize(uint32_t uiWidth, uint32_t uiHeight)
 
 void VKRenderContext::LoadShader(ShaderReference* pShaderReference)
 {
-	/* Shaders are compiled to SPIR-V ahead of time by cmake/Shaders.cmake.
+	/* Shaders are compiled to SPIR-V ahead of time by CMake/Shaders.cmake.
 	   Wiring ShaderReference to those modules belongs with VKShader, which
 	   lands alongside the pass layer. */
 	VX_UNUSED(pShaderReference);

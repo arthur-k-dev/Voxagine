@@ -1,6 +1,8 @@
 #include "pch.h"
 #include "SDLGamePad.h"
 
+#include <algorithm>
+
 #include <SDL3/SDL.h>
 
 #include <cstdio>
@@ -15,17 +17,53 @@ struct GamePad::Pad
 
 namespace
 {
-	/* SDL reports sticks as int16 and triggers as 0..32767. DirectXTK used
-	   -1..1 and 0..1, and the engine's dead zones are tuned for that. */
-	float NormalizeStick(int16_t iValue)
+	/* Dead zones, and the reason they are here rather than "tuned for" here.
+	 *
+	 * The comment that used to be on this block said the engine's dead zones
+	 * were tuned for DirectXTK's -1..1 range. They were - but DirectXTK applied
+	 * the dead zone *itself*, inside GamePad::GetState(player, deadZoneMode),
+	 * and this SDL replacement dropped the parameter along with the behaviour.
+	 * Nothing else in the tree applies one: a grep for "deadzone" finds only
+	 * the touch controller. So every raw stick value went straight into
+	 * MoveRight/MoveForward, and a controller resting a fraction off centre
+	 * walked the player across the level. Reported as stick drift on a
+	 * Backbone One whose hardware is provably fine - its four axes read exactly
+	 * 0 at rest, and the kernel even publishes `flat 4095` to say how much
+	 * slack to allow.
+	 *
+	 * The thresholds are XInput's, which is what DirectXTK used and therefore
+	 * what this game's movement was tuned against. The rescale matters as much
+	 * as the threshold: without it the stick jumps from 0 to 0.24 the moment it
+	 * leaves the dead zone, and fine movement is impossible. */
+	const float k_fStickMax = 32767.f;
+	const float k_fLeftStickDeadZone = 7849.f;    // XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE
+	const float k_fRightStickDeadZone = 8689.f;   // XINPUT_GAMEPAD_RIGHT_THUMB_DEADZONE
+	const float k_fTriggerDeadZone = 30.f * (32767.f / 255.f); // XINPUT_GAMEPAD_TRIGGER_THRESHOLD
+
+	/* DirectXTK's ApplyLinearDeadZone, reproduced: zero inside the dead zone,
+	   and outside it rescaled so the usable range still spans 0..1. */
+	float ApplyLinearDeadZone(float fValue, float fMax, float fDeadZone)
 	{
-		return iValue < 0 ? static_cast<float>(iValue) / 32768.f
-		                  : static_cast<float>(iValue) / 32767.f;
+		if (fValue < -fDeadZone)
+			fValue += fDeadZone;
+		else if (fValue > fDeadZone)
+			fValue -= fDeadZone;
+		else
+			return 0.f;
+
+		const float fScaled = fValue / (fMax - fDeadZone);
+
+		return std::max(-1.f, std::min(fScaled, 1.f));
+	}
+
+	float NormalizeStick(int16_t iValue, float fDeadZone)
+	{
+		return ApplyLinearDeadZone(static_cast<float>(iValue), k_fStickMax, fDeadZone);
 	}
 
 	float NormalizeTrigger(int16_t iValue)
 	{
-		return static_cast<float>(iValue) / 32767.f;
+		return ApplyLinearDeadZone(static_cast<float>(iValue), k_fStickMax, k_fTriggerDeadZone);
 	}
 }
 
@@ -170,12 +208,12 @@ GamePad::State GamePad::GetState(int iPlayer)
 	state.dpad.left = SDL_GetGamepadButton(pGamepad, SDL_GAMEPAD_BUTTON_DPAD_LEFT);
 	state.dpad.right = SDL_GetGamepadButton(pGamepad, SDL_GAMEPAD_BUTTON_DPAD_RIGHT);
 
-	state.thumbSticks.leftX = NormalizeStick(SDL_GetGamepadAxis(pGamepad, SDL_GAMEPAD_AXIS_LEFTX));
-	state.thumbSticks.rightX = NormalizeStick(SDL_GetGamepadAxis(pGamepad, SDL_GAMEPAD_AXIS_RIGHTX));
+	state.thumbSticks.leftX = NormalizeStick(SDL_GetGamepadAxis(pGamepad, SDL_GAMEPAD_AXIS_LEFTX), k_fLeftStickDeadZone);
+	state.thumbSticks.rightX = NormalizeStick(SDL_GetGamepadAxis(pGamepad, SDL_GAMEPAD_AXIS_RIGHTX), k_fRightStickDeadZone);
 
 	/* SDL's Y axis points down, DirectXTK's points up. */
-	state.thumbSticks.leftY = -NormalizeStick(SDL_GetGamepadAxis(pGamepad, SDL_GAMEPAD_AXIS_LEFTY));
-	state.thumbSticks.rightY = -NormalizeStick(SDL_GetGamepadAxis(pGamepad, SDL_GAMEPAD_AXIS_RIGHTY));
+	state.thumbSticks.leftY = -NormalizeStick(SDL_GetGamepadAxis(pGamepad, SDL_GAMEPAD_AXIS_LEFTY), k_fLeftStickDeadZone);
+	state.thumbSticks.rightY = -NormalizeStick(SDL_GetGamepadAxis(pGamepad, SDL_GAMEPAD_AXIS_RIGHTY), k_fRightStickDeadZone);
 
 	state.triggers.left = NormalizeTrigger(SDL_GetGamepadAxis(pGamepad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER));
 	state.triggers.right = NormalizeTrigger(SDL_GetGamepadAxis(pGamepad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER));

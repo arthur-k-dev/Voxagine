@@ -29,6 +29,52 @@ struct VoxelStampTransform
 };
 
 /* False when the renderer has no frame to stamp. */
+/* Euler angles in degrees, without the ±90° degeneracy that glm::eulerAngles
+   has - and this is an architecture-dependent bug, not a theoretical one.
+ *
+ * glm computes pitch as atan2(2(yz + wx), w² - x² - y² + z²). For a pure yaw
+ * the numerator is exactly zero and the denominator is cos(yaw), which at
+ * exactly ±90° is *mathematically* zero. atan2(0, +0.0) is 0 and
+ * atan2(0, -0.0) is π, so the sign of a floating-point epsilon decides between
+ * an upright model and one rotated 180° in pitch *and* roll.
+ *
+ * x86-64 GCC and aarch64 Clang do not agree on that sign, because Clang
+ * contracts w*w - y*y into an FMA and rounds differently. The symptom was a
+ * character that appeared upside down when facing exactly left or right, on
+ * Android only - and a round-trip test compiled on the desktop passes, which
+ * is exactly why this went unnoticed for years of desktop play.
+ *
+ * The fix is not to make the epsilon come out positive. It is to stop asking
+ * atan2 a question with no answer: when both of its arguments are within an
+ * epsilon of zero the angle is genuinely undefined, and for a rotation that is
+ * a pure yaw the right choice is zero. Note this only triggers *at* the
+ * degeneracy - at yaw 135° the denominator is cos(135°) = -0.707, nowhere near
+ * zero, so the legitimate (180, 45, 180) extraction is left alone. */
+inline float StableAtan2(float fNumerator, float fDenominator)
+{
+	const float k_fEpsilon = 1e-6f;
+
+	if (std::fabs(fNumerator) < k_fEpsilon && std::fabs(fDenominator) < k_fEpsilon)
+		return 0.f;
+
+	return std::atan2(fNumerator, fDenominator);
+}
+
+inline Vector3 StableEulerAnglesDegrees(const Quaternion& q)
+{
+	const float fX = q.x, fY = q.y, fZ = q.z, fW = q.w;
+
+	const float fPitch = StableAtan2(2.f * (fY * fZ + fW * fX),
+	                                 fW * fW - fX * fX - fY * fY + fZ * fZ);
+
+	const float fYaw = std::asin(std::max(-1.f, std::min(1.f, -2.f * (fX * fZ - fW * fY))));
+
+	const float fRoll = StableAtan2(2.f * (fX * fY + fW * fZ),
+	                                fW * fW + fX * fX - fY * fY - fZ * fZ);
+
+	return Vector3(fPitch, fYaw, fRoll) * RAD2DEG;
+}
+
 inline bool ComputeVoxelStampTransform(
 	VoxRenderer* pRenderer, const Vector3& v3GridOrigin, float fInvVoxelSize,
 	VoxelStampTransform& out)
@@ -49,7 +95,7 @@ inline bool ComputeVoxelStampTransform(
 	if (pRenderer->IsAxisRounded())
 	{
 		float fRotationLimit = 45.f;
-		Vector3 rotation = pTransform->GetEulerAngles();
+		Vector3 rotation = StableEulerAnglesDegrees(pTransform->GetRotation());
 
 		rotation.x = std::fmod(rotation.x + 360.f, 360.f);
 		rotation.y = std::fmod(rotation.y + 360.f, 360.f);
@@ -70,7 +116,7 @@ inline bool ComputeVoxelStampTransform(
 	else if (pRenderer->IsRotationAngleLimited())
 	{
 		float fRotationLimit = static_cast<float>(pRenderer->GetRotationAngleLimit());
-		Vector3 rotation = pTransform->GetEulerAngles();
+		Vector3 rotation = StableEulerAnglesDegrees(pTransform->GetRotation());
 
 		rotation.x = std::fmod(rotation.x + 360.f, 360.f);
 		rotation.y = std::fmod(rotation.y + 360.f, 360.f);

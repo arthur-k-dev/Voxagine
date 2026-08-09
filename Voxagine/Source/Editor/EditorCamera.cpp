@@ -130,7 +130,12 @@ void EditorCamera::PostFixedTick(const GameTimer& timer)
 
 		/* Translate position on mouse scroll */
 		if (fMouseWheelDelta != 0 && !GetEditor()->IsMouseHoveringEditorWindows() && !GetEditor()->IsModifyingSelectedEntityTransform())
-			GetTransform()->Translate(GetTransform()->GetForward() * fMouseWheelDelta / abs(fMouseWheelDelta) * deltaTime * m_fScrollSpeed);
+			/* std::abs, not abs: the unqualified name resolves to the C
+			   `int abs(int)` unless something has pulled the float overloads
+			   into the global namespace, and this argument is a float. That
+			   made the divisor 0 for any scroll delta under 1 - a division by
+			   zero producing an infinite camera translation. */
+			GetTransform()->Translate(GetTransform()->GetForward() * fMouseWheelDelta / std::abs(fMouseWheelDelta) * deltaTime * m_fScrollSpeed);
 
 		/* Correct rotational speed */
 		Vector2 rotation = mouseDelta;

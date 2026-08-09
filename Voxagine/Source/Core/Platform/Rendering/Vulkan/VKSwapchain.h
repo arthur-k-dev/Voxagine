@@ -2,7 +2,7 @@
 
 #include "Core/Platform/Rendering/Vulkan/VKDevice.h"
 
-#include <vulkan/vulkan.h>
+#include <Core/Platform/Rendering/Vulkan/VulkanAPI.h>
 
 #include <cstdint>
 #include <vector>
@@ -78,6 +78,16 @@ private:
 	VkSurfaceKHR m_Surface = VK_NULL_HANDLE;
 
 	bool m_bVSync = false;
+
+	/* Set when the swapchain was deliberately created with a preTransform that
+	   does not match the surface's currentTransform - see Create(). The driver
+	   then reports every single present as VK_SUBOPTIMAL_KHR, correctly, and
+	   without this flag the engine reads that as "recreate me" and rebuilds the
+	   swapchain forever at 50 Hz. Observed on a Galaxy S23; SwiftShader in the
+	   emulator does not report suboptimal at all, so nothing before real
+	   hardware could have found it. */
+	bool m_bSuboptimalIsExpected = false;
+	bool m_bReportedTransform = false;
 
 	VkSwapchainKHR m_Swapchain = VK_NULL_HANDLE;
 	VkFormat m_Format = VK_FORMAT_UNDEFINED;

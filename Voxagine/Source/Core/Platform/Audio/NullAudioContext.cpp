@@ -11,7 +11,7 @@ NullAudioContext::NullAudioContext(Platform* pPlatform) : AudioContext(pPlatform
 
 void NullAudioContext::Initialize()
 {
-	printf("[audio] running silent; build with VOXAGINE_ENABLE_FMOD for sound\n");
+	printf("[audio] running silent (AA_NONE, or built with VOXAGINE_AUDIO_BACKEND=NONE)\n");
 }
 
 void NullAudioContext::Update()
@@ -27,6 +27,12 @@ bool NullAudioContext::CreateSound(const std::string& soundPath, void*& pSound, 
 	pSound = this;
 
 	return true;
+}
+
+void NullAudioContext::DestroySound(void*& pSound)
+{
+	/* CreateSound handed out `this`, which owns nothing. */
+	pSound = nullptr;
 }
 
 void NullAudioContext::PlaySound(const SoundReference* pSoundReference, void*& pChannel,

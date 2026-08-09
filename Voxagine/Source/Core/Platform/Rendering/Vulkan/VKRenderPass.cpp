@@ -281,10 +281,18 @@ bool VKRenderPass::CreatePipeline()
 	pipelineInfo.pDynamicState = &dynamic;
 	pipelineInfo.layout = m_PipelineLayout;
 
-	if (vkCreateGraphicsPipelines(m_pDevice->Get(), VK_NULL_HANDLE, 1,
-	                              &pipelineInfo, nullptr, &m_Pipeline) != VK_SUCCESS)
+	const VkResult pipelineResult = vkCreateGraphicsPipelines(m_pDevice->Get(), VK_NULL_HANDLE, 1,
+	                                                          &pipelineInfo, nullptr, &m_Pipeline);
+
+	if (pipelineResult != VK_SUCCESS)
 	{
-		fprintf(stderr, "[vulkan] vkCreateGraphicsPipelines failed for '%s'\n", m_Data.m_Name.c_str());
+		/* The result code, not just the fact. Adreno refuses the 'Particles'
+		   pipeline on a Galaxy S23 while every other pass compiles, and the
+		   driver's only other output is a page of its compiler's LLVM IR - so
+		   without the code there is nothing to distinguish a shader the
+		   compiler choked on from an out-of-memory. */
+		fprintf(stderr, "[vulkan] vkCreateGraphicsPipelines failed for '%s' (VkResult %d)\n",
+		        m_Data.m_Name.c_str(), static_cast<int>(pipelineResult));
 		return false;
 	}
 

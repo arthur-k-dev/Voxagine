@@ -18,10 +18,14 @@ option(VOXAGINE_BUILD_ENGINE  "Build the engine library" OFF)
 option(VOXAGINE_BUILD_EDITOR  "Build the game with the editor (EDITOR define)" ON)
 option(VOXAGINE_FETCH_RTTR    "Fetch RTTR from upstream instead of find_package" ON)
 option(VOXAGINE_CHECK_RTTR    "Compile the reflection TU to prove RTTR works" OFF)
-option(VOXAGINE_ENABLE_FMOD   "Enable FMOD audio (needs the FMOD Linux SDK)" OFF)
+set(VOXAGINE_AUDIO_BACKEND "MINIAUDIO" CACHE STRING
+    "Audio backend: MINIAUDIO (vendored, all platforms) or NONE (silent)")
+set_property(CACHE VOXAGINE_AUDIO_BACKEND PROPERTY STRINGS MINIAUDIO NONE)
 option(VOXAGINE_ENABLE_OPTICK "Enable Optick profiling" OFF)
-option(VOXAGINE_ENABLE_NFD    "Enable native file dialogs" OFF)
 option(VOXAGINE_BUILD_TESTS   "Build the gtest suite (needs VOXAGINE_BUILD_ENGINE)" OFF)
+option(VOXAGINE_PROFILE_DEFAULT "Default the frame profiler on in an optimised build" OFF)
+set(VOXAGINE_ASSET_VERSION "dev" CACHE STRING
+    "Stamped into the extracted mobile asset tree; a change re-extracts it")
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -38,9 +42,17 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(VOXAGINE_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/Voxagine/Source)
 
 # ---------------------------------------------------------------------------
+# Platform selection. Must come before the dependencies, which it decides how
+# to acquire (a cross toolchain cannot use the host's SDL3).
+# ---------------------------------------------------------------------------
+include(CMake/Platforms.cmake)
+
+# ---------------------------------------------------------------------------
 # Dependencies
 # ---------------------------------------------------------------------------
-find_package(Vulkan REQUIRED)
+if(NOT VOXAGINE_IOS)
+    find_package(Vulkan REQUIRED)
+endif()
 
 # RTTR 0.9.6 is what this engine was written against, and its reflection macros
 # are load-bearing for save/load and the editor's property inspector. It used
@@ -51,15 +63,10 @@ find_package(Vulkan REQUIRED)
 # Only pulled in when something actually needs it, so the default bring-up
 # build stays offline-capable.
 if(VOXAGINE_BUILD_ENGINE OR VOXAGINE_CHECK_RTTR)
-    include(cmake/RTTR.cmake)
+    include(CMake/RTTR.cmake)
 endif()
 
-find_package(SDL3 QUIET)
-if(NOT SDL3_FOUND)
-    find_package(PkgConfig REQUIRED)
-    pkg_check_modules(SDL3 REQUIRED IMPORTED_TARGET sdl3)
-    add_library(SDL3::SDL3 ALIAS PkgConfig::SDL3)
-endif()
+include(CMake/SDL3.cmake)
 
 # ---------------------------------------------------------------------------
 # Warning set shared by our own targets. Vendored code is included as SYSTEM
@@ -90,6 +97,11 @@ include(CTest)
 # of Core compiles on Linux.
 # ---------------------------------------------------------------------------
 add_library(voxagine_vulkan STATIC
+    # volk: Vulkan is loaded at runtime rather than linked. Not a preference -
+    # Android's libvulkan.so exports nothing past 1.1 and this renderer is
+    # built on core-1.3 sync2 and dynamic rendering. VulkanAPI.h has the whole
+    # reasoning; it is the only file that includes vulkan.h.
+    ${VOXAGINE_SOURCE_DIR}/External/volk/volk.c
     ${VOXAGINE_SOURCE_DIR}/Core/Platform/Rendering/Vulkan/VKAllocator.cpp
     ${VOXAGINE_SOURCE_DIR}/Core/Platform/Rendering/Vulkan/VKCommandEngine.cpp
     ${VOXAGINE_SOURCE_DIR}/Core/Platform/Rendering/Vulkan/VKDescriptorLayout.cpp
@@ -107,23 +119,37 @@ add_library(voxagine_vulkan STATIC
 )
 
 target_include_directories(voxagine_vulkan PUBLIC ${VOXAGINE_SOURCE_DIR})
-target_link_libraries(voxagine_vulkan
-    PUBLIC Vulkan::Vulkan
-    PRIVATE voxagine_warnings
-)
+target_link_libraries(voxagine_vulkan PRIVATE voxagine_warnings)
+voxagine_link_vulkan(voxagine_vulkan)
+
+# Vendored, and generated code at that.
+set_source_files_properties(${VOXAGINE_SOURCE_DIR}/External/volk/volk.c
+    PROPERTIES COMPILE_OPTIONS "-w")
 
 # ---------------------------------------------------------------------------
 # Shaders
 # ---------------------------------------------------------------------------
-include(cmake/Shaders.cmake)
+include(CMake/Shaders.cmake)
 
 # SPIR-V lands next to the HLSL it came from, because the engine asks for
 # shaders by asset path - "Engine/Assets/Shaders/Particles.vs" - and appends
 # .spv. Keeping them in the build tree would mean the runtime could not find
 # them. They are build output, so .gitignore excludes *.spv.
+set(VOXAGINE_SHADER_DEFINES "")
+
+if(VOXAGINE_MOBILE)
+    # Lets Defines.hlsl branch the two cone-trace step counts by platform - see
+    # its own comment for why the voxel pass is worth attacking there first.
+    # cmake/Shaders.cmake has the important caveat: this makes the compiled
+    # .spv depend on which platform was configured last, because the output
+    # path is not platform-qualified.
+    list(APPEND VOXAGINE_SHADER_DEFINES VOXAGINE_MOBILE)
+endif()
+
 voxagine_add_shaders(voxagine_shaders_game
     SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/Game/Engine/Assets/Shaders
     OUTPUT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/Game/Engine/Assets/Shaders
+    DEFINES ${VOXAGINE_SHADER_DEFINES}
 )
 
 # ---------------------------------------------------------------------------
@@ -142,15 +168,14 @@ endif()
 # ---------------------------------------------------------------------------
 # Engine library
 #
-# Off by default. Still blocked on:
-#   FMOD    - proprietary, needs the Linux SDK downloaded by hand.
-#   Optick  - vendored headers reference a Windows-only OptickCore.lib.
-#   nfd     - needs the GTK backend built from upstream source.
-#   teenypath - replaceable with std::filesystem.
-# and on the Vulkan render context, managers and passes not existing yet.
+# Off by default so a plain configure stays offline-capable, not because
+# anything is blocking it any more - the engine, the game and the editor all
+# build and run. Audio is miniaudio (vendored, no SDK), file dialogs are
+# editor-only (see VOXAGINE_BUILD_EDITOR below), and Optick's vendored headers
+# still reference a Windows-only OptickCore.lib so USE_OPTICK stays 0.
 # ---------------------------------------------------------------------------
 if(VOXAGINE_BUILD_ENGINE)
-    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/EngineSources.cmake)
+    include(${CMAKE_CURRENT_SOURCE_DIR}/CMake/EngineSources.cmake)
 
     add_library(voxagine STATIC ${VOXAGINE_ENGINE_SOURCES})
 
@@ -197,6 +222,23 @@ if(VOXAGINE_BUILD_ENGINE)
         target_link_libraries(voxagine PRIVATE comdlg32)
     endif()
 
+    if(VOXAGINE_ANDROID)
+        # AAssetManager, for unpacking the APK's assets on first launch
+        # (Core/System/MobileAssets.cpp), and __android_log_print.
+        target_link_libraries(voxagine PRIVATE android log)
+    endif()
+
+    # Stamped into the extracted asset tree so an app update re-extracts rather
+    # than silently running the previous version's content. Gradle passes the
+    # app's versionName; a plain CMake build gets "dev", which re-extracts only
+    # when the tree is missing.
+    target_compile_definitions(voxagine PUBLIC
+        VOXAGINE_ASSET_VERSION="${VOXAGINE_ASSET_VERSION}")
+
+    if(VOXAGINE_PROFILE_DEFAULT)
+        target_compile_definitions(voxagine PUBLIC VOXAGINE_PROFILE_DEFAULT)
+    endif()
+
     # No target_precompile_headers here on purpose.
     #
     # Every engine TU already starts with #include "pch.h". CMake's PCH support
@@ -206,15 +248,30 @@ if(VOXAGINE_BUILD_ENGINE)
     # redefinition of itself. Adopting CMake's PCH means removing the explicit
     # includes from all 147 TUs first; not worth doing mid-port.
 
-    if(VOXAGINE_ENABLE_FMOD)
-        # The real FMOD implementations replace the silent stubs, which define
-        # the same symbols.
-        list(REMOVE_ITEM VOXAGINE_ENGINE_SOURCES
-            ${VOXAGINE_SOURCE_DIR}/Core/Platform/Audio/NullAudioContext.cpp
-            ${VOXAGINE_SOURCE_DIR}/Core/Resources/Formats/NullSoundReference.cpp
+    # Audio. The backend is additive rather than a swap: NullAudioContext is
+    # always compiled and AA_NONE still selects it at runtime, so a silent run
+    # needs no rebuild.
+    if(VOXAGINE_AUDIO_BACKEND STREQUAL "MINIAUDIO")
+        target_sources(voxagine PRIVATE ${VOXAGINE_MINIAUDIO_SOURCES})
+        target_compile_definitions(voxagine PUBLIC VOXAGINE_MINIAUDIO)
+
+        # 4 MB of vendored single-header C, like the STB sources above.
+        set_source_files_properties(
+            ${VOXAGINE_SOURCE_DIR}/External/miniaudio/miniaudio_impl.c
+            ${VOXAGINE_SOURCE_DIR}/External/miniaudio/stb_vorbis.c
+            PROPERTIES COMPILE_OPTIONS "-w"
         )
-        target_sources(voxagine PRIVATE ${VOXAGINE_FMOD_SOURCES})
-        target_compile_definitions(voxagine PUBLIC VOXAGINE_FMOD)
+
+        # miniaudio's backends dlopen their audio libraries at runtime (ALSA,
+        # PulseAudio, PipeWire), so there is nothing to find_package here - but
+        # it does need the C runtime pieces that do that.
+        if(UNIX AND NOT APPLE AND NOT ANDROID)
+            find_package(Threads REQUIRED)
+            target_link_libraries(voxagine PRIVATE Threads::Threads ${CMAKE_DL_LIBS} m)
+        endif()
+    elseif(NOT VOXAGINE_AUDIO_BACKEND STREQUAL "NONE")
+        message(FATAL_ERROR
+            "VOXAGINE_AUDIO_BACKEND must be MINIAUDIO or NONE, got '${VOXAGINE_AUDIO_BACKEND}'")
     endif()
 
     if(VOXAGINE_ENABLE_OPTICK)
@@ -223,14 +280,16 @@ if(VOXAGINE_BUILD_ENGINE)
         target_compile_definitions(voxagine PUBLIC USE_OPTICK=0)
     endif()
 
-    if(VOXAGINE_ENABLE_NFD)
-        target_compile_definitions(voxagine PUBLIC VOXAGINE_NFD)
-    endif()
-
     # PUBLIC, and on the library: Editor.cpp and the #ifdef EDITOR branch of
     # Application::Run are both library sources, so defining this only on the
     # executable compiled the whole editor out.
+    #
+    # The sources are conditional too, which they were not before: Editor.cpp
+    # has no #ifdef EDITOR around its body, so a game build compiled the entire
+    # editor - and through FileBrowser, the desktop file dialog. See the
+    # VOXAGINE_EDITOR_SOURCES comment in EngineSources.cmake.
     if(VOXAGINE_BUILD_EDITOR)
+        target_sources(voxagine PRIVATE ${VOXAGINE_EDITOR_SOURCES})
         target_compile_definitions(voxagine PUBLIC EDITOR)
     endif()
 endif()
@@ -242,9 +301,19 @@ endif()
 # *Editor and *Game configurations.
 # ---------------------------------------------------------------------------
 if(VOXAGINE_BUILD_ENGINE)
-    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/GameSources.cmake)
+    include(${CMAKE_CURRENT_SOURCE_DIR}/CMake/GameSources.cmake)
 
-    add_executable(BitBuster ${VOXAGINE_GAME_SOURCES})
+    if(VOXAGINE_ANDROID)
+        # An Android app has no executable of its own. SDLActivity dlopens the
+        # libraries named by getLibraries() - "SDL3" then "main" - and calls
+        # SDL_main in the second, so the game has to *be* libmain.so. The
+        # OUTPUT_NAME is what makes the file name match what the Java loader
+        # asks for; renaming it means overriding getLibraries() in the activity.
+        add_library(BitBuster SHARED ${VOXAGINE_GAME_SOURCES})
+        set_target_properties(BitBuster PROPERTIES OUTPUT_NAME main)
+    else()
+        add_executable(BitBuster ${VOXAGINE_GAME_SOURCES})
+    endif()
 
     target_include_directories(BitBuster PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Game/Source)
     # WHOLE_ARCHIVE, and it is load-bearing rather than tidiness.
@@ -272,6 +341,37 @@ if(VOXAGINE_BUILD_ENGINE)
 
     # EDITOR itself is defined on the voxagine library above, PUBLIC, so both
     # the library and this executable see it.
+
+    if(VOXAGINE_IOS)
+        # NEVER BUILT. Written without Xcode or a Mac anywhere in reach, so
+        # treat all of this as a first draft - Docs/MOBILE_PORT_LOG.md says so at
+        # more length. The pieces are conventional; none is verified.
+        configure_file(${CMAKE_CURRENT_SOURCE_DIR}/Platforms/iOS/Info.plist.in
+                       ${CMAKE_CURRENT_BINARY_DIR}/Info.plist @ONLY)
+
+        set_target_properties(BitBuster PROPERTIES
+            MACOSX_BUNDLE TRUE
+            MACOSX_BUNDLE_INFO_PLIST ${CMAKE_CURRENT_BINARY_DIR}/Info.plist
+            XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "com.voxagine.bitbuster"
+            XCODE_ATTRIBUTE_IPHONEOS_DEPLOYMENT_TARGET "${VOXAGINE_IOS_MIN_VERSION}"
+            # Signing is the user's identity and their decision. An unsigned
+            # build still compiles and links, which is all CI could ever check.
+            XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED "NO"
+            XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY ""
+        )
+
+        # The content tree goes into the bundle wholesale rather than as
+        # individual RESOURCE entries: it is ~100 MB across thousands of files
+        # and CMake's per-file resource handling would list every one of them.
+        # MobileAssets then copies it out of the bundle on first launch,
+        # because the bundle is read-only and this engine writes through the
+        # same relative paths it reads.
+        add_custom_command(TARGET BitBuster POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_directory
+                ${CMAKE_CURRENT_SOURCE_DIR}/Game
+                $<TARGET_BUNDLE_CONTENT_DIR:BitBuster>
+            COMMENT "Copying the content tree into the app bundle")
+    endif()
 
     # Guarded because voxagine_add_shaders returns without creating the target
     # when dxc is missing, and add_dependencies on a target that does not exist
@@ -308,12 +408,20 @@ if(VOXAGINE_BUILD_TESTS)
         message(FATAL_ERROR "VOXAGINE_BUILD_TESTS needs VOXAGINE_BUILD_ENGINE=ON")
     endif()
 
-    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/TestSources.cmake)
+    include(${CMAKE_CURRENT_SOURCE_DIR}/CMake/TestSources.cmake)
 
     add_executable(voxagine_tests ${VOXAGINE_TEST_SOURCES})
 
     target_include_directories(voxagine_tests PRIVATE ${VOXAGINE_TEST_DIR})
     target_link_libraries(voxagine_tests PRIVATE voxagine voxagine_warnings)
+
+    # A few checks want a real shipped asset rather than a synthetic one - the
+    # audio decode check, which exists to prove the vendored Vorbis wiring is
+    # still compiled in, cannot be written against a made-up file. The game's
+    # content root is passed in rather than resolved relative to the CWD,
+    # because ctest runs the binary from the build directory.
+    target_compile_definitions(voxagine_tests PRIVATE
+        VOXAGINE_TEST_CONTENT_DIR="${CMAKE_CURRENT_SOURCE_DIR}/Game")
 
     # Assertions about one unit at a time. Seconds.
     add_test(NAME checks COMMAND voxagine_tests checks)
@@ -337,8 +445,8 @@ endif()
 # Core/Settings.cpp is the smallest real engine TU that exercises RTTR the way
 # the rest of the engine does: an enum registration plus member-pointer and
 # getter/setter properties. Compiling it proves the RTTR dependency is usable
-# on this platform while the full engine target is still blocked on FMOD and
-# the Vulkan render context. Off by default because it needs the network.
+# on this platform without building the whole engine. Off by default because
+# it needs the network.
 # ---------------------------------------------------------------------------
 if(VOXAGINE_CHECK_RTTR AND NOT VOXAGINE_BUILD_ENGINE)
     add_library(voxagine_reflection_check OBJECT

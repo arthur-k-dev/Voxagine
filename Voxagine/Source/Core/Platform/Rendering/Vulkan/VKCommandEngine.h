@@ -5,7 +5,7 @@
 #include "Core/Platform/Rendering/Vulkan/VKResource.h"
 #include "Core/Platform/Rendering/Vulkan/VKUploadBuffer.h"
 
-#include <vulkan/vulkan.h>
+#include <Core/Platform/Rendering/Vulkan/VulkanAPI.h>
 
 #include <cstdint>
 #include <string>

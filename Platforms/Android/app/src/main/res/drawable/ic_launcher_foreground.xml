@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Placeholder: an isometric voxel cube with a bite out of it. Vector rather
+     than a PNG so there is no binary art committed before anyone has decided
+     what the icon should be. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <path android:fillColor="#5BC8F5"
+        android:pathData="M54,28 L76,40 L54,52 L32,40 Z" />
+    <path android:fillColor="#2F8FC4"
+        android:pathData="M32,40 L54,52 L54,78 L32,66 Z" />
+    <path android:fillColor="#1E6C99"
+        android:pathData="M76,40 L76,66 L54,78 L54,52 Z" />
+    <path android:fillColor="#1B1F2A"
+        android:pathData="M62,44 L74,50 L74,62 L62,56 Z" />
+</vector>

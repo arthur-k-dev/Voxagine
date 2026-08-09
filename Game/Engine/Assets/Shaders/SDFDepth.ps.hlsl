@@ -8,7 +8,13 @@ VOXEL_RW_BUFFER voxelWorldData : register(u0);
    it compiling - no pass binds it. */
 RW_STRUCTURED_BUFFER(uint) voxelBrickData : register(u1);
 
-VOXEL_BUFFER voxelModelData[] : register(t1);
+/* The unbounded `VOXEL_BUFFER voxelModelData[] : register(tN)` that used to be
+   here is gone. It was never read - it belonged to a GPU-baker path that was
+   abandoned - but it compiled into the live SPIR-V as an unbounded typed-buffer
+   descriptor array, which is exactly the shape mobile drivers and MoltenVK are
+   pickiest about, and it would have been bound to nothing. Deleting dead code
+   beats working around a descriptor-indexing limitation for it.
+   MOBILE_PORT_PLAN.md phase 4, step 3. */
 
 struct PS_in
 {

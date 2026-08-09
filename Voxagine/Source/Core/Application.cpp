@@ -247,16 +247,23 @@ void Application::Run()
 		});
 	}
 
+	// Stop application-level producers while all of their dependencies are alive.
 	OnExit();
-	m_JobManager.Deinitialize();
-	m_LoggingSystem.UnInitialize();
 
+	// Editor and world teardown can cancel jobs and emit log events.
 #ifdef EDITOR
 	m_Editor.UnInitialize();
 #endif
 	
 	m_WorldManager.ClearWorlds();
+
+	// Resource destruction still needs the platform and filesystem backends.
 	m_ResourceManager.Unload();
+
+	// No consumers remain, so the global services can now be stopped safely.
+	m_JobManager.Deinitialize();
+	m_LoggingSystem.UnInitialize();
+
 	m_Platform.Deinitialize();
 
 	m_pFileSystem->Deinitialize();

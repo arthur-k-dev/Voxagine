@@ -5,6 +5,12 @@
 
 #include "Core/Threading/Job.h"
 #include "Core/Threading/GenericJob.h"
+#include <functional>
+#include <mutex>
+#include <unordered_map>
+#include <vector>
+
+class JobManager;
 
 class JobQueue 
 {
@@ -27,7 +33,12 @@ private:
 	std::unordered_map<JobType, moodycamel::ConcurrentQueue<Job*>> m_JobQueue;
 	JobManager* m_pJobManager = nullptr;
 	uint32_t m_QueueHandle = UINT_MAX;
+	std::mutex m_SubmissionMutex;
+	bool m_bAcceptingJobs = true;
 
+	void Close();
+	void CancelPendingJobs();
+	bool TryEnqueueWithType(Job* pJob, JobType jobType);
 	void EnqueueWithType(Job* pJob, JobType jobType);
 
 	template<typename T>
@@ -38,19 +49,12 @@ template<typename T>
 Job* JobQueue::Enqueue(std::function<T()> backgroundFunc, std::function<void(T)> callback)
 {
 	Job* pJob = new GenericJob<T>(backgroundFunc, callback);
-	pJob->SetJobManager(m_pJobManager);
-	pJob->SetQueueHandle(m_QueueHandle);
-	m_JobQueue[JT_DEFAULT].enqueue(pJob);
-	return pJob;
+	return TryEnqueueWithType(pJob, JT_DEFAULT) ? pJob : nullptr;
 }
 
 template<typename T>
 Job* JobQueue::EnqueueWithType(std::function<T()> backgroundFunc, std::function<void(T)> callback, JobType jobType)
 {
 	Job* pJob = new GenericJob<T>(backgroundFunc, callback);
-	pJob->SetJobManager(m_pJobManager);
-	pJob->SetQueueHandle(m_QueueHandle);
-	pJob->m_Type = jobType;
-	m_JobQueue[jobType].enqueue(pJob);
-	return pJob;
+	return TryEnqueueWithType(pJob, jobType) ? pJob : nullptr;
 }

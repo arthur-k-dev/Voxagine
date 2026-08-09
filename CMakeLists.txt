@@ -75,6 +75,16 @@ target_compile_options(voxagine_warnings INTERFACE
     $<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang>:-Wall;-Wextra;-Wno-unused-parameter>
 )
 
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(voxagine_job_manager_config_test
+        UnitTesting/UnitTests/Source/Core/Threading/JobManagerConfigTest.cpp
+    )
+    target_include_directories(voxagine_job_manager_config_test PRIVATE ${VOXAGINE_SOURCE_DIR})
+    target_link_libraries(voxagine_job_manager_config_test PRIVATE voxagine_warnings)
+    add_test(NAME job_manager_worker_count COMMAND voxagine_job_manager_config_test)
+endif()
+
 # ---------------------------------------------------------------------------
 # Vulkan backend
 #

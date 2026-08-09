@@ -13,6 +13,8 @@ public:
 	Job* GetRunningJob();
 	std::thread* GetThread() { return m_Thread; }
 	JobType GetJobType() { return m_ThreadJobType; }
+	void CancelRunningJob();
+	void Join();
 
 	void SetRunningJob(Job* pJob);
 	void SetJobType(JobType type) { m_ThreadJobType = type; }

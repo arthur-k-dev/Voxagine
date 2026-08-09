@@ -30,10 +30,13 @@
 #include "Editor/UndoRedo/EditorTransformMatrixCommand.h"
 #include "Editor/EditorCamera.h"
 #include "EditorButton.h"
+#include "EditorLayout.h"
 
 #include <External/imgui/imgui_internal.h>
 #include "External/optick/optick.h"
 #include "Core/Platform/Audio/AudioContext.h"
+
+#include <cmath>
 
 Editor::Editor()
 	: m_EntityCopyValue(kObjectType)
@@ -51,6 +54,7 @@ void Editor::Initialize(Application * pTargetApplication)
 
 	// Initialize Application pointer
 	m_pApplication = pTargetApplication;
+	m_fUiScale = m_pApplication->GetPlatform().GetImguiSystem().GetDpiScale();
 
 	m_PropertyRenderer.Initialize(this);
 	m_EntityHierarchy.Initialize(this);
@@ -154,6 +158,7 @@ void Editor::Render(float fDeltaTime)
 {
 	OPTICK_CATEGORY("Editor render", Optick::Category::Rendering);
 	OPTICK_EVENT();
+	UpdateUiScale();
 	RenderGameWindow();
 	RenderMainMenuBar();
 	RenderWindowRenderInfo();
@@ -164,6 +169,21 @@ void Editor::Render(float fDeltaTime)
 	RenderConfigurationWindows(fDeltaTime);
 	RenderEditorTools(fDeltaTime);
 	RenderEntityTransformation();
+}
+
+void Editor::UpdateUiScale()
+{
+	const float fUiScale = m_pApplication->GetPlatform().GetImguiSystem().GetDpiScale();
+	if (std::fabs(fUiScale - m_fUiScale) <= 0.01f)
+		return;
+
+	m_fUiScale = fUiScale;
+
+	/* A DPI transition does not necessarily resize the render target. Reapply
+	   the named panel rectangles explicitly so a window moved between monitors
+	   still adopts the new physical layout. */
+	const UVector2 renderResolution = m_pRenderContext->GetRenderResolution();
+	OnResize(renderResolution.x, renderResolution.y, IVector2());
 }
 
 void Editor::OnResize(uint32_t a_uiWidth, uint32_t a_uiHeight, IVector2 deltaResolution)
@@ -490,7 +510,7 @@ void Editor::InitializeInput()
 
 void Editor::InitializeButtons()
 {
-	ImVec2 ButtonSize = ImVec2(26, 26);
+	ImVec2 ButtonSize = ImVec2(EditorLayout::ToolbarButtonSize, EditorLayout::ToolbarButtonSize);
 
 	m_Buttons["play"] = new EditorButton(
 		m_pApplication,
@@ -894,9 +914,14 @@ void Editor::RenderGameWindow()
 	ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0, 0, 0, 0));
 
 	UVector2 WindowSize = GetApplication()->GetPlatform().GetRenderContext()->GetRenderResolution();
+	const float fUiScale = GetUiScale();
+	const float fSidePanelWidth = EditorLayout::SidePanelWidth * fUiScale;
+	const float fConsoleHeight = EditorLayout::ConsoleHeight * fUiScale;
+	const float fMenuBarHeight = EditorLayout::MenuBarHeight * fUiScale;
 
-	ImVec2 GameWindowPos = ImVec2(290.f, 27.f);
-	ImVec2 GameWindowSize = ImVec2(WindowSize.x - GameWindowPos.x - 290.f, WindowSize.y - 250 - GameWindowPos.y);
+	ImVec2 GameWindowPos = ImVec2(fSidePanelWidth, fMenuBarHeight);
+	ImVec2 GameWindowSize = ImVec2(WindowSize.x - GameWindowPos.x - fSidePanelWidth,
+	                                WindowSize.y - fConsoleHeight - GameWindowPos.y);
 
 	ImGui::SetNextWindowPos(GameWindowPos);
 	ImGui::SetNextWindowSize(GameWindowSize);
@@ -941,21 +966,23 @@ void Editor::RenderMainMenuBar()
 {
 	if (m_bRenderMainMenuBar)
 	{
-		ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0.0f, 7.0f));
+		const float fUiScale = GetUiScale();
+		ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0.0f, 7.0f * fUiScale));
 		ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
 
 		ImGui::BeginMainMenuBar();
 
-		ImGui::Unindent(7.0f);
+		ImGui::Unindent(7.0f * fUiScale);
 
 		TextureReference* pBackground = m_Textures["main_menu_bar_bg"];
 
 		ImGui::Image(static_cast<ImTextureID>(pBackground != nullptr ? pBackground->TextureView : nullptr),
-			ImVec2(static_cast<float>(m_pRenderContext->GetRenderResolution().x), 26.0f));
+			ImVec2(static_cast<float>(m_pRenderContext->GetRenderResolution().x),
+			       EditorLayout::MenuBarBackgroundHeight * fUiScale));
 
-		ImGui::Indent(7.0f);
+		ImGui::Indent(7.0f * fUiScale);
 
-		ImGui::SameLine(5.0f);
+		ImGui::SameLine(5.0f * fUiScale);
 
 		if (ImGui::BeginMenu("File"))
 		{
@@ -1216,7 +1243,8 @@ void Editor::RenderMainMenuBar()
 		float ButtonSpacing = ImGui::GetStyle().ItemSpacing.x;
 
 		int buttoncount = (GetEditorModus() == EM_EDITOR) ? 1 : 3;
-		ImVec2 ButtonSize = ImVec2(26, 26);
+		ImVec2 ButtonSize = ImVec2(EditorLayout::ToolbarButtonSize * fUiScale,
+		                              EditorLayout::ToolbarButtonSize * fUiScale);
 
 		ImGui::SameLine((WindowWidth - (ButtonSize.x * buttoncount + (ButtonSpacing * (buttoncount + 1)))) / 2);
 
@@ -1277,7 +1305,7 @@ void Editor::RenderMainMenuBar()
 			ImGui::PopStyleColor();
 			ImGui::PopStyleColor();
 
-			ImGui::PushItemWidth(28);
+			ImGui::PushItemWidth(28.0f * fUiScale);
 			std::string GizmoIndexValueName = "##SnappingToolValue" + std::to_string(GizmoIt);
 			int GizmoIndexValue = static_cast<int>(m_SnappingTool.GetSnappingValue(m_bCurrentGizmoOperation, GizmoIt));
 
@@ -1497,7 +1525,7 @@ void Editor::RenderWindowCreateWorld()
 		if (!ImGui::IsPopupOpen("Create world"))
 			ImGui::OpenPopup("Create world");
 
-		ImVec2 PopUpModelSize = ImVec2(300, 120);
+		ImVec2 PopUpModelSize = ImVec2(300.0f * GetUiScale(), 120.0f * GetUiScale());
 		UVector2 WindowSize = GetApplication()->GetPlatform().GetWindowContext()->GetSize();
 		ImGui::SetNextWindowPos(ImVec2(static_cast<float>(WindowSize.x / 2.0f), static_cast<float>(WindowSize.y / 2.0f)), 0, ImVec2(0.5f, 0.5f));
 		ImGui::SetNextWindowSize(PopUpModelSize);
@@ -1652,7 +1680,7 @@ void Editor::RenderWindowAboutVoxagine()
 		ImGui::Text("Key T: Scale mode\n");
 		ImGui::Text("Key Y: Toggle world/local transformation mode\n\n");
 
-		ImVec2 ButtonSize = ImVec2(96, 16);
+		ImVec2 ButtonSize = ImVec2(96.0f * GetUiScale(), 16.0f * GetUiScale());
 
 		if (ImGui::Button("Got it!", ButtonSize))
 		{

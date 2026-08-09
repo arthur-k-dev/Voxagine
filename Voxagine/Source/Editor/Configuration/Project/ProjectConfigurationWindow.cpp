@@ -29,7 +29,8 @@ void ProjectConfigurationWindow::OnRender(float fDeltaTime)
 {
 	ResizeWindow();
 
-	ImVec2 ButtonSize = ImVec2(96, 16);
+	const float fUiScale = GetEditor()->GetUiScale();
+	ImVec2 ButtonSize = ImVec2(96.0f * fUiScale, 16.0f * fUiScale);
 
 	if (ImGui::Button("Got it!", ButtonSize))
 	{

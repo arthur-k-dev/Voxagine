@@ -22,6 +22,7 @@ public:
 
 	ImContext* GetContext() const { return m_pContext; }
 	void SetContext(ImContext* pContext) { m_pContext = pContext; };
+	float GetDpiScale() const { return m_fDpiScale; }
 
 protected:
 	void InitStyle();

@@ -2,12 +2,14 @@
 #include "EditorButton.h"
 
 #include "Core/Application.h"
+#include "Core/Platform/Platform.h"
 #include "Core/Resources/Formats/TextureReference.h"
 #include "External/imgui/imgui.h"
 #include "Core/Platform/Rendering/RenderContext.h"
 
 EditorButton::EditorButton(Application* pContext, const std::string& defaultButton, const std::string& hoveredButton, const std::string& clickedButton, const ImVec2& size)
 {
+	m_pApplication = pContext;
 	m_pDefault = pContext->GetResourceManager().LoadTexture(defaultButton);
 	m_pHovered = pContext->GetResourceManager().LoadTexture(hoveredButton);
 	m_pClicked = pContext->GetResourceManager().LoadTexture(clickedButton);
@@ -33,8 +35,10 @@ void EditorButton::OnClick(std::function<void(void)> function)
 	/* ImGui draws nothing for a null texture, but the hover and click logic
 	   below still has to run. */
 	View* pTexture = m_pCurrentReference != nullptr ? m_pCurrentReference->TextureView : nullptr;
+	const float fUiScale = m_pApplication->GetPlatform().GetImguiSystem().GetDpiScale();
+	const ImVec2 buttonSize(m_ButtonSize.x * fUiScale, m_ButtonSize.y * fUiScale);
 
-	if (ImGui::ImageButton(static_cast<ImTextureID>(pTexture), m_ButtonSize, ImVec2(0, 0), ImVec2(1, 1), 0) || m_bIsUp)
+	if (ImGui::ImageButton(static_cast<ImTextureID>(pTexture), buttonSize, ImVec2(0, 0), ImVec2(1, 1), 0) || m_bIsUp)
 	{
 		function();
 		m_bIsUp = false;

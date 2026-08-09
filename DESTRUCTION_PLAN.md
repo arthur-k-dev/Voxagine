@@ -45,7 +45,7 @@ detection) and the loose-voxel registry.
 | Phase | Status | Session / commit | Notes |
 |---|---|---|---|
 | 0 — Harness, baseline, CI | DONE | destruction-phase-0 | Gauntlet is a CPU harness, not the running game — see notes |
-| 1 — Unified voxel write path | TODO | | |
+| 1 — Unified voxel write path | DONE | destruction-phase-1 | Immediate apply, not deferred — see notes |
 | 2 — `ApplySphericalDestruction` rewrite | TODO | | |
 | 3 — Particle core rewrite (SoA, no claims) | TODO | | |
 | 4 — Incremental connectivity | TODO | | |
@@ -214,12 +214,12 @@ half the point of the rewrite is that whole classes disappear structurally.
 | D2 | OPEN | Radius unvalidated: NaN/negative → UB on the unsigned cast; `diameter³` overflows `uint32_t` past 1625 — `:467-471` |
 | D3 | OPEN | Off-by-one: loop pre-increments `volumePos` then uses `volumePos.x - 1`; on row wrap the cleared voxel, the sphere test and `voxels[i]` disagree — `:490-504`, `:551` |
 | D4 | OPEN | PCIe readback per destroyed voxel: `m_pRenderSystem->GetVoxel` at `:519` reads the mapping; the CPU colour is already in hand as `voxels[i]->Color`. Same pattern in `VoxFrameEmitter.cpp:34` |
-| D5 | OPEN | Stale owner slots: `ModifyVoxel` clears colour only; 3 of 4 destroyed voxels keep their static owner's slot; islands leave stale slots on pool exhaustion — `:525-555`, `:296-303` |
+| D5 | FIXED (phase 1) | Stale owner slots: `ModifyVoxel` clears colour only; 3 of 4 destroyed voxels keep their static owner's slot; islands leave stale slots on pool exhaustion — `:525-555`, `:296-303` |
 | D6 | OPEN | Integrity seeds: 9 per destroyed voxel, deduped only within one batch, never against `m_Pending`; no memoisation between flood fills — `:557-569`, `IntegrityChecker.cpp:34-35`, `:82-83` |
-| D7 | OPEN | Null-cell deref: `ProcessIntegrityChecks` calls `cell.IsActive()` without testing `cell`; `VoxelCell::IsActive` unconditionally derefs `pVoxel`, and islands are held across ticks so the window can slide between discovery and conversion — `:287-293`, `VoxelGrid.h:124` |
-| D8 | OPEN | `VoxelGrid::ModifyVoxel` has no bounds check and indexes a possibly-null chunk volume — `VoxelGrid.h:291-299`; called with unclamped coordinates at `:307`, `:554`, `:1360` |
+| D7 | FIXED (phase 1) | Null-cell deref: `ProcessIntegrityChecks` calls `cell.IsActive()` without testing `cell`; `VoxelCell::IsActive` unconditionally derefs `pVoxel`, and islands are held across ticks so the window can slide between discovery and conversion — `:287-293`, `VoxelGrid.h:124` |
+| D8 | FIXED (phase 1) | `VoxelGrid::ModifyVoxel` has no bounds check and indexes a possibly-null chunk volume — `VoxelGrid.h:291-299`; called with unclamped coordinates at `:307`, `:554`, `:1360` |
 | D9 | OPEN | `PhysicsSystem::m_pRenderSystem` never initialised by `PhysicsSystem`; set only by `RenderSystem`'s own constructor — `PhysicsSystem.h:114` |
-| D10 | OPEN | `VoxelGrid::GetChunk` is two near-duplicate 3-deep loops with different owner-slot handling; the fast path computes a clamp it does not apply to the write index — `VoxelGrid.cpp:150-242` |
+| D10 | FIXED (phase 1) | `VoxelGrid::GetChunk` is two near-duplicate 3-deep loops with different owner-slot handling; the fast path computes a clamp it does not apply to the write index — `VoxelGrid.cpp:150-242` |
 | D11 | OPEN | Two open-coded copies of the position hash; both truncate `float → uint16_t`, so negative coordinates wrap — `IntegrityChecker.cpp:8-15`, `PhysicsSystem.cpp:563-566` |
 
 ### Particle path
@@ -232,8 +232,8 @@ half the point of the rewrite is that whole classes disappear structurally.
 | P4 | OPEN | `Live.UserPointer` never assigned; the bake's "set owner" is a permanent clear, so baked debris is unowned by fiat, not by design — `:1387` |
 | P5 | OPEN | `bakeVoxelPos`/`bakeCellPos` mismatch: colour, registry and owner writes can land on different voxels; known and deliberately unfixed — `:1335-1388` |
 | P6 | OPEN | A particle whose claim was taken over destroys itself **without baking** (bake is inside the ownership branch, destroy is outside) — silently vanishing debris — `:1323-1391` |
-| P7 | OPEN | **Live race**: `Chunk::EncodeVoxels` on a job thread does `m_VoxelData.resize(0); shrink_to_fit(); m_OwnerVolume.Release()` while `VoxelGrid::m_ChunkVolumes`/`m_ChunkOwners` still point at them (re-pointed only for non-unload items) — main-thread `GetCell` vs worker free — `Chunk.cpp:200-202`, `ChunkSystem.cpp:357-360`, `VoxelGrid.h:269` |
-| P8 | OPEN | `VoxelOwnerVolume::Release` drops live particles' claims wholesale; they then treat foreign voxels as their own — `VoxelGrid.h:59-64` |
+| P7 | FIXED (phase 1) | **Live race**: `Chunk::EncodeVoxels` on a job thread does `m_VoxelData.resize(0); shrink_to_fit(); m_OwnerVolume.Release()` while `VoxelGrid::m_ChunkVolumes`/`m_ChunkOwners` still point at them (re-pointed only for non-unload items) — main-thread `GetCell` vs worker free — `Chunk.cpp:200-202`, `ChunkSystem.cpp:357-360`, `VoxelGrid.h:269` |
+| P8 | FIXED (phase 1) | `VoxelOwnerVolume::Release` drops live particles' claims wholesale; they then treat foreign voxels as their own — `VoxelGrid.h:59-64` |
 | P9 | OPEN | Window slide invalidates `prevGridPos`; slides under 100 units are undetected by the teleport clamp and the particle releases/claims wrong cells — `PhysicsSystem.cpp:1271-1275`, `ChunkSystem.cpp:397` |
 | P10 | OPEN | World pause/teardown clears integrity state but not the particle pool — `:164-171`, `VoxelGrid.cpp:63-74` |
 | P11 | OPEN | `ParticleLinkedList(0)` indexes an empty vector and underflows loop bounds (VX-GRID-003) — `ParticleLinkedList.cpp:16-23` |
@@ -257,7 +257,7 @@ half the point of the rewrite is that whole classes disappear structurally.
 
 | # | Status | Defect |
 |---|---|---|
-| M1 | OPEN | `RenderContext::ForceUpdate` sets `m_bWorldUpdated`, which nothing reads — the per-particle-tick call is a no-op — `RenderContext.h:365` |
+| M1 | FIXED (phase 1) | `RenderContext::ForceUpdate` sets `m_bWorldUpdated`, which nothing reads — the per-particle-tick call is a no-op — `RenderContext.h:365` |
 | M2 | FIXED (phase 0) | Stale docs: `CLAUDE.md` "IntegrityJob data race" known defect, `SOURCE_MAP.md:34-35`, `ARCHITECTURE.md:47,206`, `FINDINGS.md` VX-PHY-002/003 describe the deleted worker-thread design. VX-PHY-002/003 are now `overtaken-by-events` and VX-PHY-001 `partially-overtaken`, under a new `resolution` field documented in the index README |
 | M3 | OPEN | `Live.Timer` is only ever set to `NO_PARTICLE_TIMER`; the pool-particle timer path is dead code — `ParticleLinkedList.cpp:89`, `PhysicsSystem.cpp:1437-1458` |
 
@@ -528,7 +528,78 @@ gauntlet; no measured regression in the baseline table; unit tests for the
 batch (bounds, owner clear, occupancy transitions, non-finite rejection)
 green in CI. Ledger: D5, D7, D8, D10, M1, P7, P8 closed.
 
-**Notes**: *(fill in when done)*
+#### Notes
+
+**The batch applies immediately; it does not buffer and flush.** The work item
+sketched a brick-sorted deferred apply and that is the one part not built.
+Deferring changes semantics — the integrity checker reads the grid straight
+after a destruction burst and would see the pre-burst world — and brick-sorting
+is an optimization with no measurement behind it (rule 11). What the batch keeps
+instead is the **dirty-brick set**, which is the thing phase 2's seeding and
+phase 4's incremental connectivity actually want. Sorting the writes can be
+added later behind a measurement; nothing in the API assumes it is absent.
+
+**`VoxelEditBatch` is checked against the phase 0 reference writer, not against
+a recorded hash.** `VoxelEditBatchTest.AgreesWithTheReferenceWriter` runs one
+edit script (ground, a block, a sphere out of the middle, then unowned debris
+landing back in) through the batch and through `VoxelWorldHarness::Set`/`Clear`
+and compares every representation. That is a statement about agreement with an
+independent implementation rather than with the batch's own previous self.
+
+**The gauntlet now writes through the batch and its hash is unchanged**:
+`c869b806aa820b57`, byte for byte with phase 0 over 130,500 destroyed and
+30,580 converted voxels. The one measured cost is the explosion burst, **0.157
+→ 0.170 ms** (+8%) from per-write validation and the dirty-brick vector.
+Integrity and conversion are unchanged within noise.
+
+**Ordering the claim after the clear is load-bearing**, and it is the one place
+where "clear the owner" was not a free win. Both spawn sites wrote a particle
+claim onto the cell they were about to destroy, then cleared the colour — and
+that worked precisely because the old clear did not touch the owner. With D5
+fixed the claim has to go on *after*, or the clear wipes it and the particle
+flies with no claim on the cell it came from. Reordered at both sites.
+
+**`VoxelGrid::ModifyVoxel` is deleted rather than kept for internal use.** The
+work item said to keep it for the batch; the batch resolves a `VoxelCell` and
+writes through that, so nothing needed it. It wrote a colour and nothing else,
+with no bounds check and no residency check, and was called with unclamped
+coordinates from three places — leaving it in the header is leaving the defect
+reachable.
+
+**`GetChunk` is now one implementation walked in runs.** The two near-duplicate
+loops disagreed rather than merely duplicating: the "fast" one clamped the read
+start to x = 0 for a negative origin but kept writing from output index 0, so a
+box straddling the left edge filled the wrong cells. Runs keep the fast path's
+property (resolve the chunk once, then walk pointers) for boxes of any shape,
+because residency and the chunk-local base only change when x crosses a chunk
+boundary. `VoxelGridTest.GetChunkAgreesWithGetVoxel` — written in phase 0
+against the *old* code, over origins and sizes that select both branches — is
+what made this safe to do.
+
+**P7's fix is `VoxelGrid::DetachChunkStorage`, by storage rather than by
+location.** An unloading chunk's grid slot may already have been re-pointed at
+a chunk that moved into it, and nulling by location would evict a live chunk.
+`ChunkSystem` calls it on the main thread before enqueuing the unload job, so a
+reader sees "not resident" instead of a freed vector. That makes non-residency
+an ordinary state, which is why `ResolveIndex`, `GetCell`, `GetVoxel` and
+`VoxelCell::IsActive` all became null-safe in the same change — they had to.
+
+**P8 now has a defined meaning rather than a fix.** A particle whose claimed
+cell was in an unloaded chunk used to read a freed `VoxelOwnerVolume`; it now
+reads an invalid cell, `ownsOldCell()` answers false, and the particle is
+destroyed without baking. That is P6's shape, and P6 is phase 3's.
+
+**`m_bWorldUpdated` is deleted** (M1). It was written from seven places —
+`ModifyVoxel`, `ModifyVoxelFast`, `UpdateWorld`, `ForceUpdate`, two
+missed-frame branches in `Application::Run`, and per particle tick in
+`PhysicsSystem::FixedTick` — and read from none; only `VKRenderContext::Present`
+cleared it. `RenderSystem::ForceUpdate` keeps its *own* flag, which is read.
+
+**Not migrated, deliberately: `VoxelBaker`.** It writes 3.1 M voxels in one
+burst at a world load through `ModifyVoxelFast`, and it maintains the physics
+grid and owner slots itself along a path phase 4c tuned carefully. Moving it
+onto the batch is a real change with a real risk of regressing that, and no
+phase needs it. `RenderSystem::ModifyVoxel` stays for it.
 
 ---
 

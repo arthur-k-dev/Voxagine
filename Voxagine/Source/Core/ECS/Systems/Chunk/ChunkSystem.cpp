@@ -395,7 +395,6 @@ void ChunkSystem::UpdateGroup(ChunkUpdateGroup& group)
 
 				// Update offsets
 				m_pWorld->GetPhysics()->GetVoxelGrid()->SetWorldOffset(group.GetWorldOffset());
-				m_pWorld->GetApplication()->GetPlatform().GetRenderContext()->UpdateWorld();
 				m_pWorld->GetApplication()->GetPlatform().GetRenderContext()->GetVoxelMapper()->SwapBuffer();
 
 				// Update camera
@@ -416,6 +415,17 @@ void ChunkSystem::UpdateGroup(ChunkUpdateGroup& group)
 				{
 					if (item.ItemTarget == ChunkUpdateGroup::Item::Target::T_ASYNC_UNLOAD)
 					{
+						/* Detach before enqueuing, not after it finishes.
+						   UnloadAsync's job body calls EncodeVoxels, which
+						   frees this chunk's voxel vector and owner volume on
+						   a worker thread - and the grid still pointed at both,
+						   so a main-thread GetCell could read freed storage
+						   (ledger P7). Nulling the slot here, on this thread,
+						   before the job exists, means a reader sees "not
+						   resident" instead. Every grid accessor already
+						   handles that; since phase 1 they all check for it. */
+						m_pVoxelGrid->DetachChunkStorage(&item.pChunk->GetVoxelData());
+
 						item.bIsDone = false;
 						item.pChunk->UnloadAsync(&item, std::bind(&ChunkSystem::OnChunkUnloaded, this, std::placeholders::_1));
 					}
@@ -546,8 +556,6 @@ void ChunkSystem::ClearChunk(UVector2 gridTargetIndex)
 	std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
 	auto execTime = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
 	m_pWorld->GetApplication()->GetLoggingSystem().Log(LOGLEVEL_MESSAGE, "ChunkSystem", "Chunk clear (ms): " + std::to_string(execTime.count()));
-
-	m_pWorld->GetApplication()->GetPlatform().GetRenderContext()->UpdateWorld();
 }
 
 void ChunkSystem::OnChunkLoaded(ChunkUpdateGroup::Item* pUpdateItem)

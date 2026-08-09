@@ -225,10 +225,6 @@ void RenderContext::EnableDebugLines(bool bEnabled)
 {
 	m_bDebugEnabled = bEnabled;
 	m_bDebugCleared = false;
-
-#if defined(_DEBUG) || defined(EDITOR)
-	ForceUpdate();
-#endif
 }
 
 bool RenderContext::ResizeWorldBuffer()
@@ -579,9 +575,10 @@ bool RenderContext::Present()
 		}
 
 		// AABB buffer. Uploaded every frame: the list is rebuilt each frame and
-		// entity AABBs move without necessarily setting m_bWorldUpdated, so
-		// gating the upload on it rendered from a stale list. It is ~32 bytes
-		// per drawn model, so the upload is not worth guarding.
+		// entity AABBs move whether or not any voxel did, so gating the upload
+		// on a "the world changed" flag rendered from a stale list. It is ~32
+		// bytes per drawn model, so the upload is not worth guarding - which is
+		// the reason that flag ended up with no readers at all (ledger M1).
 		{
 			pAABBBuffer->Clear();
 			pAABBBuffer->AddStructuredData(

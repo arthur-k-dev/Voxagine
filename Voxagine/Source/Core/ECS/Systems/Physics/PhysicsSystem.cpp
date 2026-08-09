@@ -85,8 +85,6 @@ void PhysicsSystem::FixedTick(const GameTimer& fixedTimer)
 	m_uiActiveParticleCount = 0;
 	TickParticleSystems(fixedTimer);
 	SimulateParticles(static_cast<float>(fixedTimer.GetElapsedSeconds()));
-	if (m_uiActiveParticleCount > 0)
-		m_pWorld->GetApplication()->GetPlatform().GetRenderContext()->ForceUpdate();
 
 	ResolveContinousCollision(static_cast<float>(fixedTimer.GetElapsedSeconds()));
 	TickBodies(fixedTimer);
@@ -265,6 +263,13 @@ void PhysicsSystem::ProcessIntegrityChecks()
 	if (m_PendingIslands.empty())
 		return;
 
+	/* One batch for the whole tick's conversion. It maintains the CPU voxel,
+	   the mapped word, the occupancy bitmap, the brick count and - new in phase
+	   1 - the owner slot, which this loop used to leave behind on every voxel
+	   it cleared. A cleared-but-owned voxel lies to VoxelBaker::Clear's "is
+	   somebody else's voxel here" test for the rest of the world's life. */
+	VoxelEditBatch batch(m_pRenderSystem->MakeEditTarget());
+
 	/* Below the early return, so the accumulator holds only ticks that actually
 	   converted something - an average over the ticks that did nothing says
 	   nothing about what conversion costs. */
@@ -273,16 +278,15 @@ void PhysicsSystem::ProcessIntegrityChecks()
 	/* Converting an island is budgeted too, and that is not symmetry for its
 	   own sake. An island is however large the disconnected structure is, and
 	   the more of a level has been destroyed the more it fragments, so islands
-	   grow over a session. Every voxel in one costs a particle spawn and two
-	   ModifyVoxel calls, and doing a whole island in one tick is a frame as
-	   long as the island is big - measured as 127 frames over 30 ms in a single
+	   grow over a session. Every voxel in one costs a particle spawn and a
+	   batched clear, and doing a whole island in one tick is a frame as long as
+	   the island is big - measured as 127 frames over 30 ms in a single
 	   session, several pegged at 100 ms, with 94 ms and 41 ms immediately
 	   before a GPU timeout that a bullet penetration triggered.
 
-	   The second ModifyVoxel is the part that reaches the GPU: it writes the
-	   voxel mapper, which is DEVICE_LOCAL | HOST_VISIBLE, so an unbounded burst
-	   is an unbounded burst of CPU writes into VRAM the voxel pass is reading
-	   at the same time.
+	   Part of that clear reaches the GPU: it writes the voxel mapper, which is
+	   DEVICE_LOCAL | HOST_VISIBLE, so an unbounded burst is an unbounded burst
+	   of CPU writes into VRAM the voxel pass is reading at the same time.
 
 	   The cost of spreading it is that a large island takes a few frames to
 	   fall rather than one. At 16384 voxels a tick that is 60 ms for a 64 K
@@ -316,23 +320,14 @@ void PhysicsSystem::ProcessIntegrityChecks()
 				pParticle->Live.GridPosition = vec;
 				pParticle->Live.Position = m_VoxelGrid.GridToWorld(vec);
 				pParticle->Live.VoxelColor = cell.GetColor();
-				cell.SetParticleOwner((uintptr_t)pParticle);
 			}
 
-			/* Clearing the colour is what makes the voxel inactive now -
-			   there is no separate flag to clear afterwards. */
-			m_VoxelGrid.ModifyVoxel(
-				static_cast<int>(vec.x),
-				static_cast<int>(vec.y),
-				static_cast<int>(vec.z),
-				0
-			);
-			m_pRenderSystem->ModifyVoxel(
-				static_cast<uint32_t>(vec.x),
-				static_cast<uint32_t>(vec.y),
-				static_cast<uint32_t>(vec.z),
-				0
-			);
+			batch.Clear(vec);
+
+			/* After the clear, which now clears the owner - see the same
+			   ordering note in ApplySphericalDestruction. */
+			if (pParticle)
+				cell.SetParticleOwner((uintptr_t)pParticle);
 			}
 		}
 
@@ -517,6 +512,8 @@ void PhysicsSystem::ApplySphericalDestruction(const Vector3& position, float fRa
 
 	Entity* pCachedEntity = nullptr;
 
+	VoxelEditBatch batch(m_pRenderSystem->MakeEditTarget());
+
 	uint32_t particlesSpawned = 0;
 	for (uint32_t i = 0; i < numVoxels; ++i)
 	{
@@ -555,37 +552,47 @@ void PhysicsSystem::ApplySphericalDestruction(const Vector3& position, float fRa
 					static_cast<int32_t>(volumePos.z)
 				);
 
+				Particle* pSpawned = nullptr;
+
 				if (particlesSpawned % 4 == 0)
 				{
-					Particle* pParticle = m_ParticlePool.SpawnParticle();
-					if (pParticle)
+					pSpawned = m_ParticlePool.SpawnParticle();
+
+					if (pSpawned)
 					{
-						pParticle->Live.GridPosition = volumePos;
-						pParticle->Live.Position = m_VoxelGrid.GridToWorld(volumePos);
-						pParticle->Live.BakeOnImpact = bBakeParticle;
+						pSpawned->Live.GridPosition = volumePos;
+						pSpawned->Live.Position = m_VoxelGrid.GridToWorld(volumePos);
+						pSpawned->Live.BakeOnImpact = bBakeParticle;
 
 						diff = glm::normalize(diff);
-						pParticle->Live.Velocity = diff * m_ParticleRandom.Range(fForceMin, fForceMax);
-						pParticle->Live.VoxelColor = color;
-
-						/* volumePos is pre-incremented at the top of the loop,
-						   so voxels[i] is the cell at volumePos.x - 1 - the
-						   same one ModifyVoxel clears below. */
-						m_VoxelGrid.SetParticleOwner(
-							static_cast<uint32_t>(volumePos.x - 1),
-							static_cast<uint32_t>(volumePos.y),
-							static_cast<uint32_t>(volumePos.z),
-							(uintptr_t)pParticle);
+						pSpawned->Live.Velocity = diff * m_ParticleRandom.Range(fForceMin, fForceMax);
+						pSpawned->Live.VoxelColor = color;
 					}
 				}
 				++particlesSpawned;
 
-				int32_t volX, volY, volZ;
-				volX = static_cast<int32_t>(volumePos.x - 1);
-				volY = static_cast<int32_t>(volumePos.y);
-				volZ = static_cast<int32_t>(volumePos.z);
-				m_VoxelGrid.ModifyVoxel(volX, volY, volZ, 0);
-				m_pRenderSystem->ModifyVoxel(volX, volY, volZ, 0);
+				/* volumePos is pre-incremented at the top of the loop, so the
+				   cell this clears is the one at volumePos.x - 1 - the same one
+				   voxels[i] points at. That off-by-one is ledger D3 and the
+				   whole loop is rewritten in phase 2; it is reproduced exactly
+				   here so this change is only about the write. */
+				batch.Clear(Vector3(volumePos.x - 1.f, volumePos.y, volumePos.z));
+
+				/* The claim goes on *after* the clear now, and the order is
+				   load-bearing. A clear clears the owner (ledger D5), which is
+				   the point of it - but a particle claiming the cell it just
+				   left is the one owner a destroyed voxel is supposed to keep,
+				   and writing it first would have the clear wipe it. The old
+				   code could do it in either order because its clear only
+				   touched the colour, which is exactly the defect. */
+				if (pSpawned)
+				{
+					m_VoxelGrid.SetParticleOwner(
+						static_cast<uint32_t>(volumePos.x - 1),
+						static_cast<uint32_t>(volumePos.y),
+						static_cast<uint32_t>(volumePos.z),
+						(uintptr_t)pSpawned);
+				}
 
 				for (float x = -1.0f; x <= 1.0f; ++x)
 				{
@@ -1274,6 +1281,11 @@ void PhysicsSystem::SimulateParticles(float fDeltaTime)
 	OPTICK_EVENT();
 	ScopedFrameTimer timer("CPU PhysicsSystem::SimulateParticles");
 
+	/* One batch for the tick's bakes. Built even when nothing lands, which
+	   costs a handful of pointer copies - the alternative is a conditional
+	   construction inside three levels of loop. */
+	VoxelEditBatch batch(m_pRenderSystem->MakeEditTarget());
+
 	Particle* aliveParticle = m_ParticlePool.GetLastAlive();
 
 	GPUParticle* pGPUParticles = reinterpret_cast<GPUParticle*>(m_pGPUParticles->GetData());
@@ -1388,38 +1400,28 @@ void PhysicsSystem::SimulateParticles(float fDeltaTime)
 							{
 								/* bakeCellPos is where bakeCell actually is, which
 								   is not bakeVoxelPos once FindEmtpyNeighbor has
-								   answered - a pre-existing mismatch, left alone
-								   here so this change stays about representation.
-								   The owner has to follow the cell, though, or it
-								   would clear a claim on an unrelated voxel. */
-								m_VoxelGrid.ModifyVoxel(
-									(int)bakeVoxelPos.x,
-									(int)bakeVoxelPos.y,
-									(int)bakeVoxelPos.z,
-									aliveParticle->Live.VoxelColor.inst.Color
-								);
-								m_pRenderSystem->ModifyVoxel(
-									(uint32_t)bakeVoxelPos.x,
-									(uint32_t)bakeVoxelPos.y,
-									(uint32_t)bakeVoxelPos.z,
-									aliveParticle->Live.VoxelColor.inst.Color
-								);
+								   answered - a pre-existing mismatch (ledger P5),
+								   left alone here so this change stays about the
+								   write. Phase 3 resolves the landing cell once
+								   and this stops having two positions.
 
-								/* This voxel belongs to no renderer, so nothing
-								   would submit an AABB proxy covering it and the
-								   voxel pass - which rasterizes proxies and
-								   nothing else - would never start a ray at it.
-								   It would still appear whenever some other
-								   model's box happened to cover the pixel, which
-								   is why debris that has settled flickers as the
-								   camera moves rather than being plainly
-								   missing. See RenderSystem::AddLooseVoxel. */
-								m_pRenderSystem->AddLooseVoxel(bakeVoxelPos);
-
-								/* Live.UserPointer is never assigned anywhere, so
-								   this has always cleared the owner rather than
-								   set one. Kept as a clear. */
-								bakeCell.SetParticleOwner((uintptr_t)aliveParticle->Live.UserPointer);
+								   The batch writes the colour, the mapped word,
+								   the occupancy bit, the brick count and the
+								   owner - none, which is what the old
+								   SetParticleOwner call amounted to, since
+								   Live.UserPointer was never assigned - and
+								   registers the loose voxel itself. Baked debris
+								   belongs to no renderer, so without a registry
+								   entry nothing submits an AABB proxy for it and
+								   the voxel pass, which rasterizes proxies and
+								   nothing else, only draws it when some
+								   unrelated model's box happens to cover the
+								   pixel. That is the flicker settled debris used
+								   to have. */
+								batch.Set(
+									bakeVoxelPos,
+									aliveParticle->Live.VoxelColor.inst.Color,
+									VoxelOwnerVolume::k_uiNoOwnerSlot);
 							}
 						}
 					}

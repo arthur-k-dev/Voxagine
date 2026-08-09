@@ -121,9 +121,17 @@ struct VoxelCell
 
 	explicit operator bool() const { return pVoxel != nullptr; }
 
-	bool IsActive() const { return pVoxel->IsActive(); }
-	uint32_t GetColor() const { return pVoxel->Color; }
-	void SetColor(uint32_t uiColor) const { pVoxel->Color = uiColor; }
+	/* Null-safe, and that is not defensive tidiness. A cell is null whenever
+	   its chunk is out of bounds or not resident, and an island discovered
+	   before a window slide is converted after it - so `cell.IsActive()`
+	   without a preceding `if (cell)` is a null dereference that needs the
+	   camera to move at the wrong moment to fire. It was written that way in
+	   PhysicsSystem::ProcessIntegrityChecks (ledger D7). Answering "no" for a
+	   cell that does not exist is right for every caller: a voxel that is not
+	   resident is not active. */
+	bool IsActive() const { return pVoxel != nullptr && pVoxel->IsActive(); }
+	uint32_t GetColor() const { return pVoxel != nullptr ? pVoxel->Color : 0; }
+	void SetColor(uint32_t uiColor) const { if (pVoxel != nullptr) pVoxel->Color = uiColor; }
 
 	uint16_t GetSlot() const { return pOwners ? pOwners->GetSlot(uiIndex) : VoxelOwnerVolume::k_uiNoOwnerSlot; }
 	bool HasOwner() const { return GetSlot() != VoxelOwnerVolume::k_uiNoOwnerSlot; }
@@ -156,8 +164,11 @@ public:
 	owner, call SetOwnerSlot/SetParticleOwner with the voxel's coordinates. */
 	bool GetChunk(Voxel** chunk, Vector3 chunkOrigin, Vector3 dimensions, bool bAllowOutBounds = false, uint16_t* pOwnerSlots = nullptr);
 
-	inline void ModifyVoxel(int iX, int iY, int iZ, uint32_t uiColor);
-
+	/* Colour only. There is deliberately no ModifyVoxel beside these any more:
+	   it wrote a colour and nothing else - no mapped word, no occupancy bit, no
+	   brick count, no owner - with no bounds check and no residency check, and
+	   it was called with unclamped coordinates from three places. Every write
+	   goes through VoxelEditBatch now (DESTRUCTION_PLAN.md phase 1). */
 	inline const Voxel* GetVoxel(uint32_t iX, uint32_t iY, uint32_t iZ) const;
 	inline Voxel* GetVoxel(uint32_t iX, uint32_t iY, uint32_t iZ);
 
@@ -216,6 +227,20 @@ public:
 	   *before* the job that frees the storage runs. */
 	void SetChunkStorage(UVector2 loc, std::vector<Voxel>* pVoxels, VoxelOwnerVolume* pOwners);
 
+	/* Nulls every slot pointing at this storage, and returns how many it found.
+	   The unload ordering fix (ledger P7): `Chunk::EncodeVoxels` runs on a job
+	   thread and does `m_VoxelData.resize(0); shrink_to_fit();
+	   m_OwnerVolume.Release()`, while the grid still points at both - so a
+	   main-thread `GetCell` could read freed storage. Calling this on the main
+	   thread *before* the unload job is enqueued means readers see "not
+	   resident", which every accessor already handles, instead of a freed
+	   vector.
+
+	   By storage rather than by location on purpose: an unloading chunk's slot
+	   may already have been re-pointed at a chunk that moved into it, and
+	   nulling that slot would evict a live chunk. */
+	uint32_t DetachChunkStorage(const std::vector<Voxel>* pVoxels);
+
 	/* FNV-1a over every CPU voxel colour and owner slot in the window, in
 	   canonical x/y/z order. DESTRUCTION_PLAN.md phase 0's refactor net: the
 	   same script over the same build must produce the same value. Detached
@@ -252,7 +277,12 @@ private:
 	inline void SetChunkVolumeAt(UVector2 loc, std::vector<Voxel>& voxelVolume, VoxelOwnerVolume& ownerVolume);
 
 	/* The chunk-local index every accessor below computes, shared so the two
-	   halves of a cell cannot be looked up at different places. */
+	   halves of a cell cannot be looked up at different places.
+
+	   Returns false for out of bounds *and* for a chunk that is not resident,
+	   which since phase 1 is an ordinary state rather than an impossible one:
+	   ChunkSystem detaches a chunk's storage before the job that frees it runs,
+	   so a slot legitimately holds null and every reader has to cope. */
 	inline bool ResolveIndex(uint32_t iX, uint32_t iY, uint32_t iZ, uint32_t& uiChunk, uint32_t& uiIndex) const;
 };
 
@@ -263,12 +293,15 @@ inline bool VoxelGrid::ResolveIndex(uint32_t iX, uint32_t iY, uint32_t iZ, uint3
 
 	uiChunk = ftoi_sse1((float)(iX) * m_InvChunkSize.x) + ftoi_sse1((float)(iZ) * m_InvChunkSize.z) * m_uiNumChunkX;
 
+	if (uiChunk >= m_ChunkVolumes.size() || m_ChunkVolumes[uiChunk] == nullptr)
+		return false;
+
 	uint32_t chunkXOffset = iX - (uiChunk % m_uiNumChunkX * m_chunkSize.x);
 	uint32_t chunkZOffset = iZ - (ftoi_sse1((float)uiChunk / m_uiNumChunkX) * m_chunkSize.z);
 
 	uiIndex = chunkXOffset + iY * m_chunkSize.x + m_chunkSize.x * m_chunkSize.y * chunkZOffset;
 
-	return true;
+	return uiIndex < m_ChunkVolumes[uiChunk]->size();
 }
 
 inline VoxelCell VoxelGrid::GetCell(uint32_t iX, uint32_t iY, uint32_t iZ)
@@ -281,7 +314,7 @@ inline VoxelCell VoxelGrid::GetCell(uint32_t iX, uint32_t iY, uint32_t iZ)
 	if (!ResolveIndex(iX, iY, iZ, uiChunk, uiIndex))
 		return cell;
 
-	cell.pVoxel = &m_ChunkVolumes[uiChunk]->at(uiIndex);
+	cell.pVoxel = &(*m_ChunkVolumes[uiChunk])[uiIndex];
 	cell.pOwners = uiChunk < m_ChunkOwners.size() ? m_ChunkOwners[uiChunk] : nullptr;
 	cell.uiIndex = uiIndex;
 
@@ -303,38 +336,26 @@ inline void VoxelGrid::SetParticleOwner(uint32_t iX, uint32_t iY, uint32_t iZ, u
 	GetCell(iX, iY, iZ).SetParticleOwner(uiParticle);
 }
 
-inline void VoxelGrid::ModifyVoxel(int iX, int iY, int iZ, uint32_t uiColor)
-{
-	uint32_t chunkArrPos = ftoi_sse1((float)(iX)* m_InvChunkSize.x) + ftoi_sse1((float)(iZ)* m_InvChunkSize.z) * m_uiNumChunkX;
-	uint32_t chunkXOffset = iX - (chunkArrPos % m_uiNumChunkX * m_chunkSize.x);
-	uint32_t chunkZOffset = iZ - (ftoi_sse1((float)chunkArrPos / m_uiNumChunkX) * m_chunkSize.z);
-	uint32_t chunkGridPos = chunkXOffset + iY * m_chunkSize.x + m_chunkSize.x * m_chunkSize.y * chunkZOffset;
-
-	m_ChunkVolumes[chunkArrPos]->at(chunkGridPos).Color = uiColor;
-}
-
 inline const Voxel* VoxelGrid::GetVoxel(uint32_t iX, uint32_t iY, uint32_t iZ) const
 {
-	if (iX >= m_uiDimensionX || iY >= m_uiDimensionY || iZ >= m_uiDimensionZ)
+	uint32_t uiChunk = 0;
+	uint32_t uiIndex = 0;
+
+	if (!ResolveIndex(iX, iY, iZ, uiChunk, uiIndex))
 		return nullptr;
 
-	uint32_t chunkArrPos = ftoi_sse1((float)(iX)* m_InvChunkSize.x) + ftoi_sse1((float)(iZ)* m_InvChunkSize.z) * m_uiNumChunkX;
-	uint32_t chunkXOffset = iX - (chunkArrPos % m_uiNumChunkX * m_chunkSize.x);
-	uint32_t chunkZOffset = iZ - (ftoi_sse1((float)chunkArrPos / m_uiNumChunkX) * m_chunkSize.z);
-	uint32_t chunkGridPos = chunkXOffset + iY * m_chunkSize.x + m_chunkSize.x * m_chunkSize.y * chunkZOffset;
-	return &m_ChunkVolumes[chunkArrPos]->at(chunkGridPos);
+	return &(*m_ChunkVolumes[uiChunk])[uiIndex];
 }
 
 inline Voxel* VoxelGrid::GetVoxel(uint32_t iX, uint32_t iY, uint32_t iZ)
 {
-	if (iX >= m_uiDimensionX || iY >= m_uiDimensionY || iZ >= m_uiDimensionZ)
+	uint32_t uiChunk = 0;
+	uint32_t uiIndex = 0;
+
+	if (!ResolveIndex(iX, iY, iZ, uiChunk, uiIndex))
 		return nullptr;
 
-	uint32_t chunkArrPos = ftoi_sse1((float)(iX) * m_InvChunkSize.x) + ftoi_sse1((float)(iZ) * m_InvChunkSize.z) * m_uiNumChunkX;
-	uint32_t chunkXOffset = iX - (chunkArrPos % m_uiNumChunkX * m_chunkSize.x);
-	uint32_t chunkZOffset = iZ - (ftoi_sse1((float)chunkArrPos / m_uiNumChunkX) * m_chunkSize.z);
-	uint32_t chunkGridPos = chunkXOffset + iY * m_chunkSize.x + m_chunkSize.x * m_chunkSize.y * chunkZOffset;
-	return &m_ChunkVolumes[chunkArrPos]->at(chunkGridPos);
+	return &(*m_ChunkVolumes[uiChunk])[uiIndex];
 }
 
 inline uint32_t VoxelGrid::GetVoxelID(Vector3 gridPos) const

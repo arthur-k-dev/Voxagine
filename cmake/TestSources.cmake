@@ -17,4 +17,5 @@ set(VOXAGINE_TEST_SOURCES
     ${VOXAGINE_TEST_DIR}/Core/ECS/Systems/Physics/IntegrityCheckerTest.cpp
     ${VOXAGINE_TEST_DIR}/Core/ECS/Systems/Physics/ParticleLinkedListTest.cpp
     ${VOXAGINE_TEST_DIR}/Core/Platform/Rendering/VoxelBrickGridTest.cpp
+    ${VOXAGINE_TEST_DIR}/Core/Voxels/VoxelEditBatchTest.cpp
 )

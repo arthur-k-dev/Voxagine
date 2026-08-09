@@ -113,11 +113,6 @@ void Application::Run()
 			{
 				bFixedStep = true;
 
-				RenderContext* pRenderContext = m_Platform.GetRenderContext();
-
-				if (pRenderContext->GetMissedFrames() > 0)
-					pRenderContext->ForceUpdate();
-
 				if (activeWorld)
 				{
 					m_Editor.WorldFixedTick(activeWorld, GetFixedTimer());
@@ -179,11 +174,6 @@ void Application::Run()
 			m_Platform.m_pFixedGameTimer->Update([&, activeWorld]
 			{
 				bFixedStep = true;
-
-				RenderContext* pRenderContext = m_Platform.GetRenderContext();
-
-				if (pRenderContext->GetMissedFrames() > 0)
-					pRenderContext->ForceUpdate();
 
 				if (activeWorld)
 				{

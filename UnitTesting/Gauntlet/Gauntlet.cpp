@@ -41,6 +41,7 @@
 
 #include "Core/ECS/Systems/Physics/IntegrityChecker.h"
 #include "Core/Utils/DeterministicRandom.h"
+#include "Core/Voxels/VoxelEditBatch.h"
 #include "Harness/VoxelWorldHarness.h"
 
 namespace
@@ -296,7 +297,7 @@ namespace
 	 * thing; until then it is the baseline's stand-in and its cost is the
 	 * write path's, not the sphere loop's.
 	 */
-	uint32_t Explode(VoxelWorldHarness& world, const Explosion& explosion,
+	uint32_t Explode(VoxelWorldHarness& world, VoxelEditBatch& batch, const Explosion& explosion,
 	                 DeterministicRandom& random, std::vector<uint64_t>& o_seeds)
 	{
 		const int32_t iRadius = static_cast<int32_t>(explosion.fRadius);
@@ -337,7 +338,9 @@ namespace
 
 			++uiSpawned;
 
-			world.Clear(static_cast<uint32_t>(iX), static_cast<uint32_t>(iY), static_cast<uint32_t>(iZ));
+			batch.Clear(Vector3(
+				static_cast<float>(iX), static_cast<float>(iY), static_cast<float>(iZ)));
+
 			++uiDestroyed;
 
 			for (int32_t iSeedZ = -1; iSeedZ <= 1; ++iSeedZ)
@@ -419,7 +422,10 @@ int main(int argc, char* argv[])
 		       script.explosions[uiNextExplosion].uiTick == uiTick)
 		{
 			const Stopwatch watch;
-			uiDestroyed += Explode(world, script.explosions[uiNextExplosion], random, seeds);
+
+			VoxelEditBatch batch(world.MakeEditTarget());
+			uiDestroyed += Explode(world, batch, script.explosions[uiNextExplosion], random, seeds);
+
 			explodePhase.Add(watch.Milliseconds());
 
 			++uiNextExplosion;
@@ -450,6 +456,7 @@ int main(int argc, char* argv[])
 
 		const Stopwatch watch;
 
+		VoxelEditBatch convertBatch(world.MakeEditTarget());
 		uint32_t uiBudget = script.uiConvertBudget;
 
 		while (uiBudget > 0 && !pendingIslands.empty())
@@ -472,10 +479,7 @@ int main(int argc, char* argv[])
 
 				(void)random.Range(0.f, 1.f);
 
-				world.Clear(
-					static_cast<uint32_t>(v3Position.x),
-					static_cast<uint32_t>(v3Position.y),
-					static_cast<uint32_t>(v3Position.z));
+				convertBatch.Clear(v3Position);
 
 				++uiConverted;
 			}

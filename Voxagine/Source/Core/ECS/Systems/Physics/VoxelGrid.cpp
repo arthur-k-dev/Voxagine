@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "VoxelGrid.h"
 #include "External/optick/optick.h"
+#include <algorithm>
 
 VoxelGrid::VoxelGrid()
 {
@@ -83,6 +84,29 @@ void VoxelGrid::SetChunkStorage(UVector2 loc, std::vector<Voxel>* pVoxels, Voxel
 
 	m_ChunkVolumes[uiIndex] = pVoxels;
 	m_ChunkOwners[uiIndex] = pOwners;
+}
+
+uint32_t VoxelGrid::DetachChunkStorage(const std::vector<Voxel>* pVoxels)
+{
+	if (pVoxels == nullptr)
+		return 0;
+
+	uint32_t uiDetached = 0;
+
+	for (size_t i = 0; i < m_ChunkVolumes.size(); ++i)
+	{
+		if (m_ChunkVolumes[i] != pVoxels)
+			continue;
+
+		m_ChunkVolumes[i] = nullptr;
+
+		if (i < m_ChunkOwners.size())
+			m_ChunkOwners[i] = nullptr;
+
+		++uiDetached;
+	}
+
+	return uiDetached;
 }
 
 uint64_t VoxelGrid::Hash() const
@@ -209,99 +233,96 @@ bool VoxelGrid::GetChunk(Voxel** chunk, Vector3 chunkOrigin, Vector3 dimensions,
 		originX > (int)m_uiDimensionX || originY > (int)m_uiDimensionY || originZ > (int)m_uiDimensionZ)
 		return false;
 
-	if (((int)((m_chunkSize.x - originX) % m_chunkSize.x) - (int)dimX) >= 0 && ((int)((m_chunkSize.z - originZ) % m_chunkSize.z) - (int)dimZ) >= 0)
+	/* One implementation, walked in runs.
+	 *
+	 * This used to be two near-duplicate three-deep loops selected by an
+	 * alignment test - "does this box fit inside a single chunk in x and z" -
+	 * and they did not agree. The fast one clamped the *read* start to x = 0
+	 * for a negative origin but kept writing from index 0 of the output, so a
+	 * box straddling the left edge filled the wrong output cells; the general
+	 * one resolved the chunk per voxel, three integer divides deep, which is
+	 * what the fast path existed to avoid (ledger D10).
+	 *
+	 * A run keeps both properties without the duplication. Chunk residency and
+	 * the chunk-local base index only change when x crosses a chunk boundary,
+	 * so resolve at the start of each run and then walk pointers - which is the
+	 * fast path's behaviour, applied to boxes of any shape and position.
+	 */
+	for (uint32_t z = 0; z < dimZ; ++z)
 	{
-		uint32_t chunkArrPos = ftoi_sse1((float)(originX) * m_InvChunkSize.x) + ftoi_sse1((float)(originZ) * m_InvChunkSize.z) * m_uiNumChunkX;
+		const int worldZ = originZ + static_cast<int>(z);
 
-		for (unsigned z = 0; z < dimZ; ++z)
+		if (worldZ < 0 || worldZ >= static_cast<int>(m_uiDimensionZ))
+			continue;
+
+		for (uint32_t y = 0; y < dimY; ++y)
 		{
-			/* Continue if Z row lays out of bounds */
-			if (originZ + z >= m_uiDimensionZ)
+			const int worldY = originY + static_cast<int>(y);
+
+			if (worldY < 0 || worldY >= static_cast<int>(m_uiDimensionY))
 				continue;
 
-			for (unsigned y = 0; y < dimY; ++y)
+			uint32_t x = 0;
+
+			while (x < dimX)
 			{
-				/* Set a minimum valid value for X if out of bounds */
-				int startX = 0;
-				if (originX > 0)
-					startX = originX;
+				const int worldX = originX + static_cast<int>(x);
 
-				/* Continue if Y row lays out of bounds */
-				if (originY + y >= m_uiDimensionY)
-					continue;
-
-				uint32_t chunkXOffset = startX - (chunkArrPos % m_uiNumChunkX * m_chunkSize.x);
-				uint32_t chunkZOffset = (originZ + z) - (ftoi_sse1((float)chunkArrPos / m_uiNumChunkX) * m_chunkSize.z);
-				uint32_t chunkGridPos = chunkXOffset + (originY + y) * m_chunkSize.x + m_chunkSize.x * m_chunkSize.y * chunkZOffset;
-
-				Voxel* pVoxel = nullptr;
-				pVoxel = &m_ChunkVolumes[chunkArrPos]->at(chunkGridPos);
-
-				const VoxelOwnerVolume* pOwners = pOwnerSlots ? m_ChunkOwners[chunkArrPos] : nullptr;
-				uint32_t voxelIndex = chunkGridPos;
-
-				for (unsigned x = 0; x < dimX; ++x)
+				if (worldX < 0)
 				{
-					/* Continue until valid X is found */
-					if (originX + x >= m_uiDimensionX)
-						continue;
-
-					uint32_t chunkPos = x + y * dimX + dimX * dimY * z;
-
-					chunk[chunkPos] = pVoxel;
-
-					if (pOwners && voxelIndex < pOwners->Size())
-						pOwnerSlots[chunkPos] = pOwners->GetSlot(voxelIndex);
-
-					++pVoxel;
-					++voxelIndex;
+					/* Skip straight to the first in-bounds column rather than
+					   testing every one of them. */
+					x += static_cast<uint32_t>(-worldX);
+					continue;
 				}
+
+				if (worldX >= static_cast<int>(m_uiDimensionX))
+					break;
+
+				uint32_t uiChunk = 0;
+				uint32_t uiIndex = 0;
+
+				if (!ResolveIndex(static_cast<uint32_t>(worldX), static_cast<uint32_t>(worldY),
+				                  static_cast<uint32_t>(worldZ), uiChunk, uiIndex))
+				{
+					/* Out of bounds is impossible here, so this is a chunk that
+					   is not resident. Its whole x span reads as absent. */
+					++x;
+					continue;
+				}
+
+				/* How far this run can go: to the end of the requested box, the
+				   end of the world, or the end of this chunk in x. */
+				const uint32_t uiChunkEndX =
+					(static_cast<uint32_t>(worldX) / m_chunkSize.x + 1) * m_chunkSize.x;
+
+				uint32_t uiRun = std::min(dimX - x, uiChunkEndX - static_cast<uint32_t>(worldX));
+				uiRun = std::min(uiRun, m_uiDimensionX - static_cast<uint32_t>(worldX));
+
+				std::vector<Voxel>& volume = *m_ChunkVolumes[uiChunk];
+				const VoxelOwnerVolume* pOwners =
+					pOwnerSlots && uiChunk < m_ChunkOwners.size() ? m_ChunkOwners[uiChunk] : nullptr;
+
+				for (uint32_t i = 0; i < uiRun; ++i)
+				{
+					const uint32_t uiVoxelIndex = uiIndex + i;
+
+					if (uiVoxelIndex >= volume.size())
+						break;
+
+					const uint32_t chunkPos = (x + i) + y * dimX + dimX * dimY * z;
+
+					chunk[chunkPos] = &volume[uiVoxelIndex];
+
+					if (pOwners && uiVoxelIndex < pOwners->Size())
+						pOwnerSlots[chunkPos] = pOwners->GetSlot(uiVoxelIndex);
+				}
+
+				x += uiRun;
 			}
 		}
 	}
-	else
-	{
-		for (unsigned z = 0; z < dimZ; ++z)
-		{
-			/* Continue if Z row lays out of bounds */
-			if (originZ + z >= m_uiDimensionZ)
-				continue;
 
-			for (unsigned y = 0; y < dimY; ++y)
-			{
-				/* Continue if Y row lays out of bounds */
-				if (originY + y >= m_uiDimensionY)
-					continue;
-
-				Voxel* pVoxel = nullptr;
-
-				for (unsigned x = 0; x < dimX; ++x)
-				{
-					/* Continue until valid X is found */
-					if (originX + x >= m_uiDimensionX)
-						continue;
-
-					uint32_t chunkPos = x + y * dimX + dimX * dimY * z;
-
-					uint32_t chunkArrPos = ftoi_sse1((float)(originX + x) * m_InvChunkSize.x) + ftoi_sse1((float)(originZ + z) * m_InvChunkSize.z) * m_uiNumChunkX;
-					uint32_t chunkXOffset = (originX + x) - (chunkArrPos % m_uiNumChunkX * m_chunkSize.x);
-					uint32_t chunkZOffset = (originZ + z) - (ftoi_sse1((float)chunkArrPos / m_uiNumChunkX) * m_chunkSize.z);
-					uint32_t chunkGridPos = chunkXOffset + (originY + y) * m_chunkSize.x + m_chunkSize.x * m_chunkSize.y * chunkZOffset;
-					pVoxel = &m_ChunkVolumes[chunkArrPos]->at(chunkGridPos);
-
-					chunk[chunkPos] = pVoxel;
-
-					if (pOwnerSlots)
-					{
-						const VoxelOwnerVolume* pOwners = m_ChunkOwners[chunkArrPos];
-
-						if (pOwners && chunkGridPos < pOwners->Size())
-							pOwnerSlots[chunkPos] = pOwners->GetSlot(chunkGridPos);
-					}
-				}
-			}
-		}
-	}
 	return true;
 }
 

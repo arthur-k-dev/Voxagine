@@ -136,6 +136,7 @@ set(VOXAGINE_ENGINE_SOURCES
     ${VOXAGINE_SOURCE_DIR}/Core/Resources/Formats/VoxModel.cpp
     ${VOXAGINE_SOURCE_DIR}/Core/Resources/ResourceManager.cpp
     ${VOXAGINE_SOURCE_DIR}/Core/Settings.cpp
+    ${VOXAGINE_SOURCE_DIR}/Core/Voxels/VoxelEditBatch.cpp
     ${VOXAGINE_SOURCE_DIR}/Core/System/Posix/PosixFileSystem.cpp
     ${VOXAGINE_SOURCE_DIR}/Core/Threading/Job.cpp
     ${VOXAGINE_SOURCE_DIR}/Core/Threading/JobManager.cpp

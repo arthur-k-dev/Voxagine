@@ -5,6 +5,7 @@
 
 #include "Core/ECS/Systems/Physics/VoxelGrid.h"
 #include "Core/Platform/Rendering/VoxelBrickGrid.h"
+#include "Core/Voxels/VoxelEditBatch.h"
 
 /* A whole voxel world with no GPU, no window and no World.
  *
@@ -29,6 +30,21 @@
  * "the hash did not change", because it says the new path agrees with an
  * independent implementation rather than with its own previous self.
  */
+/* Records what a batch registered instead of submitting proxies for it, so a
+   test can assert that an ownerless write reached the registry and an owned one
+   did not. RenderSystem is the real implementation. */
+class RecordingLooseVoxelSink : public ILooseVoxelSink
+{
+public:
+	void AddLooseVoxel(const Vector3& v3GridPosition) override { m_Registered.push_back(v3GridPosition); }
+
+	const std::vector<Vector3>& Registered() const { return m_Registered; }
+	void Clear() { m_Registered.clear(); }
+
+private:
+	std::vector<Vector3> m_Registered;
+};
+
 class VoxelWorldHarness
 {
 public:
@@ -60,6 +76,11 @@ public:
 	   connectivity check to call grounded. */
 	void FillGround(uint32_t uiColor);
 	void FillBox(const UVector3& v3Min, const UVector3& v3Size, uint32_t uiColor, uint16_t uiOwnerSlot);
+
+	/* The same world, addressed the way the engine addresses it. A batch built
+	   from this writes exactly what Set/Clear above write, which is what lets a
+	   test run one edit script through both and compare hashes. */
+	VoxelEditTarget MakeEditTarget(ILooseVoxelSink* pSink = nullptr);
 
 	/* Every representation folded into one number. Two runs of the same script
 	   must agree; see DESTRUCTION_PLAN.md phase 0. */

@@ -87,6 +87,20 @@ void VoxelWorldHarness::FillBox(const UVector3& v3Min, const UVector3& v3Size, u
 	}
 }
 
+VoxelEditTarget VoxelWorldHarness::MakeEditTarget(ILooseVoxelSink* pSink)
+{
+	VoxelEditTarget target;
+
+	target.pGrid = &m_Grid;
+	target.pBricks = &m_Bricks;
+	target.pWords = m_Words.data();
+	target.uiWordCount = static_cast<uint32_t>(m_Words.size());
+	target.v3WindowSize = m_v3Size;
+	target.pLooseVoxels = pSink;
+
+	return target;
+}
+
 uint64_t VoxelWorldHarness::Hash() const
 {
 	uint64_t uiHash = m_Grid.Hash();

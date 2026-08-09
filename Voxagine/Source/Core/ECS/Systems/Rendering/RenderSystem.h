@@ -6,6 +6,7 @@
 
 #include "DebugRenderer.h"
 #include "VoxelBaker.h"
+#include "Core/Voxels/VoxelEditBatch.h"
 
 class SpriteRenderer;
 class TextRenderer;
@@ -15,7 +16,7 @@ struct Voxel;
 class VoxRenderer;
 class VoxAnimator;
 
-class RenderSystem : public ComponentSystem
+class RenderSystem : public ComponentSystem, public ILooseVoxelSink
 {
 	friend class PhysicsSystem;
 	friend class World;
@@ -78,7 +79,17 @@ public:
 	   that comes and goes with the camera, not a steady absence. A particle
 	   baking itself into the world where it landed is the writer this exists
 	   for: PhysicsSystem, bake-on-impact. */
-	void AddLooseVoxel(const Vector3& v3GridPosition);
+	void AddLooseVoxel(const Vector3& v3GridPosition) override;
+
+	/* Everything a VoxelEditBatch needs to maintain every representation of a
+	   voxel, assembled from the pieces only this system has together: the
+	   physics grid's CPU voxels and owner slots, the render context's mapping
+	   and brick grid, and itself as the loose-voxel sink.
+
+	   Any destruction, island conversion or bake-on-impact write goes through a
+	   batch built from this rather than through a pair of ModifyVoxel calls -
+	   see DESTRUCTION_PLAN.md phase 1 on why the pair was the problem. */
+	VoxelEditTarget MakeEditTarget();
 	bool FindOccupiedBrickBounds(VoxelBrickGrid& brickGrid, const UVector3& v3BrickGrid,
 	                             const Vector3& v3Min, const Vector3& v3Max,
 	                             Vector3& o_v3Min, Vector3& o_v3Max) const;

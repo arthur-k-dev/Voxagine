@@ -239,8 +239,6 @@ public:
 		m_pVoxelData[uiID] = uiColor;
 		m_BrickGrid.SetVoxel(uiID, (uiColor >> 24) != 0);
 
-		m_bWorldUpdated = true;
-
 		return true;
 	}
 
@@ -254,11 +252,8 @@ public:
 		   ordinary cached memory. See ModifyVoxel above. */
 		m_pVoxelData[uiID] = uiColor;
 		m_BrickGrid.SetVoxel(uiID, (uiColor >> 24) != 0);
-
-		m_bWorldUpdated = true;
 	}
 
-	void UpdateWorld() { m_bWorldUpdated = true; }
 	uint32_t GetVoxelDataSize() const { return m_pVoxelMapper->GetInfo().m_uiElementCount; }
 
 	/* Bumped every time the voxel buffer stops holding what was stamped into
@@ -362,7 +357,6 @@ public:
 	PTextureManager* GetTextureManager() const { return m_pTextureManager.get(); }
 	PModelManager* GetModelManager() const { return m_pModelManager.get(); }
 
-	void ForceUpdate() { m_bWorldUpdated = true; };
 	void ForceCameraDataUpdate() { m_bCameraDataUpdated = true; };
 
 	void SetFadeValue(float fValue);
@@ -512,6 +506,5 @@ protected:
 	uint32_t m_uiVoxelGeneration = 1;
 
 	bool m_bIsDrawTextureCopied = false;
-	bool m_bWorldUpdated = true;
 	bool m_bCameraDataUpdated = false;
 };

@@ -550,9 +550,6 @@ void RenderSystem::Render(const GameTimer& fixedTimer)
 
 	m_VoxelBaker.Bake();
 
-	if (bShouldUpdateVoxelWorld)
-		m_pRenderContext->ForceUpdate();
-
 	m_bForcedUpdate = false;
 }
 
@@ -718,10 +715,13 @@ bool RenderSystem::IsFading() const
 	return m_pRenderContext->m_fFader > 0.f && m_pRenderContext->m_fFader < 1.f;
 }
 
+/* RenderSystem's own flag, which is read - by Render, to decide whether the
+   bake re-examines every renderer. Not to be confused with the RenderContext
+   flag of the same name that used to sit beside it: that one was written from
+   seven places and read from none, and is gone (ledger M1). */
 void RenderSystem::ForceUpdate()
 {
 	m_bForcedUpdate = true;
-	m_pRenderContext->ForceUpdate();
 }
 
 void RenderSystem::ForceCameraDataUpdate()
@@ -1003,6 +1003,20 @@ void RenderSystem::EnableDebugLines(bool bEnabled)
 void RenderSystem::SetFadeTime(float fFadeTime)
 {
 	m_pRenderContext->m_fFadeTime = fFadeTime <= 0.0f ? 1.0f : fFadeTime;
+}
+
+VoxelEditTarget RenderSystem::MakeEditTarget()
+{
+	VoxelEditTarget target;
+
+	target.pGrid = &m_pPhysicsSystem->m_VoxelGrid;
+	target.pBricks = &m_pRenderContext->GetBrickGrid();
+	target.pWords = m_pRenderContext->GetVoxelData();
+	target.uiWordCount = m_pRenderContext->GetVoxelDataSize();
+	target.v3WindowSize = m_v3WorldSize;
+	target.pLooseVoxels = this;
+
+	return target;
 }
 
 void RenderSystem::AddLooseVoxel(const Vector3& v3GridPosition)

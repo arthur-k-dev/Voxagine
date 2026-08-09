@@ -118,7 +118,13 @@ protected:
 
 private:
 	VoxelGrid m_VoxelGrid;
-	RenderSystem* m_pRenderSystem;
+
+	/* Set by RenderSystem's constructor, which is the only wiring there is -
+	   nothing here initialised it, so a PhysicsSystem built without a
+	   RenderSystem (the unit-test path) held a garbage pointer that the
+	   destruction and bake paths dereference. Initialised here so it is at
+	   least null; ledger D9 makes the wiring explicit in phase 2. */
+	RenderSystem* m_pRenderSystem = nullptr;
 
 	/* Owned by value and driven from FixedTick. It used to be a Job on a worker
 	   thread holding a raw pointer to m_VoxelGrid above, which nothing joined

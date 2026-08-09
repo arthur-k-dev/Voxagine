@@ -73,11 +73,14 @@ float4 main(PS_in IN) : TAR_OUT
     skyVisibility *= GetConeSkyVisibility(marchDiffuse.SmoothPosition, marchDiffuse.Normal, IN.NormScreenPosition.xy);
 #endif
 
-    marchDiffuse.Color.xyz = ShadeSurface(marchDiffuse.Color.xyz, marchDiffuse.Normal, 1.0, skyVisibility);
+    /* Linear radiance until EncodeSceneColor - RENDERING_PLAN.md phase 7.2. */
+    float3 v3Radiance = ShadeSurface(marchDiffuse.Color.xyz, marchDiffuse.Normal, 1.0, skyVisibility);
 
     /* Fake specular "shine line" on lit voxel edges - see GetShineLine in
        AmbientOcclusion.hlsl. */
-    marchDiffuse.Color.xyz *= GetShineLine(marchDiffuse.Position, marchDiffuse.Normal, marchDiffuse.UV, lightDirection.xyz, difference);
+    v3Radiance *= GammaGainToLinear(GetShineLine(marchDiffuse.Position, marchDiffuse.Normal, marchDiffuse.UV, lightDirection.xyz, difference));
+
+    marchDiffuse.Color.xyz = EncodeSceneColor(v3Radiance);
     marchDiffuse.Color.a = 1.0;
 
 #ifdef MARCH_STEP_DEBUG

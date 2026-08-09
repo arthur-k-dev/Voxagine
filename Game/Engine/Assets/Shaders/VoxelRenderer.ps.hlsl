@@ -121,13 +121,19 @@ float4 main(PS_in IN) : TAR_OUT
     skyVisibility *= GetConeSkyVisibility(marchDiffuse.SmoothPosition, marchDiffuse.Normal, IN.NormScreenPosition.xy);
 #endif
 
-    marchDiffuse.Color.xyz = ShadeSurface(marchDiffuse.Color.xyz, marchDiffuse.Normal, sunVisibility, skyVisibility);
+    /* Linear radiance from here to EncodeSceneColor below - RENDERING_PLAN.md
+       phase 7.2, and Color.hlsl for why the encode is here rather than at
+       present. */
+    float3 v3Radiance = ShadeSurface(marchDiffuse.Color.xyz, marchDiffuse.Normal, sunVisibility, skyVisibility);
 
     /* Fake specular "shine line" on lit voxel edges - see GetShineLine in
        AmbientOcclusion.hlsl. It returns 1.0 for anything the sun does not
        reach, so applying it to the whole shaded result rather than to the sun
-       term alone only ever brightens a rim that is already lit. */
-    marchDiffuse.Color.xyz *= GetShineLine(marchDiffuse.Position, marchDiffuse.Normal, marchDiffuse.UV, lightDirection.xyz, difference);
+       term alone only ever brightens a rim that is already lit. Its gain was
+       tuned against the encoded image, hence the conversion. */
+    v3Radiance *= GammaGainToLinear(GetShineLine(marchDiffuse.Position, marchDiffuse.Normal, marchDiffuse.UV, lightDirection.xyz, difference));
+
+    marchDiffuse.Color.xyz = EncodeSceneColor(v3Radiance);
     marchDiffuse.Color.a = 1.0;
 
 #ifdef MARCH_STEP_DEBUG

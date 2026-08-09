@@ -299,7 +299,7 @@ FarFieldResult MarchFarFieldFromWindow(float3 v3LevelOrigin, float3 v3Direction)
    is how it was found (RENDERING_PLAN.md phase 4). It is also why the endless
    ground plane goes through here. */
 float4 ShadeFarField(FarFieldResult far) {
-	return float4(ShadeSurface(far.Color.xyz, far.Normal, 1.0, 1.0), 1.0);
+	return float4(EncodeSceneColor(ShadeSurface(far.Color.xyz, far.Normal, 1.0, 1.0)), 1.0);
 }
 
 /* The whole background: far-field geometry, then the endless ground plane, then

@@ -107,7 +107,7 @@ public:
 	/* Recomputes the brick counts and occupancy bits from the words and returns
 	   the number of disagreements. Zero is the invariant every write path owes
 	   (rule 3b). */
-	uint32_t Validate() const;
+	uint32_t Validate();
 
 private:
 	UVector3 m_v3Size;

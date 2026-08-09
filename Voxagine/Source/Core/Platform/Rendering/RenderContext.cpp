@@ -250,7 +250,7 @@ bool RenderContext::ResizeWorldBuffer()
 	   Order matters: the grid drops its mirror pointers first, the mapper is
 	   then free to reallocate underneath it, and Flush repopulates. */
 	m_BrickGrid.Resize(uWorldSize);
-	m_pBrickMapper->Resize(m_BrickGrid.GetBrickCount(), sizeof(uint32_t));
+	m_pBrickMapper->Resize(m_BrickGrid.GetPyramidElementCount(), sizeof(uint32_t));
 	m_BrickGrid.SetBuffers(m_pBrickMapper->GetData(), m_pBrickMapper->GetBackBufferData());
 	m_BrickGrid.Flush();
 
@@ -316,11 +316,15 @@ void RenderContext::BuildFarField(World* pWorld)
 	m_FarFieldBricks.Resize(m_FarField.GetGridSize());
 
 	m_pFarFieldMapper->Resize(m_FarField.GetCellCount(), sizeof(uint32_t));
-	m_pFarFieldBrickMapper->Resize(m_FarFieldBricks.GetBrickCount(), sizeof(uint32_t));
+	m_pFarFieldBrickMapper->Resize(m_FarFieldBricks.GetPyramidElementCount(), sizeof(uint32_t));
 
 	m_FarFieldBricks.SetBuffers(m_pFarFieldBrickMapper->GetData(), nullptr);
 
 	m_FarField.Flush(m_pFarFieldMapper->GetData(), m_FarFieldBricks);
+
+	/* The volume never changes again, so its pyramid is built once here rather
+	   than from the frame loop. */
+	m_FarFieldBricks.FlushDirty();
 
 	ForceCameraDataUpdate();
 }
@@ -373,6 +377,15 @@ bool RenderContext::Present()
 	// Render ImGui
 	ImGui::Render();
 #endif
+
+	/* Rebuild the coverage pyramid over whatever was written this frame, before
+	   anything is submitted (RENDERING_PLAN.md 7.1b). Here rather than at each
+	   write site because the work per cell is the same whether one voxel of it
+	   changed or thirty thousand, and a burst is where both extremes live -
+	   maintaining it per voxel measured 3.9x the write cost of the bricks
+	   alone. Main thread; chunk streaming marks the back buffer from job
+	   threads and the marks are atomic. */
+	m_BrickGrid.FlushDirty();
 
 	// Hold timer that counts drawn frames
 	float fDeltaTime = static_cast<float>(m_pPlatform->GetApplication()->GetTimer().GetElapsedSeconds());

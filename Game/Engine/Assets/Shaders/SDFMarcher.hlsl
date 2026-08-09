@@ -107,26 +107,22 @@ inline bool IsInChunk(int3 v3Position) {
    zero" is read here; the count exists so that destroying one voxel can
    decrement its brick without rescanning the other 511.
 
-   Linearization is the voxel convention (rule 4) scaled down:
-   x + y*B.x + z*B.x*B.y with B = ceil(worldSize / BRICK_SIZE). The C++ side
-   computes B the same way - VoxelBrickGrid::Resize. */
+   The bricks are PYRAMID_BRICK_LEVEL of the coverage pyramid (7.1b) rather
+   than a buffer of their own, so they no longer start at element zero - the
+   finer level is in front of them. VoxelPyramid.hlsl derives the offset the
+   same way VoxelBrickGrid does. */
+#include "VoxelPyramid.hlsl"
 
 inline uint3 GetBrickGridSize() {
-	return (worldSize.xyz + (BRICK_SIZE - 1)) >> BRICK_SHIFT;
+	return PyramidLevelGridSize(worldSize.xyz, PYRAMID_BRICK_LEVEL);
 }
 
 inline uint PosToBrickID(int3 v3Brick) {
-	uint3 v3Grid = GetBrickGridSize();
-	return uint(v3Brick.x) + uint(v3Brick.y) * v3Grid.x + uint(v3Brick.z) * v3Grid.x * v3Grid.y;
+	return PyramidCellID(worldSize.xyz, PYRAMID_BRICK_LEVEL, v3Brick);
 }
 
 inline bool IsBrickInWorld(int3 v3Brick) {
-	int3 v3Grid = int3(GetBrickGridSize());
-
-	return (
-		v3Brick.x >= 0 && v3Brick.y >= 0 && v3Brick.z >= 0 &&
-		v3Brick.x < v3Grid.x && v3Brick.y < v3Grid.y && v3Brick.z < v3Grid.z
-	);
+	return IsPyramidCellInWorld(worldSize.xyz, PYRAMID_BRICK_LEVEL, v3Brick);
 }
 
 inline bool IsBrickOccupied(int3 v3Brick) {

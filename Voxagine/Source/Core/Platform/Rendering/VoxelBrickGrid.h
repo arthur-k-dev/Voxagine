@@ -2,6 +2,7 @@
 
 #include "Core/Math.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <memory>
@@ -20,7 +21,7 @@
  *
  * Two representations are kept deliberately:
  *
- *   - m_pCounts, plain CPU memory, is authoritative and is what every
+ *   - m_pLevels, plain CPU memory, is authoritative and is what every
  *     read-modify-write goes through.
  *   - m_pGPU points into the brick Mapper's host-visible buffers and is
  *     written to, never read from.
@@ -63,10 +64,66 @@ public:
 	static constexpr uint32_t k_uiBrickSize = 1u << k_uiBrickShift;
 	static constexpr uint32_t k_uiBrickVolume = k_uiBrickSize * k_uiBrickSize * k_uiBrickSize;
 
+	/* --- Coverage pyramid (RENDERING_PLAN.md 7.1b) -------------------------
+	   Level 0 is the brick grid above, at k_uiBrickSize voxels a cell. Each
+	   level after it doubles the cell, so level L covers
+	   `k_uiBrickSize << L` voxels and the whole set is a mip chain over
+	   occupancy.
+
+	   Why there is a level *finer* than the brick is the finding this exists
+	   for. A cone traced against the 4-voxel bricks alone cannot serve ambient
+	   occlusion: started nearer than ~8 voxels it samples the bricks holding
+	   its own wall and the surface occludes itself; started at 8, nothing
+	   measures occlusion between one voxel and eight, which is exactly the
+	   scale of the gaps between stones in a wall. Both were seen on screen.
+	   The finest level therefore has to be smaller than the brick, and
+	   k_uiFineShift is where that lives.
+
+	   The levels are appended into the *same* GPU buffer as the bricks, one
+	   after another, and the offsets are derivable on both sides from the
+	   window size by the same ceil-div the brick grid already does. That is
+	   deliberate: it means no new mapper, no new descriptor and no change to
+	   the SPIR-V/C++ binding contract (rule 1) for any of this. It does mean
+	   the bricks no longer start at element zero: level 0 is in front of them,
+	   and HLSL's PosToBrickID adds the same offset this computes. */
+	static constexpr uint32_t k_uiFineShift = 1;
+	static constexpr uint32_t k_uiPyramidLevels = 5;
+
+	/* The level whose cells are the bricks. Everything in this class that says
+	   "brick" - GetCount, VoxelToBrick, the dirty set VoxelEditBatch reports,
+	   the marcher's own traversal - means this one; the pyramid is the same
+	   structure with levels either side of it. */
+	static constexpr uint32_t k_uiBrickLevel = k_uiBrickShift - k_uiFineShift;
+
+	/* Cell edge in voxels for a pyramid level, level 0 being the finest. */
+	static constexpr uint32_t LevelSize(uint32_t uiLevel)
+	{
+		return 1u << (k_uiFineShift + uiLevel);
+	}
+
+	static constexpr uint32_t LevelVolume(uint32_t uiLevel)
+	{
+		return LevelSize(uiLevel) * LevelSize(uiLevel) * LevelSize(uiLevel);
+	}
+
+	/* Cells across each axis at a level, and how many in total. Ceil-div, so a
+	   window that is not a whole number of cells gets a partial one rather than
+	   losing its edge - HLSL's own GetBrickGridSize does the same. */
+	const UVector3& GetLevelGridSize(uint32_t uiLevel) const { return m_v3LevelGrid[uiLevel]; }
+	uint32_t GetLevelCellCount(uint32_t uiLevel) const { return m_uiLevelCells[uiLevel]; }
+
+	/* First element of a level within the shared buffer. Level 0 starts at 0
+	   and each one follows the last. The shader recomputes this rather than
+	   being told it, so the two cannot drift. */
+	uint32_t GetLevelOffset(uint32_t uiLevel) const { return m_uiLevelOffset[uiLevel]; }
+
+	/* Elements the shared buffer needs to hold every level. */
+	uint32_t GetPyramidElementCount() const { return m_uiLevelOffset[k_uiPyramidLevels]; }
+
 	/* Reallocates for a new window size and zeroes every count. Touches CPU
 	   state only and drops the mirror pointers - the caller resizes the brick
-	   Mapper to GetBrickCount() elements afterwards, hands the new mappings
-	   back with SetBuffers, and calls Flush. */
+	   Mapper to GetPyramidElementCount() elements afterwards, hands the new
+	   mappings back with SetBuffers, and calls Flush. */
 	void Resize(const UVector3& v3WorldSize);
 
 	/* The two host-visible mirrors, in the same front/back sense the voxel
@@ -80,6 +137,22 @@ public:
 	   paths keep the mirrors current themselves. */
 	void Flush();
 
+	/* Rebuilds the pyramid over everything written since the last call, and
+	   pushes it to the mirror. Main thread, once a frame, before the GPU reads
+	   the buffer - RenderContext::Present.
+
+	   Deferred rather than maintained per voxel because the per-voxel version
+	   was measured and is the wrong shape: a world load stamps ~3.1 M voxels,
+	   and five counter updates plus five scattered stores into uncached
+	   host-visible memory took CPU VoxelBaker::Occupy (added) from 1.86 ms to
+	   7.20 ms. Most of that work is redundant - a 32^3 cell is written by up to
+	   32768 voxels of the same burst - and deferring is what collapses it to
+	   one rebuild per cell that actually changed.
+
+	   Bricks are exempt and stay incremental: gameplay reads them through
+	   GetCount within the frame that wrote them. */
+	void FlushDirty();
+
 	/* Zeroes both buffers, CPU side and mirrors. */
 	void ClearAll();
 
@@ -89,9 +162,28 @@ public:
 
 	uint32_t GetCount(bool bBack, uint32_t uiBrickID) const
 	{
-		return uiBrickID < m_uiBrickCount
-			? m_pCounts[Index(bBack)][uiBrickID].load(std::memory_order_relaxed)
+		return GetLevelCount(bBack, k_uiBrickLevel, uiBrickID);
+	}
+
+	uint32_t GetLevelCount(bool bBack, uint32_t uiLevel, uint32_t uiCellID) const
+	{
+		const std::atomic<uint16_t>* pCounts = m_pLevels[uiLevel][Index(bBack)].get();
+
+		return (pCounts != nullptr && uiCellID < m_uiLevelCells[uiLevel])
+			? pCounts[uiCellID].load(std::memory_order_relaxed)
 			: 0;
+	}
+
+	/* Linear index of the cell a voxel coordinate falls in, at a level. Same
+	   convention as BrickID, which is this at k_uiBrickLevel. */
+	inline uint32_t LevelCellID(uint32_t uiLevel, uint32_t uiX, uint32_t uiY, uint32_t uiZ) const
+	{
+		const UVector3& v3Grid = m_v3LevelGrid[uiLevel];
+		const uint32_t uiShift = k_uiFineShift + uiLevel;
+
+		return (uiX >> uiShift)
+			+ (uiY >> uiShift) * v3Grid.x
+			+ (uiZ >> uiShift) * v3Grid.x * v3Grid.y;
 	}
 
 	inline uint32_t VoxelToBrick(uint32_t uiVoxelID) const
@@ -130,7 +222,7 @@ public:
 	   the counts are updated from the same value and cannot drift apart. */
 	inline void SetVoxel(uint32_t uiVoxelID, bool bIsOccupied)
 	{
-		if (IsOccupied(uiVoxelID) == bIsOccupied)
+		if (uiVoxelID >= m_uiVoxelCount || IsOccupied(uiVoxelID) == bIsOccupied)
 			return;
 
 		SetOccupancyBit(m_uiFront, uiVoxelID, bIsOccupied);
@@ -140,33 +232,24 @@ public:
 		if (uiBrickID >= m_uiBrickCount)
 			return;
 
-		std::atomic<uint16_t>& count = m_pCounts[m_uiFront][uiBrickID];
-		uint16_t uiNew;
+		std::atomic<uint16_t>& count = m_pLevels[k_uiBrickLevel][m_uiFront][uiBrickID];
 
 		if (bIsOccupied)
 		{
-			uiNew = static_cast<uint16_t>(count.fetch_add(1, std::memory_order_relaxed) + 1);
+			count.fetch_add(1, std::memory_order_relaxed);
 		}
-		else
+		else if (count.fetch_sub(1, std::memory_order_relaxed) == 0)
 		{
-			const uint16_t uiOld = count.fetch_sub(1, std::memory_order_relaxed);
-
-			if (uiOld == 0)
-			{
-				/* Underflow means a decrement arrived for a voxel this grid
-				   never counted as occupied. Wrapping to 65535 would only cost
-				   traversal, but it would also hide the accounting bug that
-				   produced it, so put it back and say so. */
-				count.fetch_add(1, std::memory_order_relaxed);
-				ReportUnderflow(uiBrickID);
-				return;
-			}
-
-			uiNew = static_cast<uint16_t>(uiOld - 1);
+			/* Underflow means a decrement arrived for a voxel this grid never
+			   counted as occupied. Wrapping to 65535 would only cost traversal,
+			   but it would also hide the accounting bug that produced it, so
+			   put it back and say so. */
+			count.fetch_add(1, std::memory_order_relaxed);
+			ReportUnderflow(k_uiBrickLevel, uiBrickID);
+			return;
 		}
 
-		if (m_pGPU[m_uiFront] != nullptr)
-			m_pGPU[m_uiFront][uiBrickID] = uiNew;
+		MarkDirty(m_uiFront, uiBrickID);
 	}
 
 	/* Bulk path, for callers that overwrite a whole rectangular region of the
@@ -187,7 +270,9 @@ public:
 
 	inline void AddVoxel(bool bBack, uint32_t uiX, uint32_t uiY, uint32_t uiZ)
 	{
-		SetOccupancyBit(Index(bBack), VoxelID(uiX, uiY, uiZ), true);
+		const uint32_t uiBuffer = Index(bBack);
+
+		SetOccupancyBit(uiBuffer, VoxelID(uiX, uiY, uiZ), true);
 
 		const uint32_t uiBrickID = BrickID(uiX >> k_uiBrickShift, uiY >> k_uiBrickShift, uiZ >> k_uiBrickShift);
 
@@ -195,16 +280,21 @@ public:
 			return;
 
 		/* Non-atomic on purpose: a region is owned by exactly one thread for
-		   the length of a Begin/End pair, and the two buffers are disjoint. */
-		std::atomic<uint16_t>& count = m_pCounts[Index(bBack)][uiBrickID];
+		   the length of a Begin/End pair, and the two buffers are disjoint.
+		   EndRegion marks the whole region dirty, so this does not have to. */
+		std::atomic<uint16_t>& count = m_pLevels[k_uiBrickLevel][uiBuffer][uiBrickID];
 		count.store(static_cast<uint16_t>(count.load(std::memory_order_relaxed) + 1), std::memory_order_relaxed);
 	}
 
 	/* Recomputes every count from the voxel buffer and reports disagreements.
 	   Reads the whole window out of uncached host-visible memory, so it is a
 	   debugging tool, not something to run per frame. Returns the number of
-	   bricks that disagreed. */
-	uint32_t Validate(bool bBack, const uint32_t* pVoxelData) const;
+	   cells that disagreed.
+
+	   Flushes first, since the pyramid above the bricks is only as current as
+	   the last FlushDirty and validating a knowingly stale copy would report
+	   noise. */
+	uint32_t Validate(bool bBack, const uint32_t* pVoxelData);
 
 	/* Order-independent-free FNV-1a over every count and every occupancy word,
 	   for DESTRUCTION_PLAN.md phase 0's gauntlet state hash. Two runs of the
@@ -222,6 +312,64 @@ private:
 	inline uint32_t BrickID(uint32_t uiX, uint32_t uiY, uint32_t uiZ) const
 	{
 		return uiX + uiY * m_v3GridSize.x + uiZ * m_v3GridSize.x * m_v3GridSize.y;
+	}
+
+	/* Marks a brick as needing its share of the pyramid rebuilt. One cached
+	   atomic OR over a bitmap of 1.2 M bits, in place of the four extra
+	   counter updates and four extra streaming stores a per-voxel pyramid
+	   would cost - which is what made the per-voxel version 3.9x the write
+	   cost of the bricks alone. See FlushDirty. */
+	inline void MarkDirty(uint32_t uiBuffer, uint32_t uiBrickID)
+	{
+		std::atomic<uint64_t>* pDirty = m_pDirty[k_uiBrickLevel][uiBuffer].get();
+
+		if (pDirty == nullptr)
+			return;
+
+		pDirty[uiBrickID >> k_uiWordShift].fetch_or(1ull << (uiBrickID & k_uiWordMask), std::memory_order_relaxed);
+		m_bHasDirty[uiBuffer].store(true, std::memory_order_relaxed);
+	}
+
+	/* Rebuilds one brick's eight level-0 cells from the occupancy bitmap, and
+	   pushes them plus the brick itself to the mirror. The bitmap is the only
+	   representation fine enough to answer this and it is ordinary cached
+	   memory, so a 4^3 brick is sixteen nibble reads - one per (y, z) row -
+	   rather than 64 separate lookups. */
+	void RebuildFineCells(uint32_t uiBuffer, uint32_t uiBrickID);
+
+	/* Rebuilds one coarse cell as the sum of its eight children at the level
+	   below, and pushes it. Exact rather than approximate: a cell's count is
+	   the number of occupied voxels under it however it is arrived at. */
+	void RebuildCoarseCell(uint32_t uiBuffer, uint32_t uiLevel, uint32_t uiCellID);
+
+	inline void MarkDirtyAt(uint32_t uiBuffer, uint32_t uiLevel, uint32_t uiCellID)
+	{
+		std::atomic<uint64_t>* pDirty = m_pDirty[uiLevel][uiBuffer].get();
+
+		if (pDirty != nullptr)
+			pDirty[uiCellID >> k_uiWordShift].fetch_or(1ull << (uiCellID & k_uiWordMask), std::memory_order_relaxed);
+	}
+
+	/* The cell one level coarser that contains this one. Not simply
+	   uiCellID >> 3: the grids are independent ceil-divs, so a level's row
+	   pitch is not twice its parent's wherever the window is not a whole
+	   number of cells. */
+	inline uint32_t ParentCellID(uint32_t uiLevel, uint32_t uiCellID) const
+	{
+		const UVector3& v3Grid = m_v3LevelGrid[uiLevel];
+		const UVector3& v3Parent = m_v3LevelGrid[uiLevel + 1];
+
+		const uint32_t uiX = uiCellID % v3Grid.x;
+		const uint32_t uiY = (uiCellID / v3Grid.x) % v3Grid.y;
+		const uint32_t uiZ = uiCellID / (v3Grid.x * v3Grid.y);
+
+		return (uiX >> 1) + (uiY >> 1) * v3Parent.x + (uiZ >> 1) * v3Parent.x * v3Parent.y;
+	}
+
+	inline void WriteMirror(uint32_t uiBuffer, uint32_t uiLevel, uint32_t uiCellID, uint16_t uiValue)
+	{
+		if (m_pGPU[uiBuffer] != nullptr)
+			m_pGPU[uiBuffer][m_uiLevelOffset[uiLevel] + uiCellID] = uiValue;
 	}
 
 	inline uint32_t VoxelID(uint32_t uiX, uint32_t uiY, uint32_t uiZ) const
@@ -253,10 +401,34 @@ private:
 	   this is not rounded out to bricks the way the counts are. */
 	void ClearOccupancyRegion(uint32_t uiBuffer, const UVector3& v3Min, const UVector3& v3Size);
 
+	/* First and last cell of a level touched by a voxel region, inclusive and
+	   outward-rounded. Clamped to the grid, since a region may run to the edge
+	   of a window that is not a whole number of cells. */
+	inline UVector3 LevelCellRangeFirst(uint32_t uiLevel, const UVector3& v3Min) const
+	{
+		const uint32_t uiShift = k_uiFineShift + uiLevel;
+
+		return UVector3(v3Min.x >> uiShift, v3Min.y >> uiShift, v3Min.z >> uiShift);
+	}
+
+	inline UVector3 LevelCellRangeLast(uint32_t uiLevel, const UVector3& v3Min, const UVector3& v3Size) const
+	{
+		const uint32_t uiShift = k_uiFineShift + uiLevel;
+		const UVector3& v3Grid = m_v3LevelGrid[uiLevel];
+
+		return UVector3(
+			std::min((v3Min.x + v3Size.x - 1) >> uiShift, v3Grid.x - 1),
+			std::min((v3Min.y + v3Size.y - 1) >> uiShift, v3Grid.y - 1),
+			std::min((v3Min.z + v3Size.z - 1) >> uiShift, v3Grid.z - 1)
+		);
+	}
+
 	void ZeroCounts();
 	void ZeroOccupancy();
+	void ClearDirty();
 
-	static void ReportUnderflow(uint32_t uiBrickID);
+	static void ReportUnderflow(uint32_t uiLevel, uint32_t uiCellID);
+	static void ReportUnalignedRegion(uint32_t uiLevel, const UVector3& v3Min, const UVector3& v3Size);
 
 	UVector3 m_v3WorldSize = UVector3(0, 0, 0);
 	UVector3 m_v3GridSize = UVector3(0, 0, 0);
@@ -266,7 +438,28 @@ private:
 
 	uint32_t m_uiFront = 0;
 
-	std::unique_ptr<std::atomic<uint16_t>[]> m_pCounts[2];
+	/* Cached rather than recomputed: LevelCellID runs per voxel per level on
+	   the stamp path. The values are still derived by the ceil-div the shader
+	   does, in Resize, so the two sides cannot disagree. */
+	UVector3 m_v3LevelGrid[k_uiPyramidLevels];
+	uint32_t m_uiLevelCells[k_uiPyramidLevels] = {};
+	uint32_t m_uiLevelOffset[k_uiPyramidLevels + 1] = {};
+
+	/* One count array per level per buffer. m_pLevels[k_uiBrickLevel] is the
+	   brick grid phase 2 built; the rest are the pyramid around it. uint16 for
+	   every level because the coarsest cell is 32^3 = 32768 voxels, which
+	   still fits - a per-level type would save 9.4 MiB a buffer at level 0 and
+	   cost every path here a branch on the level. */
+	std::unique_ptr<std::atomic<uint16_t>[]> m_pLevels[k_uiPyramidLevels][2];
+
+	/* One bit per cell, for the brick level and every level above it: what
+	   FlushDirty has to rebuild. Level 0 needs none - it is rebuilt from the
+	   brick that contains it. 170 KiB a buffer against the 43 MiB of counts,
+	   which is why marking is cheap enough to do per voxel write. */
+	std::unique_ptr<std::atomic<uint64_t>[]> m_pDirty[k_uiPyramidLevels][2];
+	uint32_t m_uiDirtyWords[k_uiPyramidLevels] = {};
+	std::atomic<bool> m_bHasDirty[2] = {};
+
 	std::unique_ptr<std::atomic<uint64_t>[]> m_pOccupancy[2];
 	uint32_t* m_pGPU[2] = { nullptr, nullptr };
 };

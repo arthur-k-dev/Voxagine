@@ -44,6 +44,20 @@
 #define BRICK_SIZE_F 4.0
 #define BRICK_INV_SIZE 0.25
 
+/* Coverage pyramid (RENDERING_PLAN.md 7.1b). The bricks above are one level of
+   it: PYRAMID_LEVELS counts over the same window, each level's cell twice the
+   edge of the one below, the finest at 1 << PYRAMID_FINE_SHIFT voxels. They
+   share the brick buffer, laid end to end, and VoxelPyramid.hlsl derives where
+   each one starts. These three are VoxelBrickGrid's k_uiFineShift,
+   k_uiPyramidLevels and k_uiBrickLevel - change both sides or neither.
+
+   A level finer than the brick is the whole point: a cone traced against the
+   4-voxel bricks alone cannot serve ambient occlusion, which was established on
+   screen rather than argued (see AO_CONE_ENABLED below). */
+#define PYRAMID_FINE_SHIFT 1
+#define PYRAMID_LEVELS 5
+#define PYRAMID_BRICK_LEVEL (BRICK_SHIFT - PYRAMID_FINE_SHIFT)
+
 /* Voxel crossings a ray can make inside one brick before it has to leave:
    3 axes x BRICK_SIZE cells. The inner walk also breaks the moment the ray
    leaves the brick, so this only bounds the pathological case. */
@@ -153,32 +167,47 @@
 #define SUN_SHADOW_MAX_RADIUS 12.0
 
 /* --- Cone-traced ambient occlusion (RENDERING_PLAN.md 7.1b) ---------------
-   OFF. The cone works; the *data* it marches is too coarse, and the two ways
-   it fails bracket the problem with no setting in between:
+   Five cones over the hemisphere - one on the normal, four on a ring - marched
+   against the coverage pyramid, each step sampling the level whose cell is
+   about as wide as the cone is there.
 
-     - Cone start under ~8 voxels: a ring cone leaves at ~52 degrees, so near
-       the surface it travels along it and samples the 4-voxel bricks
-       containing the wall it started on. The wall occludes itself. On stepped
-       geometry the origin lands inside the ledge above and the surface goes
-       black in wedges.
-     - Cone start at 8 voxels: nothing then measures occlusion between 1 voxel
-       (GetSkyVisibility's neighbour test) and 8. That gap is exactly the scale
-       of the gaps between stones in a wall, so the wall reads flat - and
-       inconsistent, because which samples land in an occupied brick depends on
-       where a block happens to fall in a lattice that knows nothing about it.
+   The first cut marched the bricks alone and it failed in two ways that
+   bracket the problem with no setting in between: started nearer than ~8
+   voxels a ring cone samples the 4-voxel bricks holding the wall it began on
+   and the surface occludes itself; started at 8, nothing measures occlusion
+   between one voxel and eight, which is the scale of the gaps between stones
+   in a wall. Both were seen on screen, both are the data rather than the
+   trace, and the pyramid's finer levels are the answer to both. Against the
+   pyramid the image is right: no self-occlusion wedges, no lattice, and a wall
+   that reads as stone with gaps in it.
 
-   Both were seen on screen. This is the answer to the question 7.1b was posed
-   as - "is brick resolution enough for AO?" - and it is no. The pyramid is
-   required, and specifically levels *finer* than the 4-voxel brick, with
-   trilinear filtering so a cone samples its own scale rather than a fixed grid.
+   OFF for cost, which is a different reason from the first cut's. The voxel
+   pass, headless, same vantage:
 
-   Set to 1 to re-enable while working on it. AmbientCone.hlsl is kept because
-   the cone itself is right and becomes the pyramid version's body. */
+                      1920x1080   3840x2160
+     off                0.745       2.426
+     one fetch a step   1.051       3.565
+     trilinear          2.320       7.666
+
+   The filter is 4.6x the whole rest of the cone, because eight fetches by hand
+   is what a storage buffer costs where a 3D texture would charge one sample -
+   and +5.24 ms at 4K is the entire lighting budget several times over. That is
+   the measurement 7.1b said would decide route B, and it decides it. */
 #define AO_CONE_ENABLED 0
 
-/* 1 / BRICK_SIZE^3 at BRICK_SHIFT 2. Turns a brick's occupied-voxel count into
-   a density. Change with BRICK_SHIFT. */
-#define AO_INV_BRICK_VOLUME (1.0 / 64.0)
+/* Trilinear filtering of a pyramid sample, which costs eight fetches by hand
+   because the levels live in a storage buffer rather than a 3D texture. Set to
+   0 to price a step at one fetch - the cost a hardware SampleLevel would have
+   - which is the measurement 7.1b route B turns on. Not a quality setting: at
+   0 the lattice artefact the pyramid exists to remove comes back. */
+#define AO_CONE_TRILINEAR 1
+
+/* Half-angle of a cone as a radius-over-distance ratio. Five cones covering a
+   hemisphere is ~45 degrees each; a little under that keeps them from
+   overlapping into a term that saturates on open ground. This is what picks
+   the level per step, so it is the knob that decides how coarse the data a
+   given step reads is. */
+#define AO_CONE_APERTURE 0.55
 
 /* Cones in the ring around the normal, plus one along it. Five total. */
 #define AO_RING_CONES 4
@@ -189,41 +218,34 @@
 #define AO_RING_COSINE 0.615
 #define AO_RING_SINE 0.788
 
-/* Samples per cone, and how fast the step grows. Geometric, so six steps from
-   AO_CONE_START reach ~114 voxels - far enough to feel a building, which the
-   twelve-tap neighbour test never could.
+/* Samples per cone, and how fast the step grows. Geometric, so seven steps
+   from AO_CONE_START reach ~66 voxels - far enough to feel a building, which
+   the twelve-tap neighbour test never could.
 
-   AO_CONE_START is 8 rather than 4 because of the brick resolution, and this is
-   the subtle part. A ring cone leaves at ~52 degrees from the normal, so near
-   the surface it travels mostly *along* it - and a brick is four voxels, so a
-   sample taken a few voxels out still lands in a brick containing the wall the
-   cone started on. A flat wall then reads as enclosed by itself. At 8 voxels a
-   ring sample is ~4.9 voxels clear of the surface along the normal, which is
-   more than a brick, so it is sampling somewhere else at last.
-
-   The near field this gives up is exactly what GetSkyVisibility's twelve-tap
-   neighbour test already covers, which is why the two are multiplied rather
-   than one replacing the other. */
-#define AO_CONE_STEPS 6
-#define AO_CONE_START 8.0
+   AO_CONE_START is two voxels now rather than eight, and that is the whole
+   point of having built the pyramid. Eight was forced by the brick: a ring cone
+   leaves at ~52 degrees, so a sample taken nearer than that still landed in a
+   4-voxel brick containing the wall the cone started on. The finest level is
+   two voxels, so a sample two voxels out is already reading somewhere else -
+   and the 1-to-8 voxel gap that made walls read flat closes. */
+#define AO_CONE_STEPS 7
+#define AO_CONE_START 2.0
 #define AO_CONE_GROWTH 1.7
 
-/* How much a fully solid brick occludes per step. Under 1 because a cone step
+/* How much a fully solid cell occludes per step. Under 1 because a cone step
    samples one point of a footprint that is mostly not that point; tune by eye
    against how heavy enclosed areas look. */
 #define AO_CONE_STRENGTH 0.35
 
-/* Where a cone starts, along the surface normal.
+/* Where a cone starts, along the surface normal. Enough to leave the finest
+   cell the surface is itself part of - which is two voxels, the same as
+   AO_CONE_START, where under the bricks these had to be different numbers.
 
-   This was a full brick (4.0) and that was actively wrong on detailed
+   It was a full brick (4.0) once and that was actively wrong on detailed
    geometry: on a stepped wall, four voxels along a recessed face's normal
    lands *inside* the ledge above it, so the cone began in solid rock and the
    surface came out black. The artefact followed the steps, which is what
-   "full of black triangles" was.
-
-   Two voxels is enough to leave the surface without reaching a neighbour.
-   Escaping the surface's own *brick* is AO_CONE_START's job, not this one -
-   see below. */
+   "full of black triangles" was. */
 #define AO_SURFACE_OFFSET 2.0
 
 /* Sky colour for rays that leave the world without hitting anything or the

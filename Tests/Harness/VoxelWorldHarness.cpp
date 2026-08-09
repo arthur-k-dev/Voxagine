@@ -35,8 +35,11 @@ VoxelWorldHarness::VoxelWorldHarness(const UVector3& v3Size, const UVector3& v3C
 
 	m_Bricks.Resize(v3Size);
 
-	m_BrickMirrorFront.assign(m_Bricks.GetBrickCount(), 0u);
-	m_BrickMirrorBack.assign(m_Bricks.GetBrickCount(), 0u);
+	/* The mirror holds the whole coverage pyramid, not just the bricks - the
+	   levels are appended into one buffer and the grid addresses them by the
+	   offsets it derives from the window size. */
+	m_BrickMirrorFront.assign(m_Bricks.GetPyramidElementCount(), 0u);
+	m_BrickMirrorBack.assign(m_Bricks.GetPyramidElementCount(), 0u);
 
 	m_Bricks.SetBuffers(m_BrickMirrorFront.data(), m_BrickMirrorBack.data());
 	m_Bricks.Flush();
@@ -149,7 +152,7 @@ uint64_t VoxelWorldHarness::CountOccupied() const
 	return uiCount;
 }
 
-uint32_t VoxelWorldHarness::Validate() const
+uint32_t VoxelWorldHarness::Validate()
 {
 	return m_Bricks.Validate(false, m_Words.data());
 }

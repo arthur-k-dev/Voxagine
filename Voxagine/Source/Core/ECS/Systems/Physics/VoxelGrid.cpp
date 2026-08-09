@@ -173,12 +173,12 @@ uint16_t VoxelGrid::AcquireOwnerSlot(uint64_t uiEntityID)
 	if (it != m_EntityToSlot.end())
 		return it->second;
 
-	/* k_uiParticleSlot is reserved, so the last usable slot is one below it.
+	/* k_uiReservedSlot is reserved, so the last usable slot is one below it.
 	   Exhausting this means 65533 distinct static owners in one world; the
 	   largest level here uses 117. Report it rather than wrap, and treat the
 	   overflow as unowned - which is what the field held before phase 4d gave
 	   it a slot at all. */
-	if (m_SlotToEntity.size() >= VoxelOwnerVolume::k_uiParticleSlot)
+	if (m_SlotToEntity.size() >= VoxelOwnerVolume::k_uiReservedSlot)
 	{
 		static bool s_bWarned = false;
 

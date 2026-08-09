@@ -56,7 +56,6 @@ set(VOXAGINE_ENGINE_SOURCES
     ${VOXAGINE_SOURCE_DIR}/Core/ECS/Systems/Pathfinding/Navigation/PathfinderGroup.cpp
     ${VOXAGINE_SOURCE_DIR}/Core/ECS/Systems/Physics/Box.cpp
     ${VOXAGINE_SOURCE_DIR}/Core/ECS/Systems/Physics/IntegrityChecker.cpp
-    ${VOXAGINE_SOURCE_DIR}/Core/ECS/Systems/Physics/ParticleLinkedList.cpp
     ${VOXAGINE_SOURCE_DIR}/Core/ECS/Systems/Physics/PhysicsSystem.cpp
     ${VOXAGINE_SOURCE_DIR}/Core/ECS/Systems/Physics/Sphere.cpp
     ${VOXAGINE_SOURCE_DIR}/Core/ECS/Systems/Physics/VoxelGrid.cpp
@@ -135,6 +134,7 @@ set(VOXAGINE_ENGINE_SOURCES
     ${VOXAGINE_SOURCE_DIR}/Core/Resources/Formats/TextureReference.cpp
     ${VOXAGINE_SOURCE_DIR}/Core/Resources/Formats/VoxModel.cpp
     ${VOXAGINE_SOURCE_DIR}/Core/Resources/ResourceManager.cpp
+    ${VOXAGINE_SOURCE_DIR}/Core/Particles/ParticleCore.cpp
     ${VOXAGINE_SOURCE_DIR}/Core/Settings.cpp
     ${VOXAGINE_SOURCE_DIR}/Core/Voxels/VoxelEditBatch.cpp
     ${VOXAGINE_SOURCE_DIR}/Core/System/Posix/PosixFileSystem.cpp

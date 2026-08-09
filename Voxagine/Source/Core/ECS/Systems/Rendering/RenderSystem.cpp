@@ -792,7 +792,7 @@ void RenderSystem::AuditVoxelRepresentation()
 	uint64_t uiOwners = 0;
 	uint64_t uiDeadOwners = 0;
 	uint64_t uiOwnerNotActive = 0;
-	uint64_t uiParticleClaims = 0;
+	uint64_t uiReservedSlots = 0;
 
 	std::unordered_map<uint64_t, bool> aliveCache;
 	std::unordered_map<uint16_t, uint64_t> slotCounts;
@@ -822,9 +822,13 @@ void RenderSystem::AuditVoxelRepresentation()
 		if (!bActive)
 			++uiOwnerNotActive;
 
-		if (uiSlot == VoxelOwnerVolume::k_uiParticleSlot)
+		/* Nothing writes this since phase 3 deleted particle claims, so it
+		   should read zero. A non-zero count means chunk data older than that
+		   is still resident, which is fine, or that something started handing
+		   the reserved slot out, which is not. */
+		if (uiSlot == VoxelOwnerVolume::k_uiReservedSlot)
 		{
-			++uiParticleClaims;
+			++uiReservedSlots;
 			continue;
 		}
 
@@ -843,9 +847,9 @@ void RenderSystem::AuditVoxelRepresentation()
 	        (unsigned long long)uiActive, dims.x * dims.y * dims.z,
 	        sizeof(Voxel), sizeof(uint16_t));
 
-	fprintf(stderr, "[voxel-audit] owners: %llu set, %llu naming a dead entity, %llu on an inactive voxel, %llu particle claims (%zu distinct slots of %zu allocated)\n",
+	fprintf(stderr, "[voxel-audit] owners: %llu set, %llu naming a dead entity, %llu on an inactive voxel, %llu on the reserved slot (%zu distinct slots of %zu allocated)\n",
 	        (unsigned long long)uiOwners, (unsigned long long)uiDeadOwners,
-	        (unsigned long long)uiOwnerNotActive, (unsigned long long)uiParticleClaims,
+	        (unsigned long long)uiOwnerNotActive, (unsigned long long)uiReservedSlots,
 	        slotCounts.size(), grid.GetOwnerSlotCount());
 
 	/* The other half of the representation is the RLE the chunk system encodes
@@ -1024,36 +1028,198 @@ void RenderSystem::AddLooseVoxel(const Vector3& v3GridPosition)
 	/* Level space: grid space plus the window's own offset. */
 	const Vector3 v3Level = v3GridPosition + m_pPhysicsSystem->m_VoxelGrid.GetWorldOffset();
 
+	/* Ledger L4. This used to drop out-of-range positions silently, which is
+	   the same as saying "this voxel gets no proxy and nobody will ever know".
+	   Dropping is still the right answer - a clamped cell key names a different
+	   place, so the proxy would be submitted somewhere the voxel is not - but
+	   it says so now. */
+	auto reject = [&v3Level](const char* pReason)
+	{
+		static bool s_bWarned = false;
+
+		if (!s_bWarned)
+		{
+			s_bWarned = true;
+			fprintf(stderr, "[loose] dropping a voxel at level (%.1f %.1f %.1f): %s - it will only be drawn "
+			                "when another model's proxy happens to cover it\n",
+			        v3Level.x, v3Level.y, v3Level.z, pReason);
+		}
+	};
+
 	if (v3Level.x < 0.f || v3Level.y < 0.f || v3Level.z < 0.f)
+	{
+		reject("negative level coordinate");
 		return;
+	}
+
+	const UVector3 v3Voxel(
+		static_cast<uint32_t>(v3Level.x),
+		static_cast<uint32_t>(v3Level.y),
+		static_cast<uint32_t>(v3Level.z));
 
 	const UVector3 v3Cell(
-		static_cast<uint32_t>(v3Level.x) >> k_uiLooseCellShift,
-		static_cast<uint32_t>(v3Level.y) >> k_uiLooseCellShift,
-		static_cast<uint32_t>(v3Level.z) >> k_uiLooseCellShift);
+		v3Voxel.x >> k_uiLooseCellShift,
+		v3Voxel.y >> k_uiLooseCellShift,
+		v3Voxel.z >> k_uiLooseCellShift);
 
 	/* Ten bits an axis is a level of 32768 voxels a side at this cell size,
 	   which is 21 times the largest one here. */
 	if (v3Cell.x > 1023 || v3Cell.y > 1023 || v3Cell.z > 1023)
+	{
+		reject("outside the ten-bit cell grid");
 		return;
+	}
 
 	const uint32_t uiKey = v3Cell.x | (v3Cell.y << 10) | (v3Cell.z << 20);
 
-	std::unordered_map<uint32_t, Box>::iterator it = m_LooseVoxelCells.find(uiKey);
+	/* Five bits an axis inside the cell. */
+	const uint16_t uiOffset = static_cast<uint16_t>(
+		(v3Voxel.x & (k_uiLooseCellSize - 1)) |
+		((v3Voxel.y & (k_uiLooseCellSize - 1)) << 5) |
+		((v3Voxel.z & (k_uiLooseCellSize - 1)) << 10));
+
+	std::unordered_map<uint32_t, LooseVoxelCell>::iterator it = m_LooseVoxelCells.find(uiKey);
 
 	if (it == m_LooseVoxelCells.end())
 	{
-		Box box;
-		box.Min = v3Level;
-		box.Max = v3Level;
+		if (m_LooseVoxelCells.size() >= k_uiMaxLooseCells)
+			EvictFarthestLooseCell();
 
-		m_LooseVoxelCells.emplace(uiKey, box);
+		LooseVoxelCell cell;
+		cell.Bounds.Min = v3Level;
+		cell.Bounds.Max = v3Level;
+		cell.Offsets.push_back(uiOffset);
+
+		m_LooseVoxelCells.emplace(uiKey, std::move(cell));
+		m_bLooseCellKeysDirty = true;
 
 		return;
 	}
 
-	it->second.Min = glm::min(it->second.Min, v3Level);
-	it->second.Max = glm::max(it->second.Max, v3Level);
+	it->second.Bounds.Min = glm::min(it->second.Bounds.Min, v3Level);
+	it->second.Bounds.Max = glm::max(it->second.Bounds.Max, v3Level);
+
+	/* Sorted insert, so registering the same voxel twice - which debris landing
+	   in the same spot does routinely - costs a search rather than a duplicate
+	   the validator would then have to test twice. */
+	std::vector<uint16_t>& offsets = it->second.Offsets;
+	std::vector<uint16_t>::iterator at = std::lower_bound(offsets.begin(), offsets.end(), uiOffset);
+
+	if (at == offsets.end() || *at != uiOffset)
+		offsets.insert(at, uiOffset);
+}
+
+/* The cell whose box is farthest from the window, dropped when the registry
+   hits its cap. See k_uiMaxLooseCells: this loses a proxy, not the debris. */
+void RenderSystem::EvictFarthestLooseCell()
+{
+	if (m_LooseVoxelCells.empty())
+		return;
+
+	const Vector3 v3Offset = m_pPhysicsSystem->m_VoxelGrid.GetWorldOffset();
+	const Vector3 v3WindowCentre = v3Offset + Vector3(m_v3WorldSize) * 0.5f;
+
+	uint32_t uiWorstKey = 0;
+	float fWorstDistance = -1.f;
+
+	for (const std::pair<const uint32_t, LooseVoxelCell>& cell : m_LooseVoxelCells)
+	{
+		const Vector3 v3Centre = (cell.second.Bounds.Min + cell.second.Bounds.Max) * 0.5f;
+		const float fDistance = glm::distance2(v3Centre, v3WindowCentre);
+
+		if (fDistance > fWorstDistance)
+		{
+			fWorstDistance = fDistance;
+			uiWorstKey = cell.first;
+		}
+	}
+
+	static bool s_bWarned = false;
+
+	if (!s_bWarned)
+	{
+		s_bWarned = true;
+		fprintf(stderr, "[loose] registry hit %zu cells; dropping the farthest from the window. "
+		                "Debris there stays in the world but loses its proxy.\n", m_LooseVoxelCells.size());
+	}
+
+	m_LooseVoxelCells.erase(uiWorstKey);
+	m_bLooseCellKeysDirty = true;
+}
+
+/* Judges one cell against the voxels it actually recorded, dropping the ones
+   that are no longer occupied and re-tightening the box around what is left.
+   Returns false when nothing of the cell survives.
+
+   This is ledger L1's fix and the whole reason a cell stores voxels rather than
+   a box. The old test asked the brick grid whether *any* 8^3 block overlapping
+   the cell held anything, which static geometry satisfies - so a cell over a
+   wall never retired, and its box re-tightened onto the wall's bricks, growing
+   a proxy that covered geometry the wall's own renderer already covered. */
+bool RenderSystem::ValidateLooseCell(uint32_t uiKey, LooseVoxelCell& cell, const Vector3& v3Offset)
+{
+	VoxelBrickGrid& brickGrid = m_pRenderContext->GetBrickGrid();
+
+	const UVector3 v3Cell(uiKey & 1023u, (uiKey >> 10) & 1023u, (uiKey >> 20) & 1023u);
+
+	const UVector3 v3CellBase(
+		v3Cell.x << k_uiLooseCellShift,
+		v3Cell.y << k_uiLooseCellShift,
+		v3Cell.z << k_uiLooseCellShift);
+
+	Vector3 v3Min(0.f);
+	Vector3 v3Max(0.f);
+	bool bAny = false;
+
+	size_t uiKept = 0;
+
+	for (size_t i = 0; i < cell.Offsets.size(); ++i)
+	{
+		const uint16_t uiOffset = cell.Offsets[i];
+
+		const Vector3 v3Level(
+			static_cast<float>(v3CellBase.x + (uiOffset & 31u)),
+			static_cast<float>(v3CellBase.y + ((uiOffset >> 5) & 31u)),
+			static_cast<float>(v3CellBase.z + ((uiOffset >> 10) & 31u)));
+
+		const Vector3 v3Grid = v3Level - v3Offset;
+
+		/* Only voxels inside the window can be judged - outside it they are not
+		   in the buffer at all, and erasing on that would delete debris that is
+		   merely far away. Those are kept untested. */
+		const bool bInside =
+			v3Grid.x >= 0.f && v3Grid.y >= 0.f && v3Grid.z >= 0.f &&
+			v3Grid.x < static_cast<float>(m_v3WorldSize.x) &&
+			v3Grid.y < static_cast<float>(m_v3WorldSize.y) &&
+			v3Grid.z < static_cast<float>(m_v3WorldSize.z);
+
+		if (bInside)
+		{
+			const uint32_t uiVoxelID =
+				static_cast<uint32_t>(v3Grid.x) +
+				static_cast<uint32_t>(v3Grid.y) * m_v3WorldSize.x +
+				static_cast<uint32_t>(v3Grid.z) * m_v3WorldSize.x * m_v3WorldSize.y;
+
+			if (!brickGrid.IsOccupied(uiVoxelID))
+				continue;
+		}
+
+		cell.Offsets[uiKept++] = uiOffset;
+
+		v3Min = bAny ? glm::min(v3Min, v3Level) : v3Level;
+		v3Max = bAny ? glm::max(v3Max, v3Level) : v3Level;
+		bAny = true;
+	}
+
+	cell.Offsets.resize(uiKept);
+
+	if (!bAny)
+		return false;
+
+	cell.Bounds.Min = v3Min;
+	cell.Bounds.Max = v3Max;
+
+	return true;
 }
 
 /* A proxy for each cell of loose voxels the resident window can see.
@@ -1074,70 +1240,59 @@ void RenderSystem::SubmitLooseVoxelProxies(bool bAudit)
 	const Vector3 v3Offset = m_pPhysicsSystem->m_VoxelGrid.GetWorldOffset();
 	const Vector3 v3WindowMax = Vector3(m_v3WorldSize) - Vector3(1.f);
 
-	/* Retirement. Without this the map only ever grows: a cell is added the
-	   first time debris lands in it and stayed for the life of the session even
-	   after that debris was blown apart again, and its box only ever widened.
-	   Both compound directly with how much has been destroyed, which is the
-	   "more destruction, more lag" this was reported as - every surviving cell
-	   is a proxy submitted every frame, and a proxy is a full march for every
-	   fragment it covers.
+	/* Iterated through a stable key vector rather than through the map's own
+	   order, which changes on every rehash and made the round-robin cursor skip
+	   cells arbitrarily (ledger L3). */
+	if (m_bLooseCellKeysDirty)
+	{
+		m_LooseCellKeys.clear();
+		m_LooseCellKeys.reserve(m_LooseVoxelCells.size());
 
-	   The test is the brick grid, not the voxel buffer: it already holds an
-	   occupied count per 8^3 block in ordinary memory, so this costs no PCIe
-	   read of VRAM (see CLAUDE.md on the mapper being write-only). A cell whose
-	   bricks are all empty holds nothing and goes; one that still has something
-	   keeps a proxy, tightened to the bricks that are actually occupied.
+		for (const std::pair<const uint32_t, LooseVoxelCell>& cell : m_LooseVoxelCells)
+			m_LooseCellKeys.push_back(cell.first);
 
-	   Only cells wholly inside the resident window can be judged - outside it
-	   the voxels are not in the buffer at all, and erasing on that would delete
-	   debris that is merely far away. Budgeted per frame and walked round-robin
-	   so a level's worth of cells costs nothing in any single frame. */
-	VoxelBrickGrid& brickGrid = m_pRenderContext->GetBrickGrid();
-	const UVector3 v3BrickGrid = brickGrid.GetGridSize();
+		std::sort(m_LooseCellKeys.begin(), m_LooseCellKeys.end());
 
-	m_LooseValidateCursor += k_uiLooseValidatePerFrame;
-	if (m_LooseValidateCursor >= m_LooseVoxelCells.size())
+		m_bLooseCellKeysDirty = false;
+	}
+
+	if (m_LooseValidateCursor >= m_LooseCellKeys.size())
 		m_LooseValidateCursor = 0;
 
 	const size_t uiValidateFrom = m_LooseValidateCursor;
 	const size_t uiValidateTo = uiValidateFrom + k_uiLooseValidatePerFrame;
-	size_t uiCellIndex = 0;
+
+	m_LooseValidateCursor += k_uiLooseValidatePerFrame;
 
 	std::vector<uint32_t> retired;
 
-	for (std::pair<const uint32_t, Box>& cell : m_LooseVoxelCells)
+	for (size_t uiIndex = 0; uiIndex < m_LooseCellKeys.size(); ++uiIndex)
 	{
-		const bool bValidate = (uiCellIndex >= uiValidateFrom && uiCellIndex < uiValidateTo);
-		++uiCellIndex;
+		const uint32_t uiKey = m_LooseCellKeys[uiIndex];
+
+		std::unordered_map<uint32_t, LooseVoxelCell>::iterator it = m_LooseVoxelCells.find(uiKey);
+
+		if (it == m_LooseVoxelCells.end())
+			continue;
+
+		LooseVoxelCell& cell = it->second;
+
+		if (uiIndex >= uiValidateFrom && uiIndex < uiValidateTo)
+		{
+			if (!ValidateLooseCell(uiKey, cell, v3Offset))
+			{
+				retired.push_back(uiKey);
+				continue;
+			}
+		}
 
 		/* Level space back to the window's grid space. */
-		Vector3 v3Min = cell.second.Min - v3Offset;
-		Vector3 v3Max = cell.second.Max - v3Offset;
+		Vector3 v3Min = cell.Bounds.Min - v3Offset;
+		Vector3 v3Max = cell.Bounds.Max - v3Offset;
 
 		if (v3Max.x < 0.f || v3Max.y < 0.f || v3Max.z < 0.f ||
 			v3Min.x > v3WindowMax.x || v3Min.y > v3WindowMax.y || v3Min.z > v3WindowMax.z)
 			continue;
-
-		if (bValidate &&
-			v3Min.x >= 0.f && v3Min.y >= 0.f && v3Min.z >= 0.f &&
-			v3Max.x <= v3WindowMax.x && v3Max.y <= v3WindowMax.y && v3Max.z <= v3WindowMax.z)
-		{
-			Vector3 v3TightMin(0.f);
-			Vector3 v3TightMax(0.f);
-
-			if (!FindOccupiedBrickBounds(brickGrid, v3BrickGrid, v3Min, v3Max, v3TightMin, v3TightMax))
-			{
-				retired.push_back(cell.first);
-				continue;
-			}
-
-			/* Back to level space, where the registry lives. */
-			cell.second.Min = v3TightMin + v3Offset;
-			cell.second.Max = v3TightMax + v3Offset;
-
-			v3Min = v3TightMin;
-			v3Max = v3TightMax;
-		}
 
 		/* Same one-voxel slack the renderer proxies carry: a voxel at index v
 		   occupies [v, v + 1), and the ray wants to enter off the geometry. */
@@ -1163,6 +1318,9 @@ void RenderSystem::SubmitLooseVoxelProxies(bool bAudit)
 
 	for (uint32_t uiKey : retired)
 		m_LooseVoxelCells.erase(uiKey);
+
+	if (!retired.empty())
+		m_bLooseCellKeysDirty = true;
 }
 
 /* Bounds of the occupied bricks inside a window-space box, or false if none of

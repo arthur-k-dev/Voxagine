@@ -2,7 +2,7 @@
 #include <unordered_map>
 #include <deque>
 #include "Core/ECS/ComponentSystem.h"
-#include "Core/ECS/Systems/Physics/ParticleLinkedList.h"
+#include "Core/Particles/ParticleCore.h"
 #include "Core/ECS/Systems/Physics/IntegrityChecker.h"
 #include "Core/ECS/Systems/Chunk/Chunk.h"
 #include "Core/Utils/DeterministicRandom.h"
@@ -58,7 +58,7 @@ public:
 	bool OverlapBox(std::vector<BoxCollider*>& colliders, Vector3 center, Vector3 extends, uint32_t uiLayer = -1, bool queryTriggers = false) const;
 
 	VoxelGrid* GetVoxelGrid() { return &m_VoxelGrid; }
-	uint32_t GetParticlePoolSize() { return m_ParticlePool.GetSize(); }
+	uint32_t GetParticlePoolSize() { return m_uiMaxParticleCount; }
 
 	Mapper* GetGPUParticles() const { return m_pGPUParticles; }
 
@@ -108,14 +108,6 @@ protected:
 	// Particle simulation functions
 	void SimulateParticles(float fDeltaTime);
 
-	// Updates given particle timer and destroys the particle once the timer has finished
-	// Returns true if the timer has finished
-	bool UpdateParticleTimer(Particle* pParticle, float fDeltaTime);
-
-	// Searched an active voxel in the voxel grid around the given gridpos
-	// ySearchCount = the maximum number of y positions it will search above gridpos
-	VoxelCell FindEmtpyNeighbor(Vector3 gridPos, Vector3& foundGridPos, uint32_t ySearchCount = 2);
-
 private:
 	VoxelGrid m_VoxelGrid;
 
@@ -138,6 +130,10 @@ private:
 	std::deque<std::vector<uint64_t>> m_PendingIslands;
 	size_t m_uiIslandCursor = 0;
 
+	/* Advances per converted voxel, not per successful spawn, so island debris
+	   stays evenly spread instead of clumping wherever a full pool refilled. */
+	uint32_t m_uiIslandSpawnCounter = 0;
+
 	static constexpr uint32_t k_uiIntegrityConvertPerTick = 16384;
 
 	Entity* m_pStaticEntityBody;
@@ -145,7 +141,22 @@ private:
 
 	uint32_t m_uiMaxParticleCount = 0;
 	Mapper* m_pGPUParticles = nullptr;
-	ParticleLinkedList m_ParticlePool;
+
+	/* Debris - destruction and falling islands. Its capacity is its budget:
+	   the old code shared one running counter with the component particle
+	   systems and consumed it in tick order, so a busy emitter starved debris
+	   simulation entirely (ledger P14). Splitting the capacity means neither
+	   source can take the other's, and rejection happens at spawn rather than
+	   part-way through a walk (P13). */
+	ParticleCore m_Debris;
+
+	/* How much of the total goes to debris. Three quarters because debris is
+	   what a destruction-heavy moment produces thousands of at once, while the
+	   component emitters are authored per effect and bounded by their own
+	   MaxParticles. */
+	static constexpr float k_fDebrisBudgetShare = 0.75f;
+
+	uint32_t m_uiEmitterBudget = 0;
 
 	/* Debris velocities used to come from glm::linearRand, which draws on a
 	   process-global engine that every other caller perturbs. Replaying a

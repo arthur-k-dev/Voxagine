@@ -47,7 +47,7 @@ detection) and the loose-voxel registry.
 | 0 — Harness, baseline, CI | DONE | destruction-phase-0 | Gauntlet is a CPU harness, not the running game — see notes |
 | 1 — Unified voxel write path | DONE | destruction-phase-1 | Immediate apply, not deferred — see notes |
 | 2 — `ApplySphericalDestruction` rewrite | DONE | destruction-phase-2 | Hash unchanged; the seeding rule changed and found the same islands |
-| 3 — Particle core rewrite (SoA, no claims) | TODO | | |
+| 3 — Particle core rewrite (SoA, no claims) | DONE | destruction-phase-3 | P16 still open; component pools not unified — see notes |
 | 4 — Incremental connectivity | TODO | | |
 | 5 — Connectivity off-thread | GATED | | Only if phase 4's budget measurably limits |
 | 6 — GPU debris simulation | GATED | | Only if phase 3's sim cost measurably limits |
@@ -226,32 +226,32 @@ half the point of the rewrite is that whole classes disappear structurally.
 
 | # | Status | Defect |
 |---|---|---|
-| P1 | OPEN | GPU record written **after** `DestroyParticle` — a retired particle (free-list link aliasing its state) is rendered one extra frame — `PhysicsSystem.cpp:1391/1418` vs `:1422-1430` |
-| P2 | OPEN | `DestroyParticle` has no double-free guard and no aliveness flag; a second call cycles the free list — `ParticleLinkedList.cpp:51-79` |
-| P3 | OPEN | Head/tail repair in `DestroyParticle` is asymmetric and fragile — `:56-75` |
-| P4 | OPEN | `Live.UserPointer` never assigned; the bake's "set owner" is a permanent clear, so baked debris is unowned by fiat, not by design — `:1387` |
-| P5 | OPEN | `bakeVoxelPos`/`bakeCellPos` mismatch: colour, registry and owner writes can land on different voxels; known and deliberately unfixed — `:1335-1388` |
-| P6 | OPEN | A particle whose claim was taken over destroys itself **without baking** (bake is inside the ownership branch, destroy is outside) — silently vanishing debris — `:1323-1391` |
+| P1 | FIXED (phase 3) | GPU record written **after** `DestroyParticle` — a retired particle (free-list link aliasing its state) is rendered one extra frame — `PhysicsSystem.cpp:1391/1418` vs `:1422-1430` |
+| P2 | FIXED (phase 3) | `DestroyParticle` has no double-free guard and no aliveness flag; a second call cycles the free list — `ParticleLinkedList.cpp:51-79` |
+| P3 | FIXED (phase 3) | Head/tail repair in `DestroyParticle` is asymmetric and fragile — `:56-75` |
+| P4 | FIXED (phase 3) | `Live.UserPointer` never assigned; the bake's "set owner" is a permanent clear, so baked debris is unowned by fiat, not by design — `:1387` |
+| P5 | FIXED (phase 3) | `bakeVoxelPos`/`bakeCellPos` mismatch: colour, registry and owner writes can land on different voxels; known and deliberately unfixed — `:1335-1388` |
+| P6 | FIXED (phase 3) | A particle whose claim was taken over destroys itself **without baking** (bake is inside the ownership branch, destroy is outside) — silently vanishing debris — `:1323-1391` |
 | P7 | FIXED (phase 1) | **Live race**: `Chunk::EncodeVoxels` on a job thread does `m_VoxelData.resize(0); shrink_to_fit(); m_OwnerVolume.Release()` while `VoxelGrid::m_ChunkVolumes`/`m_ChunkOwners` still point at them (re-pointed only for non-unload items) — main-thread `GetCell` vs worker free — `Chunk.cpp:200-202`, `ChunkSystem.cpp:357-360`, `VoxelGrid.h:269` |
-| P8 | FIXED (phase 1) | `VoxelOwnerVolume::Release` drops live particles' claims wholesale; they then treat foreign voxels as their own — `VoxelGrid.h:59-64` |
-| P9 | OPEN | Window slide invalidates `prevGridPos`; slides under 100 units are undetected by the teleport clamp and the particle releases/claims wrong cells — `PhysicsSystem.cpp:1271-1275`, `ChunkSystem.cpp:397` |
-| P10 | OPEN | World pause/teardown clears integrity state but not the particle pool — `:164-171`, `VoxelGrid.cpp:63-74` |
-| P11 | OPEN | `ParticleLinkedList(0)` indexes an empty vector and underflows loop bounds (VX-GRID-003) — `ParticleLinkedList.cpp:16-23` |
-| P12 | OPEN | `SimulateParticles` derefs `m_pGPUParticles` which stays null when constructed without a world — exactly the unit-test path — `:1244`, `:48-55` |
-| P13 | OPEN | Cap `break` starves the **newest** particles (unsimulated, unrendered, still holding claims) — `:1249-1250` |
-| P14 | OPEN | The cap is shared and component systems consume it first — a busy emitter starves debris simulation entirely — `:227-229` |
-| P15 | OPEN | Destroyed particles still increment the count → instance count exceeds live count — `:1252` |
-| P16 | OPEN | Particle mapper is single-buffered and written every fixed tick with no fence against the in-flight frame (voxel/brick mappers are double-buffered; this one is not) — `RenderContext.cpp:910-915` |
-| P17 | OPEN | Islands spawn **one particle per voxel** (explosions: one per four) — cost and visual-density inconsistency — `:296` vs `:525` |
+| P8 | FIXED (phase 3) | `VoxelOwnerVolume::Release` drops live particles' claims wholesale; they then treat foreign voxels as their own — `VoxelGrid.h:59-64` |
+| P9 | FIXED (phase 3) | Window slide invalidates `prevGridPos`; slides under 100 units are undetected by the teleport clamp and the particle releases/claims wrong cells — `PhysicsSystem.cpp:1271-1275`, `ChunkSystem.cpp:397` |
+| P10 | FIXED (phase 3) | World pause/teardown clears integrity state but not the particle pool — `:164-171`, `VoxelGrid.cpp:63-74` |
+| P11 | FIXED (phase 3) | `ParticleLinkedList(0)` indexes an empty vector and underflows loop bounds (VX-GRID-003) — `ParticleLinkedList.cpp:16-23` |
+| P12 | FIXED (phase 3) | `SimulateParticles` derefs `m_pGPUParticles` which stays null when constructed without a world — exactly the unit-test path — `:1244`, `:48-55` |
+| P13 | FIXED (phase 3) | Cap `break` starves the **newest** particles (unsimulated, unrendered, still holding claims) — `:1249-1250` |
+| P14 | FIXED (phase 3) | The cap is shared and component systems consume it first — a busy emitter starves debris simulation entirely — `:227-229` |
+| P15 | FIXED (phase 3) | Destroyed particles still increment the count → instance count exceeds live count — `:1252` |
+| P16 | **STILL OPEN** — see phase 3 notes | Particle mapper is single-buffered and written every fixed tick with no fence against the in-flight frame (voxel/brick mappers are double-buffered; this one is not) — `RenderContext.cpp:910-915` |
+| P17 | FIXED (phase 3) | Islands spawn **one particle per voxel** (explosions: one per four) — cost and visual-density inconsistency — `:296` vs `:525` |
 
 ### Loose-voxel registry
 
 | # | Status | Defect |
 |---|---|---|
-| L1 | OPEN | Retirement judges brick occupancy of **any** writer; a cell overlapping static geometry never retires and its box re-tightens to that geometry — `RenderSystem.cpp:1026-1029` |
-| L2 | OPEN | Cells outside the window are never judged and nothing evicts on chunk unload — unbounded level-space growth — `:947-949` |
-| L3 | OPEN | Round-robin cursor indexes `unordered_map` iteration order; a rehash reorders and the cursor skips cells — `:924-937` |
-| L4 | OPEN | Negative or >1023 cell coordinates silently dropped — voxels in the buffer with no proxy at all — `:855-866` |
+| L1 | FIXED (phase 3) | Retirement judges brick occupancy of **any** writer; a cell overlapping static geometry never retires and its box re-tightens to that geometry — `RenderSystem.cpp:1026-1029` |
+| L2 | FIXED (phase 3, bounded rather than evicted) | Cells outside the window are never judged and nothing evicts on chunk unload — unbounded level-space growth — `:947-949` |
+| L3 | FIXED (phase 3) | Round-robin cursor indexes `unordered_map` iteration order; a rehash reorders and the cursor skips cells — `:924-937` |
+| L4 | FIXED (phase 3) | Negative or >1023 cell coordinates silently dropped — voxels in the buffer with no proxy at all — `:855-866` |
 
 ### Miscellaneous
 
@@ -259,7 +259,7 @@ half the point of the rewrite is that whole classes disappear structurally.
 |---|---|---|
 | M1 | FIXED (phase 1) | `RenderContext::ForceUpdate` sets `m_bWorldUpdated`, which nothing reads — the per-particle-tick call is a no-op — `RenderContext.h:365` |
 | M2 | FIXED (phase 0) | Stale docs: `CLAUDE.md` "IntegrityJob data race" known defect, `SOURCE_MAP.md:34-35`, `ARCHITECTURE.md:47,206`, `FINDINGS.md` VX-PHY-002/003 describe the deleted worker-thread design. VX-PHY-002/003 are now `overtaken-by-events` and VX-PHY-001 `partially-overtaken`, under a new `resolution` field documented in the index README |
-| M3 | OPEN | `Live.Timer` is only ever set to `NO_PARTICLE_TIMER`; the pool-particle timer path is dead code — `ParticleLinkedList.cpp:89`, `PhysicsSystem.cpp:1437-1458` |
+| M3 | FIXED (phase 3) | `Live.Timer` is only ever set to `NO_PARTICLE_TIMER`; the pool-particle timer path is dead code — `ParticleLinkedList.cpp:89`, `PhysicsSystem.cpp:1437-1458` |
 
 ---
 
@@ -770,7 +770,105 @@ behaviour changes (bounce feel, density, vanishing debris — P6's fix should
 be *visible* as more debris landing). Ledger: P1–P6, P9–P17, L1–L4, M3
 closed.
 
-**Notes**: *(fill in when done)*
+#### Notes
+
+**The claim system is gone, and the checklist held.** The consumers found by
+grep were exactly the ones Ground truth named — `AcquireOwnerSlot`'s reservation,
+the audit's claim counter, the three `PhysicsSystem` paths, the chunk codec's
+three special cases, and `VoxelBaker`'s two slot tests. Nothing new. `0xFFFF` is
+now `k_uiReservedSlot`: never written, still normalised to "no owner" by the
+codec, because chunk data encoded before this change carries it and slots are
+never recycled (rule 4).
+
+What was lost is what the plan predicted and no more: a `VoxelBaker` stamp can
+now place static colour in a cell a debris particle is flying through — one
+overlapping cube for a frame or two.
+
+**`ParticleCore` is a sparse-set, not just parallel arrays.** Swap-compaction
+means a bare index is wrong the moment anything retires, so a handle names a
+*slot* in a table that survives compaction plus a generation. Nothing holds a
+handle across frames today — deleting the claims removed the last consumer —
+but building the pool without it would have meant building it twice, and it is
+what makes `IsAlive` mean something.
+
+Five ledger entries died with `ParticleLinkedList` structurally rather than by
+being fixed: the union of live state and free-list link is what made P1 render a
+retired particle from its own free-list pointer reinterpreted as a float3; P2's
+double free, P3's four-branch head/tail repair and P11's `uiReserveSize - 1`
+underflow all had nowhere to live afterwards.
+
+**Grid position is derived, never stored** (P9). The old pool cached one per
+particle, and a window slide changes what a grid coordinate means — so any slide
+shorter than the 100-unit teleport clamp left every particle in flight releasing
+and claiming the wrong cells. Position is level space; grid position is a
+subtract and a floor.
+
+**Per-source budgets, and the ranges are disjoint** (P13, P14, P15). Debris gets
+three quarters of the capacity and writes the GPU buffer from index 0; the
+component emitters get the rest and write above it. Two consequences: neither
+source can consume the other's share, and the instance count is exactly the live
+count because the SoA count *is* the live count. Debris now simulates before the
+emitters, which is the reverse of the old order and the reason a busy emitter
+could previously leave a destruction burst unsimulated and undrawn.
+
+**Bake resolves one cell and uses it for everything** (P4, P5, P6).
+`ParticleLanding::Resolve` answers with one position; the batch turns that into
+colour, occupancy, brick count, owner and loose-voxel registration. The old code
+computed two positions and used them inconsistently, and skipped the bake
+entirely whenever its claim had been taken over — debris that silently vanished.
+With claims gone there is nothing to take over, so every landing that finds a
+free cell bakes.
+
+**The loose registry records voxels, not just a box** (L1). Retirement used to
+ask the brick grid whether *anything* was still occupied nearby, which any
+writer satisfies — so a cell overlapping static geometry could never retire and
+its box re-tightened onto that geometry. A cell now keeps the cell-local offsets
+of the voxels debris actually wrote, two bytes each, sorted; validation tests
+exactly those and drops the ones that are gone. L3's rehash-skipping cursor is a
+sorted key vector now, and L4's silent drop logs once and says why dropping
+beats clamping (a clamped key names a different place).
+
+**L2 is bounded rather than evicted on unload.** The plan suggested evicting
+cells when their chunk unloads and re-judging on re-entry. That is wrong here:
+the debris is *in* the chunk's voxels and comes back with it, so evicting would
+mean re-scanning a chunk on load to find debris again. Instead the registry has
+a hard cap (8192 cells) and drops the cell farthest from the window when it is
+hit, with a one-shot warning. That loses a *proxy*, not the debris — those
+voxels revert to being drawn whenever another model's box covers them, which is
+the pre-registry behaviour.
+
+#### Two things that are not done
+
+**P16 — the particle mapper is still single-buffered.** The fix is small
+(`m_bHasBackBuffer = true` plus a swap) and the hazard is real: the CPU writes
+records every fixed tick with no fence against the frame the GPU is reading. But
+the swap has to happen only on frames that actually ran a fixed tick — swapping
+on a frame that did not would present the frame-before-last's particles, which
+is a visible jump — and *that* is a presentation change nobody can judge from a
+log. Deliberately left for a session with eyes on the screen. The symptom to
+look for is a single particle in the wrong place for one frame under heavy
+destruction.
+
+**The component particle systems are not unified into the core.** The plan asked
+for debris and emitters to be spawners over one pool. They share the GPU buffer
+and the budget now, which is what P13/P14/P15 needed, but `ParticleSystem` still
+owns its own `ParticlePool` and the emitters and modules still take one.
+Unifying means changing the signature of every reflected emitter and module
+component — eight files of serialized types — for no ledger entry beyond what
+the budgets already closed. Recorded as a deliberate deferral rather than an
+oversight.
+
+**Also not measured: `SimulateParticles` at 5 k / 50 k / 150 k.** The gauntlet
+does not simulate particles (it draws from the same seeded RNG so the stream
+stays aligned, but there is no sim), so the acceptance table's particle rows are
+still empty. Adding a sim step to the harness is the obvious way to fill them
+and is the natural first item for whoever picks this up: `ParticleCore` and
+`ParticleLanding` are both harness-compatible by construction.
+
+**And the destruction-heavy session with Joey has not happened** — this ran
+overnight. P6's fix should be visible as *more* debris landing than before,
+since a bake is no longer skipped when a claim was taken over. That is the thing
+to look at first.
 
 ---
 

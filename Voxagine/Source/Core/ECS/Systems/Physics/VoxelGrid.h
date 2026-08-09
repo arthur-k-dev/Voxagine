@@ -26,21 +26,31 @@ struct Voxel
 
 static_assert(sizeof(Voxel) == 4, "The CPU voxel is the GPU word - see RENDERING_PLAN.md phase 4d");
 
-/* Voxel ownership, which is what the old `UserPointer` held. Two unrelated
- * things shared that field and they are stored differently here because they
- * behave nothing alike:
+/* Voxel ownership, which is what the old `UserPointer` held.
  *
- * - A *static renderer* owns every voxel it stamped. That is 970 K voxels over
- *   ~117 distinct entities, and it is written once per stamped voxel - 3.1 M
- *   writes at a world load. It has to be a flat array indexed by voxel, so the
- *   slot array below is `uint16_t` per voxel and the id it stands for lives in
- *   a per-world table (VoxelGrid::AcquireOwnerSlot). Two bytes rather than
- *   eight, and the write is still a single store.
- * - A *particle* claims exactly one voxel while it is in flight. There are at
- *   most a pool's worth of those and they are nowhere near a hot bulk path, so
- *   they live in a sparse map under the reserved slot k_uiParticleSlot. The
- *   slot value is what keeps them off the stamp's fast path: it answers
- *   "is this owned, and is it mine" without ever touching the map. */
+ * A *static renderer* owns every voxel it stamped: 970 K voxels over ~117
+ * distinct entities, written once per stamped voxel - 3.1 M writes at a world
+ * load. That has to be a flat array indexed by voxel, so a slot is `uint16_t`
+ * per voxel and the entity id it stands for lives in a per-world table
+ * (VoxelGrid::AcquireOwnerSlot). Two bytes rather than eight, and the write is
+ * still a single store.
+ *
+ * There used to be a second thing here: a *particle claim*, one voxel reserved
+ * by a debris particle while it was in flight, stored as the reserved slot
+ * 0xFFFF plus a sparse map from voxel index to `Particle*`. DESTRUCTION_PLAN.md
+ * phase 3 deleted it. It existed to answer "is this cell still mine" during
+ * flight and to reserve a landing cell, and it failed at both: claims were
+ * dropped wholesale on chunk unload, silently lost to takeover with the bake
+ * skipped, corrupted by window slides, never persisted by design, and the one
+ * write meant to transfer ownership to baked debris had never worked - so baked
+ * debris was already unowned and the loose-voxel registry already carried it.
+ * Every consumer either had a cheaper answer (the occupancy bitmap for "is it
+ * empty", impact-time resolution for landing conflicts) or was satisfied by
+ * "particles own nothing".
+ *
+ * **0xFFFF stays reserved and unused** (rule 4). Encoded chunk data can be
+ * older than the code, and slots are never recycled, so handing it out would
+ * make old data name a live entity. */
 class VoxelOwnerVolume
 {
 public:
@@ -48,64 +58,25 @@ public:
 	   a plain in-class const would be odr-used with no definition. Release
 	   inlined them away and linked; Debug did not. */
 	static constexpr uint16_t k_uiNoOwnerSlot = 0;
-	static constexpr uint16_t k_uiParticleSlot = 0xFFFF;
 
-	void Resize(size_t uiNumVoxels)
-	{
-		m_Slots.assign(uiNumVoxels, k_uiNoOwnerSlot);
-		m_Particles.clear();
-	}
+	/* Never assigned. See the class comment. */
+	static constexpr uint16_t k_uiReservedSlot = 0xFFFF;
+
+	void Resize(size_t uiNumVoxels) { m_Slots.assign(uiNumVoxels, k_uiNoOwnerSlot); }
 
 	void Release()
 	{
 		m_Slots.clear();
 		m_Slots.shrink_to_fit();
-		m_Particles.clear();
 	}
 
 	size_t Size() const { return m_Slots.size(); }
 
 	uint16_t GetSlot(uint32_t uiIndex) const { return m_Slots[uiIndex]; }
-
-	/* Zero unless a particle holds this voxel, so a caller that only wants to
-	   know "is this claim mine" never pays for the map. */
-	uint64_t GetParticle(uint32_t uiIndex) const
-	{
-		if (m_Slots[uiIndex] != k_uiParticleSlot)
-			return 0;
-
-		std::unordered_map<uint32_t, uint64_t>::const_iterator it = m_Particles.find(uiIndex);
-		return it == m_Particles.end() ? 0 : it->second;
-	}
-
-	void SetSlot(uint32_t uiIndex, uint16_t uiSlot)
-	{
-		uint16_t& uiCurrent = m_Slots[uiIndex];
-
-		if (uiCurrent == uiSlot)
-			return;
-
-		if (uiCurrent == k_uiParticleSlot)
-			m_Particles.erase(uiIndex);
-
-		uiCurrent = uiSlot;
-	}
-
-	void SetParticle(uint32_t uiIndex, uint64_t uiParticle)
-	{
-		if (!uiParticle)
-		{
-			SetSlot(uiIndex, k_uiNoOwnerSlot);
-			return;
-		}
-
-		m_Slots[uiIndex] = k_uiParticleSlot;
-		m_Particles[uiIndex] = uiParticle;
-	}
+	void SetSlot(uint32_t uiIndex, uint16_t uiSlot) { m_Slots[uiIndex] = uiSlot; }
 
 private:
 	std::vector<uint16_t> m_Slots;
-	std::unordered_map<uint32_t, uint64_t> m_Particles;
 };
 
 /* One voxel plus the ownership beside it, resolved once. Everything that has
@@ -135,10 +106,8 @@ struct VoxelCell
 
 	uint16_t GetSlot() const { return pOwners ? pOwners->GetSlot(uiIndex) : VoxelOwnerVolume::k_uiNoOwnerSlot; }
 	bool HasOwner() const { return GetSlot() != VoxelOwnerVolume::k_uiNoOwnerSlot; }
-	uint64_t GetParticleOwner() const { return pOwners ? pOwners->GetParticle(uiIndex) : 0; }
 
 	void SetSlot(uint16_t uiSlot) const { if (pOwners) pOwners->SetSlot(uiIndex, uiSlot); }
-	void SetParticleOwner(uint64_t uiParticle) const { if (pOwners) pOwners->SetParticle(uiIndex, uiParticle); }
 	void ClearOwner() const { SetSlot(VoxelOwnerVolume::k_uiNoOwnerSlot); }
 };
 
@@ -161,7 +130,7 @@ public:
 	/*Gets chunk with given origin and dimension inside voxel volume
 	Set AllowOutBounds to true if you want the chunk to be padded with empty voxels if they are not in the voxel volume, otherwise an empty chunk will be returned
 	pOwnerSlots, when given, is filled in parallel with each voxel's owner slot - k_uiNoOwnerSlot where the voxel is null. It is a read-only identity: to *write* an
-	owner, call SetOwnerSlot/SetParticleOwner with the voxel's coordinates. */
+	owner, call SetOwnerSlot with the voxel's coordinates. */
 	bool GetChunk(Voxel** chunk, Vector3 chunkOrigin, Vector3 dimensions, bool bAllowOutBounds = false, uint16_t* pOwnerSlots = nullptr);
 
 	/* Colour only. There is deliberately no ModifyVoxel beside these any more:
@@ -177,7 +146,6 @@ public:
 	inline VoxelCell GetCell(uint32_t iX, uint32_t iY, uint32_t iZ);
 
 	inline void SetOwnerSlot(uint32_t iX, uint32_t iY, uint32_t iZ, uint16_t uiSlot);
-	inline void SetParticleOwner(uint32_t iX, uint32_t iY, uint32_t iZ, uint64_t uiParticle);
 
 	/* Slots are handed out per entity id and never recycled, so a slot is a
 	   stable identity for the life of the world - which is what lets the combo
@@ -195,13 +163,13 @@ public:
 		return it == m_EntityToSlot.end() ? VoxelOwnerVolume::k_uiNoOwnerSlot : it->second;
 	}
 
-	/* The entity id behind a slot, or 0 for "no owner" and for a particle
-	   claim - which is what FindEntity would have made of a particle pointer
-	   anyway. */
+	/* The entity id behind a slot, or 0 for "no owner" and for the reserved
+	   slot, which is never assigned but can still arrive from chunk data
+	   encoded before phase 3. */
 	uint64_t ResolveOwnerSlot(uint16_t uiSlot) const
 	{
 		return uiSlot == VoxelOwnerVolume::k_uiNoOwnerSlot ||
-		       uiSlot == VoxelOwnerVolume::k_uiParticleSlot ||
+		       uiSlot == VoxelOwnerVolume::k_uiReservedSlot ||
 		       uiSlot >= m_SlotToEntity.size() ? 0 : m_SlotToEntity[uiSlot];
 	}
 
@@ -329,11 +297,6 @@ inline VoxelCell VoxelGrid::GetCell(uint32_t iX, uint32_t iY, uint32_t iZ)
 inline void VoxelGrid::SetOwnerSlot(uint32_t iX, uint32_t iY, uint32_t iZ, uint16_t uiSlot)
 {
 	GetCell(iX, iY, iZ).SetSlot(uiSlot);
-}
-
-inline void VoxelGrid::SetParticleOwner(uint32_t iX, uint32_t iY, uint32_t iZ, uint64_t uiParticle)
-{
-	GetCell(iX, iY, iZ).SetParticleOwner(uiParticle);
 }
 
 inline const Voxel* VoxelGrid::GetVoxel(uint32_t iX, uint32_t iY, uint32_t iZ) const

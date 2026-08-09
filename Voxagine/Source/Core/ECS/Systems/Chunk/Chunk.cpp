@@ -174,7 +174,13 @@ void Chunk::EncodeVoxels()
 		const uint32_t uiColor = m_VoxelData[i].Color;
 		uint16_t uiSlot = m_OwnerVolume.GetSlot(static_cast<uint32_t>(i));
 
-		if (uiSlot == VoxelOwnerVolume::k_uiParticleSlot)
+		/* The reserved slot is never written since phase 3 deleted particle
+		   claims, but it can still be *read* - from chunk data encoded before
+		   that, where it meant "a particle holds this". Normalising it to "no
+		   owner" on encode is what the codec always did with a claim, and it is
+		   what keeps old data from naming a live entity when slots are handed
+		   out from a fresh table (rule 4). */
+		if (uiSlot == VoxelOwnerVolume::k_uiReservedSlot)
 			uiSlot = VoxelOwnerVolume::k_uiNoOwnerSlot;
 
 		while (i + 1 < m_VoxelData.size() && repeatCount < 255 &&
@@ -267,9 +273,10 @@ uint64_t Chunk::VerifyVoxelCodecRoundTrip()
 
 		const uint16_t uiSlot = m_OwnerVolume.GetSlot(static_cast<uint32_t>(i));
 
-		/* A particle claim is deliberately dropped by the codec, so the
-		   expectation for one is "no owner" rather than "unchanged". */
-		slots[i] = uiSlot == VoxelOwnerVolume::k_uiParticleSlot
+		/* The reserved slot is normalised to "no owner" by the codec, so the
+		   expectation for one is that rather than "unchanged". Nothing writes
+		   it any more; this is for chunk data older than phase 3. */
+		slots[i] = uiSlot == VoxelOwnerVolume::k_uiReservedSlot
 			? VoxelOwnerVolume::k_uiNoOwnerSlot
 			: uiSlot;
 	}
@@ -292,11 +299,11 @@ uint64_t Chunk::VerifyVoxelCodecRoundTrip()
 	return uiDiverged;
 }
 
-/* A particle claim encodes as no owner, so it has to compare as one too or a
-   run would break on debris that is about to be discarded anyway. */
+/* The reserved slot encodes as no owner, so it has to compare as one too or a
+   run would break where old chunk data happens to carry it. */
 inline bool Chunk::SlotEqual(uint16_t uiSlot, uint16_t uiEncoded)
 {
-	if (uiSlot == VoxelOwnerVolume::k_uiParticleSlot)
+	if (uiSlot == VoxelOwnerVolume::k_uiReservedSlot)
 		uiSlot = VoxelOwnerVolume::k_uiNoOwnerSlot;
 
 	return uiSlot == uiEncoded;

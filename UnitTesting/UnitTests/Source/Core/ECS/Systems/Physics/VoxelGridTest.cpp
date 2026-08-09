@@ -124,8 +124,13 @@ TEST(VoxelGrid, OwnerSlotsAreStableAndUnique)
 	EXPECT_EQ(grid.FindOwnerSlot(9999), VoxelOwnerVolume::k_uiNoOwnerSlot);
 	EXPECT_EQ(grid.ResolveOwnerSlot(VoxelOwnerVolume::k_uiNoOwnerSlot), 0u);
 
-	/* The reserved particle slot never names an entity. */
-	EXPECT_EQ(grid.ResolveOwnerSlot(VoxelOwnerVolume::k_uiParticleSlot), 0u);
+	/* The reserved slot never names an entity, and is never handed out. It can
+	   still arrive from chunk data encoded before phase 3 deleted the particle
+	   claims that used it (rule 4). */
+	EXPECT_EQ(grid.ResolveOwnerSlot(VoxelOwnerVolume::k_uiReservedSlot), 0u);
+
+	for (uint64_t uiEntity = 2000; uiEntity < 2064; ++uiEntity)
+		EXPECT_NE(grid.AcquireOwnerSlot(uiEntity), VoxelOwnerVolume::k_uiReservedSlot);
 }
 
 TEST(VoxelGrid, WorldToGridIsTheInverseOfGridToWorld)

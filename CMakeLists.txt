@@ -83,6 +83,13 @@ if(BUILD_TESTING)
     target_include_directories(voxagine_job_manager_config_test PRIVATE ${VOXAGINE_SOURCE_DIR})
     target_link_libraries(voxagine_job_manager_config_test PRIVATE voxagine_warnings)
     add_test(NAME job_manager_worker_count COMMAND voxagine_job_manager_config_test)
+
+    add_executable(voxagine_date_time_test
+        UnitTesting/UnitTests/Source/Core/Utils/DateTimeTest.cpp
+    )
+    target_include_directories(voxagine_date_time_test PRIVATE ${VOXAGINE_SOURCE_DIR})
+    target_link_libraries(voxagine_date_time_test PRIVATE voxagine_warnings)
+    add_test(NAME date_time_utc_conversion COMMAND voxagine_date_time_test)
 endif()
 
 # ---------------------------------------------------------------------------

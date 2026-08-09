@@ -1,8 +1,7 @@
 #pragma once
 
-#include "pch.h"
-
 #include <ctime>
+#include <string>
 
 class DateTime
 {
@@ -83,9 +82,15 @@ private:
 	void Initialize()
 	{
 		// convert now to tm struct for UTC
-		/* Was _gmtime64_s into a tm* that was never allocated, so it
-		   filled nothing and every read below dereferenced null. */
-		gmtime_r(&m_CurrentTime, &m_UTCTime);
+		// Microsoft and POSIX expose the thread-safe conversion under
+		// different names and with reversed parameter order.
+#if defined(_WIN32)
+		const bool bConverted = gmtime_s(&m_UTCTime, &m_CurrentTime) == 0;
+#else
+		const bool bConverted = gmtime_r(&m_CurrentTime, &m_UTCTime) != nullptr;
+#endif
+		if (!bConverted)
+			m_UTCTime = {};
 
 		seconds = m_UTCTime.tm_sec;
 		minutes = m_UTCTime.tm_min;

@@ -31,8 +31,8 @@ Use this map when the question is conceptual and the implementation location is 
 | Chunk streaming state machine | `Core/ECS/Systems/Chunk/ChunkSystem.*` | `Chunk.*`, `ChunkUpdateGroup.*`, viewers |
 | Chunk compression codec | `Core/ECS/Systems/Chunk/Chunk.cpp` — `Encode`, `Decode` | codec verifier and persisted chunk buffers |
 | Physics tick/collision/destruction | `Core/ECS/Systems/Physics/PhysicsSystem.*` | colliders, bodies, shapes, particles |
-| Voxel world/grid mapping | `Core/ECS/Systems/Physics/VoxelGrid.*` | `IntegrityJob`, chunk volumes, render owner data |
-| Detached-island integrity | `Core/ECS/Systems/Physics/IntegrityJob.*` | `PhysicsSystem` pause/resume/destruction callbacks |
+| Voxel world/grid mapping | `Core/ECS/Systems/Physics/VoxelGrid.*` | `IntegrityChecker`, chunk volumes, render owner data |
+| Detached-island integrity | `Core/ECS/Systems/Physics/IntegrityChecker.*` | `PhysicsSystem::ProcessIntegrityChecks`, pause/resume |
 | Navigation grid scheduling | `Core/ECS/Systems/Pathfinding/Grid/PathfindingChunkGrid.*` | `ChunkBuilderJob`, grid chunks/nodes |
 | Navigation chunk neighbors | `Pathfinding/Grid/PathfindingChunk.*` | `PathfindingNode.*`, grid connect phases |
 | Agent flow/crowd equations | `Pathfinding/Navigation/ContinuumCrowdsGroup.*` | `PathfinderGroup.*`, `Pathfinder.*` |
@@ -78,8 +78,8 @@ Use this map when the question is conceptual and the implementation location is 
 | `VKRenderContext::Initialize` | Vulkan backend and command engines | partial initialization cleanup |
 | `ChunkSystem::UpdateChunks` | streaming/render group state | viewers, queues, chunk/group lifetime |
 | `Chunk::Encode` / `Decode` | persisted voxel RLE | packed voxel/color/owner semantics and input validation |
-| `PhysicsSystem::ApplySphericalDestruction` | mutates voxel grid and schedules integrity | radius validation, chunk residency, integrity job lifetime |
-| `IntegrityJob::Run` | finds disconnected voxel structures | concurrent grid/chunk access |
+| `PhysicsSystem::ApplySphericalDestruction` | mutates voxel grid and seeds integrity | radius validation, chunk residency, seed volume |
+| `IntegrityChecker::Process` | finds disconnected voxel structures, resumably | visit budget, seed dedup, grid residency between slices |
 | `ChunkGrid::Tick` | schedules navigation phases and agent updates | world queue, raw group/agent references |
 | `ContinuumCrowdsGroup` flow methods | density/discomfort/velocity fields | node reset, distance math, agent state |
 | `InputContextNew::ProcessInputBindings` | dispatches current binding map | action/axis symmetry and controller indexing |
@@ -96,7 +96,7 @@ Inspect all of:
 - `RenderContext` voxel/color/owner buffer definitions and allocation.
 - `VoxelBaker` write paths.
 - `VoxelStamp` iteration and “last position” behavior.
-- `PhysicsSystem`, `VoxelGrid`, and `IntegrityJob` reads/writes.
+- `PhysicsSystem`, `VoxelGrid`, and `IntegrityChecker` reads/writes.
 - `Chunk::Encode`/`Decode` and its round-trip verifier.
 - `ChunkSystem` near-field data and `FarFieldBaker`/`FarFieldVolume` downsampling.
 - Game call sites returned by `rg "Voxel" Game/Source`.
@@ -131,7 +131,7 @@ Add it to the relevant explicit `cmake/*.cmake` manifest, compile both game and 
 
 ```powershell
 # Which files declare or define a symbol?
-rg '"symbols":.*IntegrityJob' Docs/AI_ENGINE_INDEX/source-manifest.jsonl
+rg '"symbols":.*IntegrityChecker' Docs/AI_ENGINE_INDEX/source-manifest.jsonl
 
 # Which reviewed issues touch a source file?
 rg 'PathfindingChunkGrid.cpp' Docs/AI_ENGINE_INDEX/findings.jsonl

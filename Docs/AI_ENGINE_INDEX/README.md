@@ -54,6 +54,10 @@ Every record has a stable ID and these dimensions:
   - `coverage-gap` — missing verification rather than a direct defect.
   - `limitation` — intentional or architectural constraint to preserve in future changes.
 - `confidence`: `high`, `medium`, or `low` confidence in the stated interpretation.
+- `resolution` (optional): present once code has moved under the finding. `status` above stays as it was - it records what the evidence *was*, not workflow state - so the resolution is a separate object with `state`, the commit or PR that changed things, a `note` saying why the record no longer describes the tree, and `still_open` where only part of it was addressed. Three states are in use:
+  - `fixed` - the defect was repaired in place.
+  - `overtaken-by-events` - the code the finding describes no longer exists, so there is nothing to fix. `VX-PHY-002`/`VX-PHY-003` are this: `IntegrityJob` was deleted in #19.
+  - `partially-overtaken` - part of the record is void and the rest still stands, with `still_open` naming where the remainder is tracked.
 
 Line numbers in evidence are navigation hints for the reviewed baseline. Paths and symbols are the durable keys because later edits will move lines.
 

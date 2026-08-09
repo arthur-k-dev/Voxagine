@@ -208,6 +208,21 @@ public:
 	Vector3 GridToWorld(Vector3 gridPos) const;
 	Vector3 GridToWorld(uint32_t volumeId) const;
 
+	/* Point a chunk slot at storage, or at nothing when passed nulls.
+	   ChunkSystem reaches the same state through the private SetChunkVolumeAt;
+	   this is public because two other callers need it and neither is a friend:
+	   the phase 0 harness, which builds a grid with no ChunkSystem at all, and
+	   phase 1's unload ordering, which has to detach a chunk on the main thread
+	   *before* the job that frees the storage runs. */
+	void SetChunkStorage(UVector2 loc, std::vector<Voxel>* pVoxels, VoxelOwnerVolume* pOwners);
+
+	/* FNV-1a over every CPU voxel colour and owner slot in the window, in
+	   canonical x/y/z order. DESTRUCTION_PLAN.md phase 0's refactor net: the
+	   same script over the same build must produce the same value. Detached
+	   chunks fold as a fixed sentinel rather than being skipped, so a residency
+	   change is visible in the hash instead of silently shortening it. */
+	uint64_t Hash() const;
+
 	void GetDimensions(uint32_t& uiX, uint32_t& uiY, uint32_t& uiZ) const;
 	UVector3 GetDimensions() const;
 	uint64_t GetNumVoxels() const { return m_uiNumVoxels; }

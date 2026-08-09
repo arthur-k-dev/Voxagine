@@ -21,6 +21,7 @@ option(VOXAGINE_CHECK_RTTR    "Compile the reflection TU to prove RTTR works" OF
 option(VOXAGINE_ENABLE_FMOD   "Enable FMOD audio (needs the FMOD Linux SDK)" OFF)
 option(VOXAGINE_ENABLE_OPTICK "Enable Optick profiling" OFF)
 option(VOXAGINE_ENABLE_NFD    "Enable native file dialogs" OFF)
+option(VOXAGINE_BUILD_TESTS   "Build the gtest suite (needs VOXAGINE_BUILD_ENGINE)" OFF)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -282,7 +283,57 @@ if(VOXAGINE_BUILD_ENGINE)
     # EDITOR itself is defined on the voxagine library above, PUBLIC, so both
     # the library and this executable see it.
 
-    add_dependencies(BitBuster voxagine_shaders_game)
+    # Guarded because voxagine_add_shaders returns without creating the target
+    # when dxc is missing, and add_dependencies on a target that does not exist
+    # is a generate-time error. That is not hypothetical: it is what stopped CI
+    # from building the engine at all, and CI has no Vulkan SDK. The executable
+    # still links; it just cannot render until someone compiles the shaders.
+    if(TARGET voxagine_shaders_game)
+        add_dependencies(BitBuster voxagine_shaders_game)
+    endif()
+endif()
+
+# ---------------------------------------------------------------------------
+# Unit tests and the destruction gauntlet
+#
+# Both link the engine library and both run with no GPU and no display, which
+# is what lets CI cover them - see UnitTesting/UnitTests/Source/Harness/
+# VoxelWorldHarness.h for why the voxel write path is reachable that way.
+#
+# Not linked WHOLE_ARCHIVE, unlike BitBuster: these do not read Settings.vgs and
+# do not need the reflection-only translation units dragged in. If a test ever
+# does need RTTR registrations, it needs the same treatment and the comment on
+# BitBuster explains why.
+# ---------------------------------------------------------------------------
+if(VOXAGINE_BUILD_TESTS)
+    if(NOT VOXAGINE_BUILD_ENGINE)
+        message(FATAL_ERROR "VOXAGINE_BUILD_TESTS needs VOXAGINE_BUILD_ENGINE=ON")
+    endif()
+
+    find_package(GTest REQUIRED)
+
+    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/TestSources.cmake)
+
+    add_executable(voxagine_tests ${VOXAGINE_TEST_SOURCES})
+
+    target_include_directories(voxagine_tests PRIVATE ${VOXAGINE_TEST_DIR})
+    target_link_libraries(voxagine_tests PRIVATE
+        voxagine GTest::gtest GTest::gtest_main voxagine_warnings)
+
+    add_test(NAME voxagine_unit_tests COMMAND voxagine_tests)
+
+    add_executable(voxagine_gauntlet
+        ${CMAKE_CURRENT_SOURCE_DIR}/UnitTesting/Gauntlet/Gauntlet.cpp
+        ${VOXAGINE_TEST_DIR}/Harness/VoxelWorldHarness.cpp
+    )
+
+    target_include_directories(voxagine_gauntlet PRIVATE ${VOXAGINE_TEST_DIR})
+    target_link_libraries(voxagine_gauntlet PRIVATE voxagine voxagine_warnings)
+
+    # Runs the built-in script and fails on any representation disagreement.
+    # The state hash is printed rather than asserted here: it is a property of
+    # the build, and CI matrixes two of them.
+    add_test(NAME voxagine_gauntlet COMMAND voxagine_gauntlet)
 endif()
 
 # ---------------------------------------------------------------------------

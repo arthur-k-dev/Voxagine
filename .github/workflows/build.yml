@@ -22,7 +22,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ninja-build libvulkan-dev vulkan-validationlayers \
                                   libwayland-dev libxkbcommon-dev libx11-dev \
-                                  libxrandr-dev libxi-dev libxcursor-dev
+                                  libxrandr-dev libxi-dev libxcursor-dev \
+                                  libgtest-dev libgmock-dev
 
       # Ubuntu does not package SDL3 yet, so build the release tag we target.
       - name: Build SDL3
@@ -33,18 +34,37 @@ jobs:
           cmake --build sdl3/build
           sudo cmake --install sdl3/build
 
-      # VOXAGINE_CHECK_RTTR fetches RTTR and compiles Core/Settings.cpp against
-      # it. That is the only thing currently proving the reflection dependency
-      # works off Windows, so it stays on until the engine target builds.
+      # The engine, the game, the bring-up target and the tests, on both
+      # configurations.
+      #
+      # VOXAGINE_BUILD_ENGINE was off here for the whole port, which meant the
+      # only C++ CI compiled was VulkanBringup.cpp plus Core/Settings.cpp for
+      # the RTTR check - the engine, the game and the editor were not covered at
+      # all. Turning it on is what DESTRUCTION_PLAN.md phase 0 needs (the unit
+      # tests and the gauntlet link the engine) and is what CLAUDE.md already
+      # called the single highest-value change to this workflow.
+      #
+      # There is no Vulkan SDK on the runner, so dxc is absent and the shader
+      # target is skipped with a warning: this proves things compile and link,
+      # not that they render. The bring-up target is still built, and still
+      # matters - the four engine presets skip VulkanBringup.cpp entirely, so a
+      # changed VKSwapchain signature is only caught here.
       - name: Configure
         run: |
           cmake -S . -B Build/ci -G Ninja \
             -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
-            -DVOXAGINE_CHECK_RTTR=ON
+            -DVOXAGINE_BUILD_ENGINE=ON \
+            -DVOXAGINE_BUILD_BRINGUP=ON \
+            -DVOXAGINE_BUILD_TESTS=ON
 
-      # Compile and link only. The runner has no GPU and no display, so the
-      # clear-screen loop is not exercised here; run voxagine_bringup locally
-      # to verify presentation. Adding a lavapipe + SDL_VIDEODRIVER=offscreen
-      # job would make that testable in CI.
       - name: Build
         run: cmake --build Build/ci
+
+      # No GPU and no display, which the unit tests and the gauntlet are built
+      # not to need - see UnitTesting/UnitTests/Source/Harness/VoxelWorldHarness.h.
+      # The gauntlet fails the job on any representation disagreement and prints
+      # its state hash, so a run that changes the hash is visible in the log of
+      # both configurations.
+      - name: Test
+        working-directory: Build/ci
+        run: ctest --output-on-failure

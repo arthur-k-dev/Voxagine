@@ -44,7 +44,7 @@ flowchart TD
     Baker --> CPUGrid["Mapped CPU voxel/color/owner buffers"]
     CPUGrid --> GPU["Vulkan voxel + bake passes"]
     Chunk --> FarField["FarFieldBaker / volume"]
-    Physics --> Integrity["IntegrityJob"]
+    Physics --> Integrity["IntegrityChecker"]
     Jobs --> Integrity
     Jobs --> Chunk
     Jobs --> Path
@@ -203,7 +203,7 @@ Async flags (`loading`, `unloading`, `rendering`) must be cleared on every early
 
 ### Physics path
 
-`PhysicsSystem` owns collision/integration data and applies spherical voxel destruction. `VoxelGrid` maps world space to chunks/cells/voxels. `IntegrityJob` analyzes disconnected voxel regions in the background and reports changes back to the main thread.
+`PhysicsSystem` owns collision/integration data and applies spherical voxel destruction. `VoxelGrid` maps world space to chunks/cells/voxels. `IntegrityChecker` finds disconnected voxel regions on the main thread, spending a fixed visit budget per fixed tick and resuming the same walk across ticks. It replaced `IntegrityJob` in #19: the worker held a raw pointer to the live grid, nothing joined it before `~PhysicsSystem` destroyed that grid, and there was no throughput to lose because the worker slept 10 ms between items.
 
 The main-thread physics/chunk code and the background integrity scan access the same non-atomic voxel/chunk structures. The absence of a snapshot/lock/lifetime barrier is a high-risk concurrency boundary.
 

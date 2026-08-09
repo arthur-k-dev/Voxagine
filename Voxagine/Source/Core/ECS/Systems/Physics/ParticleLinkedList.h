@@ -59,6 +59,36 @@ public:
 
 	uint32_t GetSize() { return (uint32_t)m_Particles.size(); }
 
+	/* What the pool's two intrusive lists say about themselves.
+	   DESTRUCTION_PLAN.md phase 0: the invariant is that free and alive are
+	   disjoint and together account for every particle exactly once, and
+	   nothing checks it today - a double DestroyParticle (P2) puts one
+	   particle on the free list twice and shows up here as a cycle or as a
+	   count that overruns the pool. */
+	struct AuditResult
+	{
+		uint64_t uiAlive = 0;
+		uint64_t uiFree = 0;
+		uint64_t uiPool = 0;
+
+		/* Particles reachable from neither list, or from both. */
+		uint64_t uiUnaccounted = 0;
+		uint64_t uiDuplicated = 0;
+
+		/* A list that did not terminate within the pool's own size. Set means
+		   every other number here is a lower bound. */
+		bool bAliveCycle = false;
+		bool bFreeCycle = false;
+
+		bool IsSound() const
+		{
+			return !bAliveCycle && !bFreeCycle && uiUnaccounted == 0 && uiDuplicated == 0 &&
+				uiAlive + uiFree == uiPool;
+		}
+	};
+
+	AuditResult Audit() const;
+
 private:
 	void InitParticle(Particle* pParticle);
 

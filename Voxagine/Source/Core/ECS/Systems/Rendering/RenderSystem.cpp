@@ -244,6 +244,42 @@ void RenderSystem::PostTick(float fDeltaTime)
 	if (s_bCoverageAudit)
 		AuditProxyCoverage(fDeltaTime);
 
+	/* VOXAGINE_SYNC_AUDIT=<seconds>: repeated rather than one-shot, because the
+	   disagreement it looks for is produced by a *write path* and so does not
+	   exist at rest - see DESTRUCTION_PLAN.md's verification reference.
+
+	   In PostTick, off the wall-clock delta, and not in Render off the fixed
+	   timer where the other two audits live. Render is only reached on a fixed
+	   step, so a run whose fixed timer never advances - which is what the
+	   editor does while a world is loading - accumulates nothing and the audit
+	   silently never fires. It looks identical to "everything agrees". */
+	{
+		static const double s_fInterval =
+			std::getenv("VOXAGINE_SYNC_AUDIT") ? atof(std::getenv("VOXAGINE_SYNC_AUDIT")) : 0.0;
+		static double s_fElapsed = 0.0;
+
+		if (s_fInterval > 0.0 && m_pPhysicsSystem != nullptr)
+		{
+			/* Says once that it is armed. Without it, "the variable was not
+			   picked up" and "everything agrees" produce the same empty log. */
+			static bool s_bAnnounced = false;
+
+			if (!s_bAnnounced)
+			{
+				s_bAnnounced = true;
+				fprintf(stderr, "[sync-audit] armed, every %.1f s\n", s_fInterval);
+			}
+
+			s_fElapsed += fDeltaTime;
+
+			if (s_fElapsed >= s_fInterval)
+			{
+				s_fElapsed = 0.0;
+				AuditRepresentationSync();
+			}
+		}
+	}
+
 #ifndef _ORBIS
 	/* Render text data */
 	ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.f);
@@ -837,6 +873,128 @@ void RenderSystem::AuditVoxelRepresentation()
 	}
 }
 
+/* The representation-sync audit: rule 3 made checkable.
+ *
+ * A voxel exists in four places - the CPU colour in the chunk, the word in the
+ * mapped GPU buffer, one bit in the occupancy bitmap and one unit of a brick
+ * count - and nothing in the type system says a write has to touch all four.
+ * ValidateBrickGrid already compares the last three against the mapping; what
+ * it cannot see is the mapping disagreeing with the CPU voxel, which is the
+ * failure a write path that updates one and not the other produces, and the one
+ * that reads on screen as geometry that is there in physics and absent in the
+ * image (or the reverse).
+ *
+ * Reads the whole window back out of the mapping, which is ReBAR host-visible
+ * memory. It stages it into ordinary memory first with one bulk copy, and that
+ * is not an optimization detail - it is the difference between an audit and a
+ * hang. Two passes want the words (the brick validator and the colour compare
+ * below), and read scattered from an uncached mapping each one costs on the
+ * order of a hundred nanoseconds a voxel: 75 M voxels twice is minutes, which
+ * on a short interval means the process never leaves this function. Staged, the
+ * PCIe traffic is one sequential 300 MB read and both passes then walk cache.
+ *
+ * Still on demand, and it still freezes the frame for as long as it takes -
+ * expected, not a hang. On this machine's 768x128x768 window the staging read
+ * alone is **19 seconds** (302 MB at about 15 MB/s, which is what an uncached
+ * PCIe read of VRAM costs and is consistent with the ~500 ns per voxel read
+ * measured in RENDERING_PLAN.md phase 4b). memcpy does not help; the memory
+ * type does. So give it an interval of a minute or more, and expect the report
+ * to describe the world as it was when the copy started.
+ */
+void RenderSystem::AuditRepresentationSync()
+{
+	VoxelGrid& grid = m_pPhysicsSystem->m_VoxelGrid;
+	const UVector3 dims = grid.GetDimensions();
+	const uint32_t* pMapped = m_pRenderContext->GetVoxelData();
+
+	/* Says so rather than returning quietly. An audit that produces no output
+	   when it cannot run reads exactly like one that ran and found nothing,
+	   which is the worst possible failure mode for a check whose whole value is
+	   its silence. */
+	if (pMapped == nullptr || dims.x == 0 || dims.y == 0 || dims.z == 0)
+	{
+		fprintf(stderr, "[sync-audit] skipped: no voxel window yet (%ux%ux%u, mapping %s)\n",
+		        dims.x, dims.y, dims.z, pMapped ? "present" : "absent");
+		return;
+	}
+
+	const uint32_t uiWordCount = m_pRenderContext->GetVoxelDataSize();
+
+	const std::chrono::high_resolution_clock::time_point stageStart =
+		std::chrono::high_resolution_clock::now();
+
+	std::vector<uint32_t> staged(pMapped, pMapped + uiWordCount);
+
+	const std::chrono::duration<double, std::milli> stageSpan =
+		std::chrono::high_resolution_clock::now() - stageStart;
+
+	const uint32_t* pWords = staged.data();
+
+	const uint32_t uiBrickDisagreements =
+		m_pRenderContext->GetBrickGrid().Validate(false, pWords);
+
+	uint64_t uiColourDisagreements = 0;
+	uint64_t uiMissingFromGPU = 0;
+	uint64_t uiMissingFromCPU = 0;
+	uint32_t uiFirstBad = UINT32_MAX;
+
+	for (uint32_t z = 0; z < dims.z; ++z)
+	for (uint32_t y = 0; y < dims.y; ++y)
+	for (uint32_t x = 0; x < dims.x; ++x)
+	{
+		const uint32_t uiID = x + y * dims.x + z * dims.x * dims.y;
+
+		if (uiID >= uiWordCount)
+			continue;
+
+		const VoxelCell cell = grid.GetCell(x, y, z);
+
+		if (!cell)
+			continue;
+
+		const uint32_t uiCPU = cell.GetColor();
+		const uint32_t uiGPU = pWords[uiID];
+
+		if (uiCPU == uiGPU)
+			continue;
+
+		++uiColourDisagreements;
+
+		/* Split by direction, because the two are not equally interesting.
+
+		   Occupied only on the CPU is a defect every time: geometry physics
+		   can see and the image cannot, which is a write that reached the
+		   chunk and not the mapping.
+
+		   Occupied only on the GPU has a *legitimate* source and is expected
+		   to be non-zero - a dynamic VoxRenderer's voxels live in the render
+		   buffer and nowhere else, because VoxelBaker::Occupy only touches the
+		   chunk and the physics grid for static renderers (see CLAUDE.md,
+		   "Dynamic renderers are invisible to the physics grid"). So the
+		   number to watch here is its size and its trend, not whether it is
+		   zero: it should track roughly the voxel count of the dynamic
+		   renderers on screen, and it should come back down when they leave. */
+		if ((uiCPU >> 24) != 0 && (uiGPU >> 24) == 0)
+			++uiMissingFromGPU;
+		else if ((uiCPU >> 24) == 0 && (uiGPU >> 24) != 0)
+			++uiMissingFromCPU;
+
+		if (uiFirstBad == UINT32_MAX)
+			uiFirstBad = uiID;
+	}
+
+	fprintf(stderr, "[sync-audit] %llu of %u voxels disagree between the CPU chunk and the mapping "
+	                "(%llu occupied only on the CPU - always a defect; %llu only on the GPU - "
+	                "expected, dynamic renderers stamp the mapping alone; first at %u); "
+	                "%u brick/bitmap disagreements; staged %u words in %.1f ms\n",
+	        (unsigned long long)uiColourDisagreements, dims.x * dims.y * dims.z,
+	        (unsigned long long)uiMissingFromGPU, (unsigned long long)uiMissingFromCPU,
+	        uiFirstBad, uiBrickDisagreements, uiWordCount, stageSpan.count());
+
+	if (m_pPhysicsSystem)
+		m_pPhysicsSystem->AuditParticlePool();
+}
+
 void RenderSystem::EnableDebugLines(bool bEnabled)
 {
 	m_pRenderContext->EnableDebugLines(bEnabled);
@@ -896,6 +1054,8 @@ void RenderSystem::SubmitLooseVoxelProxies(bool bAudit)
 {
 	if (m_LooseVoxelCells.empty())
 		return;
+
+	ScopedFrameTimer timer("CPU RenderSystem::SubmitLooseVoxelProxies");
 
 	const Vector3 v3Offset = m_pPhysicsSystem->m_VoxelGrid.GetWorldOffset();
 	const Vector3 v3WindowMax = Vector3(m_v3WorldSize) - Vector3(1.f);

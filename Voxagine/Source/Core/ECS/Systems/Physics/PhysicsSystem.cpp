@@ -22,6 +22,7 @@
 #include <iostream>
 
 #include "Core/Platform/Platform.h"
+#include "Core/Platform/Rendering/FrameProfiler.h"
 #include "Core/Platform/Rendering/Passes/ParticlePass.h"
 #include "External/optick/optick.h"
 
@@ -76,6 +77,8 @@ bool PhysicsSystem::CanProcessComponent(Component* pComponent)
 void PhysicsSystem::FixedTick(const GameTimer& fixedTimer)
 {
 	OPTICK_CATEGORY("Physics", Optick::Category::Physics);
+	ScopedFrameTimer tick("CPU PhysicsSystem::FixedTick");
+
 	ProcessIntegrityChecks();
 
 	/* Update particles */
@@ -210,6 +213,8 @@ void PhysicsSystem::TickBodies(const GameTimer& fixedTimer)
 void PhysicsSystem::TickParticleSystems(const GameTimer& fixedTimer)
 {
 	OPTICK_EVENT();
+	ScopedFrameTimer timer("CPU PhysicsSystem::TickParticleSystems");
+
 	GPUParticle* pGPUParticles = reinterpret_cast<GPUParticle*>(m_pGPUParticles->GetData());
 	GPUParticle gpuParticle;
 
@@ -248,10 +253,22 @@ void PhysicsSystem::ProcessIntegrityChecks()
 
 	/* Runs the flood fill inline for a bounded number of voxel visits. */
 	std::vector<std::vector<uint64_t>> results;
-	m_IntegrityChecker.Process(IntegrityChecker::VISIT_BUDGET_PER_TICK, results);
+
+	{
+		ScopedFrameTimer timer("CPU IntegrityChecker::Process");
+		m_IntegrityChecker.Process(IntegrityChecker::VISIT_BUDGET_PER_TICK, results);
+	}
 
 	for (std::vector<uint64_t>& checkedVoxels : results)
 		m_PendingIslands.push_back(std::move(checkedVoxels));
+
+	if (m_PendingIslands.empty())
+		return;
+
+	/* Below the early return, so the accumulator holds only ticks that actually
+	   converted something - an average over the ticks that did nothing says
+	   nothing about what conversion costs. */
+	ScopedFrameTimer convertTimer("CPU IntegrityChecker island conversion");
 
 	/* Converting an island is budgeted too, and that is not symmetry for its
 	   own sake. An island is however large the disconnected structure is, and
@@ -328,6 +345,20 @@ void PhysicsSystem::ProcessIntegrityChecks()
 }
 
 
+
+void PhysicsSystem::AuditParticlePool() const
+{
+	const ParticleLinkedList::AuditResult result = m_ParticlePool.Audit();
+
+	fprintf(stderr, "[pool-audit] %llu alive + %llu free of %llu%s%s%s%s\n",
+	        (unsigned long long)result.uiAlive,
+	        (unsigned long long)result.uiFree,
+	        (unsigned long long)result.uiPool,
+	        result.uiUnaccounted ? " - some particles are on neither list" : "",
+	        result.uiDuplicated ? " - some particles are on both lists or listed twice" : "",
+	        result.bAliveCycle ? " - the alive list does not terminate" : "",
+	        result.bFreeCycle ? " - the free list does not terminate" : "");
+}
 
 bool PhysicsSystem::RayCast(Vector3 start, Vector3 dir, HitResult& hitResult, float fLength /*= FLT_MAX*/, uint32_t uiLayer /*= CollisionLayer::CL_ALL*/)
 {
@@ -459,6 +490,8 @@ bool PhysicsSystem::RayCastGroup(std::vector<BoxCollider*>& colliders, Vector3 s
 
 void PhysicsSystem::ApplySphericalDestruction(const Vector3& position, float fRadius, float fForceMin, float fForceMax, bool bBakeParticle /* true */)
 {
+	ScopedFrameTimer timer("CPU PhysicsSystem::ApplySphericalDestruction");
+
 	Vector3 clampedGridPos = m_VoxelGrid.WorldToGrid(position);
 	clampedGridPos.x = round(clampedGridPos.x);
 	clampedGridPos.y = round(clampedGridPos.y);
@@ -532,7 +565,7 @@ void PhysicsSystem::ApplySphericalDestruction(const Vector3& position, float fRa
 						pParticle->Live.BakeOnImpact = bBakeParticle;
 
 						diff = glm::normalize(diff);
-						pParticle->Live.Velocity = diff * glm::linearRand(fForceMin, fForceMax);
+						pParticle->Live.Velocity = diff * m_ParticleRandom.Range(fForceMin, fForceMax);
 						pParticle->Live.VoxelColor = color;
 
 						/* volumePos is pre-incremented at the top of the loop,
@@ -1239,8 +1272,10 @@ bool PhysicsSystem::CheckContinousCollision(BoxCollider* pColliderA, Manifold& m
 void PhysicsSystem::SimulateParticles(float fDeltaTime)
 {
 	OPTICK_EVENT();
+	ScopedFrameTimer timer("CPU PhysicsSystem::SimulateParticles");
+
 	Particle* aliveParticle = m_ParticlePool.GetLastAlive();
-	
+
 	GPUParticle* pGPUParticles = reinterpret_cast<GPUParticle*>(m_pGPUParticles->GetData());
 	GPUParticle gpuParticle;
 

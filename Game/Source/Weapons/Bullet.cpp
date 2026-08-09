@@ -264,11 +264,11 @@ void Bullet::FixedTick(const GameTimer& gameTimer)
 
 						if (m_fPathAnimationTimer >= m_fPathAnimationTime)
 						{
-							m_fPathAnimationTimer = std::fmodf(m_fPathAnimationTimer + fDeltaTime, m_fPathAnimationTime);
+							m_fPathAnimationTimer = std::fmod(m_fPathAnimationTimer + fDeltaTime, m_fPathAnimationTime);
 							m_uiPathAnimationLoopCount++;
 						}
 
-						m_AnimationOffset = m_Right * std::sinf(-PI + m_fPathAnimationTimer / m_fPathAnimationTime * PI * 2.f);
+						m_AnimationOffset = m_Right * std::sin(-PI + m_fPathAnimationTimer / m_fPathAnimationTime * PI * 2.f);
 
 						break;
 					}

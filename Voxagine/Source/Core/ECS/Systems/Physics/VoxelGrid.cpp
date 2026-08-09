@@ -74,6 +74,68 @@ void VoxelGrid::Clear()
 	m_uiNumVoxels = 0;
 }
 
+void VoxelGrid::SetChunkStorage(UVector2 loc, std::vector<Voxel>* pVoxels, VoxelOwnerVolume* pOwners)
+{
+	const uint32_t uiIndex = loc.x + loc.y * m_uiNumChunkX;
+
+	if (uiIndex >= m_ChunkVolumes.size())
+		return;
+
+	m_ChunkVolumes[uiIndex] = pVoxels;
+	m_ChunkOwners[uiIndex] = pOwners;
+}
+
+uint64_t VoxelGrid::Hash() const
+{
+	uint64_t uiHash = 1469598103934665603ull;
+
+	auto fold = [&uiHash](uint64_t uiValue)
+	{
+		for (uint32_t uiByte = 0; uiByte < 8; ++uiByte)
+		{
+			uiHash ^= (uiValue >> (uiByte * 8)) & 0xFFull;
+			uiHash *= 1099511628211ull;
+		}
+	};
+
+	fold(m_uiDimensionX);
+	fold(m_uiDimensionY);
+	fold(m_uiDimensionZ);
+
+	for (uint32_t uiZ = 0; uiZ < m_uiDimensionZ; ++uiZ)
+	{
+		for (uint32_t uiY = 0; uiY < m_uiDimensionY; ++uiY)
+		{
+			for (uint32_t uiX = 0; uiX < m_uiDimensionX; ++uiX)
+			{
+				uint32_t uiChunk = 0;
+				uint32_t uiIndex = 0;
+
+				if (!ResolveIndex(uiX, uiY, uiZ, uiChunk, uiIndex) ||
+					uiChunk >= m_ChunkVolumes.size() ||
+					m_ChunkVolumes[uiChunk] == nullptr ||
+					uiIndex >= m_ChunkVolumes[uiChunk]->size())
+				{
+					/* Not resident. Folded rather than skipped - see the header. */
+					fold(0xD15EA5Eull);
+					continue;
+				}
+
+				fold((*m_ChunkVolumes[uiChunk])[uiIndex].Color);
+
+				const VoxelOwnerVolume* pOwners =
+					uiChunk < m_ChunkOwners.size() ? m_ChunkOwners[uiChunk] : nullptr;
+
+				fold(pOwners && uiIndex < pOwners->Size()
+					? pOwners->GetSlot(uiIndex)
+					: VoxelOwnerVolume::k_uiNoOwnerSlot);
+			}
+		}
+	}
+
+	return uiHash;
+}
+
 uint16_t VoxelGrid::AcquireOwnerSlot(uint64_t uiEntityID)
 {
 	if (!uiEntityID)

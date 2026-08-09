@@ -86,22 +86,22 @@ void RenderContext::Initialize()
 	// Create the loop on the XY plane first
 	for (float a = 0.f; a < twoPi; a += step)
 	{
-		m_UnitDebugSphere.push_back(Vector3(std::cosf(a), std::sinf(a), 0.f));
-		m_UnitDebugSphere.push_back(Vector3(std::cosf(a + step), std::sinf(a + step), 0.f));
+		m_UnitDebugSphere.push_back(Vector3(std::cos(a), std::sin(a), 0.f));
+		m_UnitDebugSphere.push_back(Vector3(std::cos(a + step), std::sin(a + step), 0.f));
 	}
 
 	// Next on the XZ plane
 	for (float a = 0.f; a < twoPi; a += step)
 	{
-		m_UnitDebugSphere.push_back(Vector3(std::cosf(a), 0.f, std::sinf(a)));
-		m_UnitDebugSphere.push_back(Vector3(std::cosf(a + step), 0.f, std::sinf(a + step)));
+		m_UnitDebugSphere.push_back(Vector3(std::cos(a), 0.f, std::sin(a)));
+		m_UnitDebugSphere.push_back(Vector3(std::cos(a + step), 0.f, std::sin(a + step)));
 	}
 
 	// Finally on the YZ plane
 	for (float a = 0.f; a < twoPi; a += step)
 	{
-		m_UnitDebugSphere.push_back(Vector3(0.f, std::cosf(a), std::sinf(a)));
-		m_UnitDebugSphere.push_back(Vector3(0.f, std::cosf(a + step), std::sinf(a + step)));
+		m_UnitDebugSphere.push_back(Vector3(0.f, std::cos(a), std::sin(a)));
+		m_UnitDebugSphere.push_back(Vector3(0.f, std::cos(a + step), std::sin(a + step)));
 	}
 #endif
 }

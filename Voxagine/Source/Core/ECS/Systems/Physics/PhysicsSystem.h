@@ -5,6 +5,7 @@
 #include "Core/ECS/Systems/Physics/ParticleLinkedList.h"
 #include "Core/ECS/Systems/Physics/IntegrityChecker.h"
 #include "Core/ECS/Systems/Chunk/Chunk.h"
+#include "Core/Utils/DeterministicRandom.h"
 
 #define PHYSICS_EPSILON 0.000797
 
@@ -62,6 +63,12 @@ public:
 	Mapper* GetGPUParticles() const { return m_pGPUParticles; }
 
 	void SetRenderSystem(RenderSystem* pRenderSystem) { m_pRenderSystem = pRenderSystem; }
+
+	/* DESTRUCTION_PLAN.md phase 0. Walks the pool's free list and its alive
+	   list and checks that between them they account for every particle exactly
+	   once. Reported alongside the representation-sync audit; see the
+	   definition. */
+	void AuditParticlePool() const;
 
 	uint32_t m_uiActiveParticleCount = 0;
 
@@ -125,7 +132,7 @@ private:
 	std::deque<std::vector<uint64_t>> m_PendingIslands;
 	size_t m_uiIslandCursor = 0;
 
-	static const uint32_t k_uiIntegrityConvertPerTick = 16384;
+	static constexpr uint32_t k_uiIntegrityConvertPerTick = 16384;
 
 	Entity* m_pStaticEntityBody;
 	PhysicsBody* m_pStaticBody;
@@ -133,6 +140,13 @@ private:
 	uint32_t m_uiMaxParticleCount = 0;
 	Mapper* m_pGPUParticles = nullptr;
 	ParticleLinkedList m_ParticlePool;
+
+	/* Debris velocities used to come from glm::linearRand, which draws on a
+	   process-global engine that every other caller perturbs. Replaying a
+	   destruction script therefore diverged on the first unrelated call
+	   anywhere. Seeded per system, so the same call sequence gives the same
+	   debris - see DESTRUCTION_PLAN.md phase 0. */
+	DeterministicRandom m_ParticleRandom;
 
 	std::vector<ParticleSystem*> m_ParticleSystems;
 	std::vector<PhysicsBody*> m_Bodies;

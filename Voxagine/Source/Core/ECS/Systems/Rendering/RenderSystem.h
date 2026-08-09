@@ -51,6 +51,13 @@ public:
 	   Triggered by VOXAGINE_VOXEL_AUDIT=<seconds>. */
 	void AuditVoxelRepresentation();
 
+	/* DESTRUCTION_PLAN.md phase 0. Every representation of a voxel, checked
+	   against every other one: CPU colour, mapped GPU word, occupancy bitmap
+	   and brick count. Triggered periodically by VOXAGINE_SYNC_AUDIT=<seconds>
+	   and available from the editor's View menu, which is where the brick half
+	   of it already lived. See the definition. */
+	void AuditRepresentationSync();
+
 	void EnableDebugLines(bool bEnabled);
 
 	void SetFadeTime(float fFadeTime);
@@ -135,13 +142,13 @@ private:
 	   unloading and coming back - debris lives in the chunk's voxels and
 	   returns with it, and a window-space registry would have had to be shifted
 	   and would have lost anything that left and came back. */
-	static const uint32_t k_uiLooseCellShift = 5;
+	static constexpr uint32_t k_uiLooseCellShift = 5;
 
 	std::unordered_map<uint32_t, Box> m_LooseVoxelCells;
 
 	/* Round-robin cursor and per-frame budget for retiring loose cells. The
 	   registry is only bounded because of this - see SubmitLooseVoxelProxies. */
-	static const size_t k_uiLooseValidatePerFrame = 32;
+	static constexpr size_t k_uiLooseValidatePerFrame = 32;
 	size_t m_LooseValidateCursor = 0;
 
 	/* False until Start() has wiped and sized the voxel buffer. See

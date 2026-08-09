@@ -1133,6 +1133,21 @@ void Editor::RenderMainMenuBar()
 				m_pRenderContext->ValidateBrickGrid();
 			}
 
+			/* The same check plus the one it cannot make on its own: the CPU
+			   voxel against the mapped word. See
+			   RenderSystem::AuditRepresentationSync. Also available on a timer
+			   as VOXAGINE_SYNC_AUDIT=<seconds>, which is what a destruction
+			   session wants - the disagreements this looks for only exist once
+			   something has written. */
+			if (ImGui::MenuItem("Validate Voxel Representations", NULL))
+			{
+				World* pAuditWorld = GetApplication()->GetWorldManager().GetTopWorld();
+				RenderSystem* pRenderSystem = pAuditWorld ? pAuditWorld->GetRenderSystem() : nullptr;
+
+				if (pRenderSystem)
+					pRenderSystem->AuditRepresentationSync();
+			}
+
 			/* Present pacing. Mailbox shows whichever frame is newest at the
 			   display's vblank, so at 200 fps on a 60 Hz panel the shown
 			   frames advance the world 15 ms, then 20, then 15 - motion that

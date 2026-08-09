@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <string>
 #include <unordered_map>
@@ -44,4 +45,43 @@ private:
 	float m_fTimer = 0.0f;
 
 	std::unordered_map<std::string, Accumulator> m_Accumulators;
+};
+
+/* Times a scope and reports it, or does nothing at all when profiling is off.
+ *
+ * The existing call sites all spell this out by hand - read IsEnabled() once,
+ * take a chrono stamp, take another, subtract, Report - which is fine for the
+ * three or four of them that measure something with an early return in it, and
+ * pure noise for the dozen DESTRUCTION_PLAN.md phase 0 adds. The contract is
+ * the same one the class comment states: when disabled, no clock is read.
+ *
+ * The name is captured by pointer, so it must outlive the scope. Every caller
+ * passes a string literal. */
+class ScopedFrameTimer
+{
+public:
+	explicit ScopedFrameTimer(const char* pName) :
+		m_pName(FrameProfiler::Get().IsEnabled() ? pName : nullptr)
+	{
+		if (m_pName)
+			m_Start = std::chrono::high_resolution_clock::now();
+	}
+
+	~ScopedFrameTimer()
+	{
+		if (!m_pName)
+			return;
+
+		const std::chrono::duration<double, std::milli> span =
+			std::chrono::high_resolution_clock::now() - m_Start;
+
+		FrameProfiler::Get().Report(m_pName, span.count());
+	}
+
+	ScopedFrameTimer(const ScopedFrameTimer&) = delete;
+	ScopedFrameTimer& operator=(const ScopedFrameTimer&) = delete;
+
+private:
+	const char* m_pName;
+	std::chrono::high_resolution_clock::time_point m_Start;
 };

@@ -42,6 +42,7 @@ private:
 	uint32_t m_uiMaxNumThreads = 0;
 	uint32_t m_uiThreadSleepTime = 10;
 	std::atomic_bool m_bKillThreads = { false };
+	bool m_bAcceptingQueues = true;
 
 	void Initialize();
 	void Deinitialize();

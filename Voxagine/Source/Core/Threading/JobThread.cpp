@@ -3,10 +3,21 @@
 
 JobThread::~JobThread()
 {
-	if (m_Thread->joinable())
-		m_Thread->join();
-
+	Join();
 	delete m_Thread;
+}
+
+void JobThread::CancelRunningJob()
+{
+	std::unique_lock<std::shared_timed_mutex> lock(m_JobMutex);
+	if (m_pRunningJob)
+		m_pRunningJob->Canceled();
+}
+
+void JobThread::Join()
+{
+	if (m_Thread && m_Thread->joinable())
+		m_Thread->join();
 }
 
 Job* JobThread::GetRunningJob()

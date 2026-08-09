@@ -13,39 +13,88 @@ JobQueue::JobQueue(JobManager* pJobManager, uint32_t handle)
 
 JobQueue::~JobQueue()
 {
-	for (auto& jobQueueIter : m_JobQueue)
+	CancelPendingJobs();
+}
+
+void JobQueue::Close()
+{
+	std::lock_guard<std::mutex> lock(m_SubmissionMutex);
+	m_bAcceptingJobs = false;
+}
+
+void JobQueue::CancelPendingJobs()
+{
+	std::vector<Job*> pendingJobs;
 	{
-		Job* pJob = nullptr;
-		while (jobQueueIter.second.try_dequeue(pJob))
+		std::lock_guard<std::mutex> lock(m_SubmissionMutex);
+		m_bAcceptingJobs = false;
+
+		for (auto& jobQueueIter : m_JobQueue)
 		{
-			delete pJob;
+			Job* pJob = nullptr;
+			while (jobQueueIter.second.try_dequeue(pJob))
+				pendingJobs.push_back(pJob);
 		}
+	}
+
+	for (Job* pJob : pendingJobs)
+	{
+		pJob->Canceled();
+		delete pJob;
 	}
 }
 
 void JobQueue::Enqueue(Job* pJob)
 {
-	pJob->SetJobManager(m_pJobManager);
-	pJob->SetQueueHandle(m_QueueHandle);
-	m_JobQueue[JT_DEFAULT].enqueue(pJob);
+	TryEnqueueWithType(pJob, JT_DEFAULT);
 }
 
 void JobQueue::EnqueueBulk(const std::vector<Job*>& pJobs)
 {
-	for (auto& job : pJobs)
 	{
-		job->SetJobManager(m_pJobManager);
-		job->SetQueueHandle(m_QueueHandle);
+		std::lock_guard<std::mutex> lock(m_SubmissionMutex);
+		if (m_bAcceptingJobs)
+		{
+			for (Job* pJob : pJobs)
+			{
+				pJob->SetJobManager(m_pJobManager);
+				pJob->SetQueueHandle(m_QueueHandle);
+				pJob->m_Type = JT_DEFAULT;
+			}
+
+			m_JobQueue[JT_DEFAULT].enqueue_bulk(pJobs.begin(), pJobs.size());
+			return;
+		}
 	}
-		
-	m_JobQueue[JT_DEFAULT].enqueue_bulk(pJobs.begin(), pJobs.size());
+
+	for (Job* pJob : pJobs)
+	{
+		pJob->Canceled();
+		delete pJob;
+	}
+}
+
+bool JobQueue::TryEnqueueWithType(Job* pJob, JobType jobType)
+{
+	{
+		std::lock_guard<std::mutex> lock(m_SubmissionMutex);
+		if (m_bAcceptingJobs)
+		{
+			pJob->m_Type = jobType;
+			pJob->SetJobManager(m_pJobManager);
+			pJob->SetQueueHandle(m_QueueHandle);
+			m_JobQueue[jobType].enqueue(pJob);
+			return true;
+		}
+	}
+
+	pJob->Canceled();
+	delete pJob;
+	return false;
 }
 
 void JobQueue::EnqueueWithType(Job* pJob, JobType jobType)
 {
-	pJob->m_Type = jobType;
-	pJob->SetJobManager(m_pJobManager);
-	pJob->SetQueueHandle(m_QueueHandle);
-	m_JobQueue[jobType].enqueue(pJob);
+	TryEnqueueWithType(pJob, jobType);
 }
 

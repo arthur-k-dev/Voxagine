@@ -22,7 +22,7 @@ public:
 
 	void AddState(const std::pair<std::string, FSMState<T>*>& pairState, bool bSetCurrent = false)
 	{
-		auto stateIt = m_mStates.find(pairState.first);
+		[[maybe_unused]] auto stateIt = m_mStates.find(pairState.first);
 		assert(stateIt == m_mStates.end() && "You added a duplicate to the state list");
 		m_mStates.insert(pairState);
 

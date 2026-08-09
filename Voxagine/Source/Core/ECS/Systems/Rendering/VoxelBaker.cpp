@@ -286,9 +286,13 @@ uint32_t* VoxelBaker::Occupy(VoxRenderer* pRenderer, VoxRenderer::BakeData* pBak
 
 			/* Was "(!owner && !active) || owner == me". The slot says which of
 			   the two branches applies without resolving anything: zero is
-			   unowned, and any other value only matters if it is mine. A
-			   particle claim (k_uiParticleSlot) can never equal a renderer's
-			   slot, so it blocks the stamp exactly as its pointer used to. */
+			   unowned, and any other value only matters if it is mine.
+
+			   A particle claim used to land here too and blocked the stamp.
+			   Phase 3 deleted claims, so what a stamp can now overwrite is a
+			   cell a debris particle happens to be flying through - one
+			   overlapping cube for a frame or two, which is the cosmetic cost
+			   that whole argument came down to. */
 			const uint16_t uiExisting = cell.GetSlot();
 
 			bForceVoxel = uiExisting == VoxelOwnerVolume::k_uiNoOwnerSlot
@@ -579,7 +583,7 @@ void VoxelBaker::Clear(VoxRenderer* pRenderer, VoxRenderer::BakeData* pBakeData,
 
 			if (cell && cell.IsActive() &&
 				uiExisting != VoxelOwnerVolume::k_uiNoOwnerSlot &&
-				uiExisting != VoxelOwnerVolume::k_uiParticleSlot &&
+				uiExisting != VoxelOwnerVolume::k_uiReservedSlot &&
 				uiExisting != uiOwnerSlot)
 			{
 				/* VOXAGINE_BOUNDS_AUDIT=1 counts what this rule saves, which is

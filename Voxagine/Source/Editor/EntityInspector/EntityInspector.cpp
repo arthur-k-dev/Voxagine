@@ -119,8 +119,8 @@ void EntityInspector::OnPreRender(float /* fDeltaTime */ )
 		{
 			if (ComponentProp.get_metadata(MetaData_Transform_Mode::GLOBAL) || ComponentProp.get_metadata(MetaData_Transform_Mode::LOCAL))
 			{
-				if (IsTransformWorldModus && ComponentProp.get_metadata(MetaData_Transform_Mode::GLOBAL) ||
-					!IsTransformWorldModus && ComponentProp.get_metadata(MetaData_Transform_Mode::LOCAL))
+				if ((IsTransformWorldModus && ComponentProp.get_metadata(MetaData_Transform_Mode::GLOBAL)) ||
+					(!IsTransformWorldModus && ComponentProp.get_metadata(MetaData_Transform_Mode::LOCAL)))
 				{
 					RenderSelectedEntityProperty(InspectedTransform, ComponentProp, &pComponentName);
 				}
@@ -282,7 +282,6 @@ void EntityInspector::OnRender(float /* fDeltaTime */)
 
 				ImVec2 WindowSize = ImGui::GetWindowSize();
 				ImVec2 MousPos = ImGui::GetMousePos();
-				auto test = ImVec2(ButtonMin.x + WindowSize.x, (ButtonMax.y - ButtonMin.y) + ButtonMin.y + WindowSize.y);
 
 				if (MousPos.x < ButtonMin.x || MousPos.x > ButtonMin.x + WindowSize.x || MousPos.y < ButtonMin.y || MousPos.y >(ButtonMax.y - ButtonMin.y) + ButtonMin.y + WindowSize.y)
 				{
@@ -306,13 +305,13 @@ void EntityInspector::OnRender(float /* fDeltaTime */)
 			if (itr.first == "Default" || itr.first == "Transform##" + std::to_string(SelectedEntity->GetId()))
 				continue;
 
-				PropertyCategory & cat = itr.second;
+			PropertyCategory & cat = itr.second;
 
-				// if we need to render something different
-				if (pair.second != itr.first)
-				{
-					pair.first = 0;
-				}
+			// if we need to render something different
+			if (pair.second != itr.first)
+			{
+				pair.first = 0;
+			}
 
 			if (!pair.first)
 			{

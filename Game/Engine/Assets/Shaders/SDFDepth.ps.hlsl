@@ -8,7 +8,7 @@ VOXEL_RW_BUFFER voxelWorldData : register(u0);
    it compiling - no pass binds it. */
 RW_STRUCTURED_BUFFER(uint) voxelBrickData : register(u1);
 
-VOXEL_BUFFER voxelModelData[] : register(t1) {};
+VOXEL_BUFFER voxelModelData[] : register(t1);
 
 struct PS_in
 {

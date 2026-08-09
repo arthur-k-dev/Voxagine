@@ -34,9 +34,9 @@ void main(uint3 dispatchID : SV_DispatchThreadID)
     VOXEL_FORMAT voxelPosition = model[uiDispatchID] * 255.0;
 
     // Directions
-    float3 forward = Forward;
-    float3 right = Right;
-    float3 up = Up;
+    float3 forward = Forward.xyz;
+    float3 right = Right.xyz;
+    float3 up = Up.xyz;
 
     // Scale
     voxelPosition.xyz *= Scale.xyz;

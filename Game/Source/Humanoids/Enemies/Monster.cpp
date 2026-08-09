@@ -66,22 +66,23 @@ RTTR_REGISTRATION
 
 Monster::Monster(World* world) :
 	Humanoid(world),
+	m_idleAnimation(""),
+	m_movingAnimation(""),
 	m_fWakeUpRange(200.f),
 	m_fWakeUpTime(0.f),
-	m_fAttackCooldown(1.f),
-	m_fCooldownTimer(0.f),
-	m_idleAnimation(""),
 	m_wakeUpAnimation(""),
 	m_iWakeUpAnimationFPS(10),
-	m_movingAnimation(""),
+	m_fCooldownTimer(0.f),
+	m_fAttackCooldown(1.f),
+	m_pClosestTarget(nullptr),
 	// Melee attack
 	m_fMeleeAttackDamage(1.f),
-	m_pClosestTarget(nullptr),
-	m_meleeAttackAnimation(""),
 	m_fMeleeRange(50.f),
 	m_fMeleeAttackTime(1.f),
 	m_bCanMeleeAttack(false),
 	m_bIsMeleeAttacking(false),
+	m_meleeAttackAnimation(""),
+	m_fStopSeekRange(0),
 	// Range attack
 	m_fBulletDamage(1.f),
 	m_fBulletSpeed(200.f),
@@ -95,7 +96,6 @@ Monster::Monster(World* world) :
 	m_bCanRangeAttack(false),
 	m_bIsRangeAttacking(false),
 	m_rangeAttackAnimation(""),
-	m_fStopSeekRange(0),
 	m_bApplyDefaultValues(true)
 {
 	SetName("Monster");

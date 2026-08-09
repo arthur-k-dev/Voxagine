@@ -13,7 +13,7 @@ Texture2D<float4> particlePass : register(t1);
 /* t2 is the particle depth target, which this variant does not read; the pass
    binds it either way, so the register is spoken for and t3 stays free. */
 
-VOXEL_BUFFER voxelModelData[] : register(t4) {};
+VOXEL_BUFFER voxelModelData[] : register(t4);
 
 struct PS_in
 {

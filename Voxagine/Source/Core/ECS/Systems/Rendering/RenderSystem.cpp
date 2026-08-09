@@ -244,6 +244,63 @@ void RenderSystem::PostTick(float fDeltaTime)
 	if (s_bCoverageAudit)
 		AuditProxyCoverage(fDeltaTime);
 
+	/* VOXAGINE_INTEGRITY_AUDIT=<seconds>: the connectivity oracle. Separate
+	   from the sync audit because they cost very differently - this one walks
+	   cached CPU voxels, that one reads the window back over PCIe - and a
+	   destruction session wants this one often and that one rarely. */
+	{
+		static const double s_fInterval =
+			std::getenv("VOXAGINE_INTEGRITY_AUDIT") ? atof(std::getenv("VOXAGINE_INTEGRITY_AUDIT")) : 0.0;
+		static double s_fElapsed = 0.0;
+
+		if (s_fInterval > 0.0 && m_pPhysicsSystem != nullptr)
+		{
+			s_fElapsed += fDeltaTime;
+
+			if (s_fElapsed >= s_fInterval)
+			{
+				s_fElapsed = 0.0;
+				m_pPhysicsSystem->AuditIntegrity();
+			}
+		}
+	}
+
+	/* VOXAGINE_SYNC_AUDIT=<seconds>: repeated rather than one-shot, because the
+	   disagreement it looks for is produced by a *write path* and so does not
+	   exist at rest - see DESTRUCTION_PLAN.md's verification reference.
+
+	   In PostTick, off the wall-clock delta, and not in Render off the fixed
+	   timer where the other two audits live. Render is only reached on a fixed
+	   step, so a run whose fixed timer never advances - which is what the
+	   editor does while a world is loading - accumulates nothing and the audit
+	   silently never fires. It looks identical to "everything agrees". */
+	{
+		static const double s_fInterval =
+			std::getenv("VOXAGINE_SYNC_AUDIT") ? atof(std::getenv("VOXAGINE_SYNC_AUDIT")) : 0.0;
+		static double s_fElapsed = 0.0;
+
+		if (s_fInterval > 0.0 && m_pPhysicsSystem != nullptr)
+		{
+			/* Says once that it is armed. Without it, "the variable was not
+			   picked up" and "everything agrees" produce the same empty log. */
+			static bool s_bAnnounced = false;
+
+			if (!s_bAnnounced)
+			{
+				s_bAnnounced = true;
+				fprintf(stderr, "[sync-audit] armed, every %.1f s\n", s_fInterval);
+			}
+
+			s_fElapsed += fDeltaTime;
+
+			if (s_fElapsed >= s_fInterval)
+			{
+				s_fElapsed = 0.0;
+				AuditRepresentationSync();
+			}
+		}
+	}
+
 #ifndef _ORBIS
 	/* Render text data */
 	ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.f);
@@ -274,8 +331,8 @@ void RenderSystem::PostTick(float fDeltaTime)
 		Vector2 v2Alignment = GetNormRenderAlignment(pTextRenderer->GetAlignment());
 		Vector2 v2ScreenAlignment = GetNormRenderAlignment(pTextRenderer->GetScreenAlignment());
 
-		ImVec2 alignment = *(ImVec2*)&v2Alignment;
-		ImVec2 screenAlignment = *(ImVec2*)&v2ScreenAlignment;
+		ImVec2 alignment = ImVec2(v2Alignment.x, v2Alignment.y);
+		ImVec2 screenAlignment = ImVec2(v2ScreenAlignment.x, v2ScreenAlignment.y);
 
 		ImGui::SetNextWindowBgAlpha(0.f);
 		
@@ -514,9 +571,6 @@ void RenderSystem::Render(const GameTimer& fixedTimer)
 
 	m_VoxelBaker.Bake();
 
-	if (bShouldUpdateVoxelWorld)
-		m_pRenderContext->ForceUpdate();
-
 	m_bForcedUpdate = false;
 }
 
@@ -682,10 +736,13 @@ bool RenderSystem::IsFading() const
 	return m_pRenderContext->m_fFader > 0.f && m_pRenderContext->m_fFader < 1.f;
 }
 
+/* RenderSystem's own flag, which is read - by Render, to decide whether the
+   bake re-examines every renderer. Not to be confused with the RenderContext
+   flag of the same name that used to sit beside it: that one was written from
+   seven places and read from none, and is gone (ledger M1). */
 void RenderSystem::ForceUpdate()
 {
 	m_bForcedUpdate = true;
-	m_pRenderContext->ForceUpdate();
 }
 
 void RenderSystem::ForceCameraDataUpdate()
@@ -756,7 +813,7 @@ void RenderSystem::AuditVoxelRepresentation()
 	uint64_t uiOwners = 0;
 	uint64_t uiDeadOwners = 0;
 	uint64_t uiOwnerNotActive = 0;
-	uint64_t uiParticleClaims = 0;
+	uint64_t uiReservedSlots = 0;
 
 	std::unordered_map<uint64_t, bool> aliveCache;
 	std::unordered_map<uint16_t, uint64_t> slotCounts;
@@ -786,9 +843,13 @@ void RenderSystem::AuditVoxelRepresentation()
 		if (!bActive)
 			++uiOwnerNotActive;
 
-		if (uiSlot == VoxelOwnerVolume::k_uiParticleSlot)
+		/* Nothing writes this since phase 3 deleted particle claims, so it
+		   should read zero. A non-zero count means chunk data older than that
+		   is still resident, which is fine, or that something started handing
+		   the reserved slot out, which is not. */
+		if (uiSlot == VoxelOwnerVolume::k_uiReservedSlot)
 		{
-			++uiParticleClaims;
+			++uiReservedSlots;
 			continue;
 		}
 
@@ -807,9 +868,9 @@ void RenderSystem::AuditVoxelRepresentation()
 	        (unsigned long long)uiActive, dims.x * dims.y * dims.z,
 	        sizeof(Voxel), sizeof(uint16_t));
 
-	fprintf(stderr, "[voxel-audit] owners: %llu set, %llu naming a dead entity, %llu on an inactive voxel, %llu particle claims (%zu distinct slots of %zu allocated)\n",
+	fprintf(stderr, "[voxel-audit] owners: %llu set, %llu naming a dead entity, %llu on an inactive voxel, %llu on the reserved slot (%zu distinct slots of %zu allocated)\n",
 	        (unsigned long long)uiOwners, (unsigned long long)uiDeadOwners,
-	        (unsigned long long)uiOwnerNotActive, (unsigned long long)uiParticleClaims,
+	        (unsigned long long)uiOwnerNotActive, (unsigned long long)uiReservedSlots,
 	        slotCounts.size(), grid.GetOwnerSlotCount());
 
 	/* The other half of the representation is the RLE the chunk system encodes
@@ -837,6 +898,128 @@ void RenderSystem::AuditVoxelRepresentation()
 	}
 }
 
+/* The representation-sync audit: rule 3 made checkable.
+ *
+ * A voxel exists in four places - the CPU colour in the chunk, the word in the
+ * mapped GPU buffer, one bit in the occupancy bitmap and one unit of a brick
+ * count - and nothing in the type system says a write has to touch all four.
+ * ValidateBrickGrid already compares the last three against the mapping; what
+ * it cannot see is the mapping disagreeing with the CPU voxel, which is the
+ * failure a write path that updates one and not the other produces, and the one
+ * that reads on screen as geometry that is there in physics and absent in the
+ * image (or the reverse).
+ *
+ * Reads the whole window back out of the mapping, which is ReBAR host-visible
+ * memory. It stages it into ordinary memory first with one bulk copy, and that
+ * is not an optimization detail - it is the difference between an audit and a
+ * hang. Two passes want the words (the brick validator and the colour compare
+ * below), and read scattered from an uncached mapping each one costs on the
+ * order of a hundred nanoseconds a voxel: 75 M voxels twice is minutes, which
+ * on a short interval means the process never leaves this function. Staged, the
+ * PCIe traffic is one sequential 300 MB read and both passes then walk cache.
+ *
+ * Still on demand, and it still freezes the frame for as long as it takes -
+ * expected, not a hang. On this machine's 768x128x768 window the staging read
+ * alone is **19 seconds** (302 MB at about 15 MB/s, which is what an uncached
+ * PCIe read of VRAM costs and is consistent with the ~500 ns per voxel read
+ * measured in RENDERING_PLAN.md phase 4b). memcpy does not help; the memory
+ * type does. So give it an interval of a minute or more, and expect the report
+ * to describe the world as it was when the copy started.
+ */
+void RenderSystem::AuditRepresentationSync()
+{
+	VoxelGrid& grid = m_pPhysicsSystem->m_VoxelGrid;
+	const UVector3 dims = grid.GetDimensions();
+	const uint32_t* pMapped = m_pRenderContext->GetVoxelData();
+
+	/* Says so rather than returning quietly. An audit that produces no output
+	   when it cannot run reads exactly like one that ran and found nothing,
+	   which is the worst possible failure mode for a check whose whole value is
+	   its silence. */
+	if (pMapped == nullptr || dims.x == 0 || dims.y == 0 || dims.z == 0)
+	{
+		fprintf(stderr, "[sync-audit] skipped: no voxel window yet (%ux%ux%u, mapping %s)\n",
+		        dims.x, dims.y, dims.z, pMapped ? "present" : "absent");
+		return;
+	}
+
+	const uint32_t uiWordCount = m_pRenderContext->GetVoxelDataSize();
+
+	const std::chrono::high_resolution_clock::time_point stageStart =
+		std::chrono::high_resolution_clock::now();
+
+	std::vector<uint32_t> staged(pMapped, pMapped + uiWordCount);
+
+	const std::chrono::duration<double, std::milli> stageSpan =
+		std::chrono::high_resolution_clock::now() - stageStart;
+
+	const uint32_t* pWords = staged.data();
+
+	const uint32_t uiBrickDisagreements =
+		m_pRenderContext->GetBrickGrid().Validate(false, pWords);
+
+	uint64_t uiColourDisagreements = 0;
+	uint64_t uiMissingFromGPU = 0;
+	uint64_t uiMissingFromCPU = 0;
+	uint32_t uiFirstBad = UINT32_MAX;
+
+	for (uint32_t z = 0; z < dims.z; ++z)
+	for (uint32_t y = 0; y < dims.y; ++y)
+	for (uint32_t x = 0; x < dims.x; ++x)
+	{
+		const uint32_t uiID = x + y * dims.x + z * dims.x * dims.y;
+
+		if (uiID >= uiWordCount)
+			continue;
+
+		const VoxelCell cell = grid.GetCell(x, y, z);
+
+		if (!cell)
+			continue;
+
+		const uint32_t uiCPU = cell.GetColor();
+		const uint32_t uiGPU = pWords[uiID];
+
+		if (uiCPU == uiGPU)
+			continue;
+
+		++uiColourDisagreements;
+
+		/* Split by direction, because the two are not equally interesting.
+
+		   Occupied only on the CPU is a defect every time: geometry physics
+		   can see and the image cannot, which is a write that reached the
+		   chunk and not the mapping.
+
+		   Occupied only on the GPU has a *legitimate* source and is expected
+		   to be non-zero - a dynamic VoxRenderer's voxels live in the render
+		   buffer and nowhere else, because VoxelBaker::Occupy only touches the
+		   chunk and the physics grid for static renderers (see CLAUDE.md,
+		   "Dynamic renderers are invisible to the physics grid"). So the
+		   number to watch here is its size and its trend, not whether it is
+		   zero: it should track roughly the voxel count of the dynamic
+		   renderers on screen, and it should come back down when they leave. */
+		if ((uiCPU >> 24) != 0 && (uiGPU >> 24) == 0)
+			++uiMissingFromGPU;
+		else if ((uiCPU >> 24) == 0 && (uiGPU >> 24) != 0)
+			++uiMissingFromCPU;
+
+		if (uiFirstBad == UINT32_MAX)
+			uiFirstBad = uiID;
+	}
+
+	fprintf(stderr, "[sync-audit] %llu of %u voxels disagree between the CPU chunk and the mapping "
+	                "(%llu occupied only on the CPU - always a defect; %llu only on the GPU - "
+	                "expected, dynamic renderers stamp the mapping alone; first at %u); "
+	                "%u brick/bitmap disagreements; staged %u words in %.1f ms\n",
+	        (unsigned long long)uiColourDisagreements, dims.x * dims.y * dims.z,
+	        (unsigned long long)uiMissingFromGPU, (unsigned long long)uiMissingFromCPU,
+	        uiFirstBad, uiBrickDisagreements, uiWordCount, stageSpan.count());
+
+	if (m_pPhysicsSystem)
+		m_pPhysicsSystem->AuditParticlePool();
+}
+
 void RenderSystem::EnableDebugLines(bool bEnabled)
 {
 	m_pRenderContext->EnableDebugLines(bEnabled);
@@ -847,41 +1030,217 @@ void RenderSystem::SetFadeTime(float fFadeTime)
 	m_pRenderContext->m_fFadeTime = fFadeTime <= 0.0f ? 1.0f : fFadeTime;
 }
 
+VoxelEditTarget RenderSystem::MakeEditTarget()
+{
+	VoxelEditTarget target;
+
+	target.pGrid = &m_pPhysicsSystem->m_VoxelGrid;
+	target.pBricks = &m_pRenderContext->GetBrickGrid();
+	target.pWords = m_pRenderContext->GetVoxelData();
+	target.uiWordCount = m_pRenderContext->GetVoxelDataSize();
+	target.v3WindowSize = m_v3WorldSize;
+	target.pLooseVoxels = this;
+
+	return target;
+}
+
 void RenderSystem::AddLooseVoxel(const Vector3& v3GridPosition)
 {
 	/* Level space: grid space plus the window's own offset. */
 	const Vector3 v3Level = v3GridPosition + m_pPhysicsSystem->m_VoxelGrid.GetWorldOffset();
 
+	/* Ledger L4. This used to drop out-of-range positions silently, which is
+	   the same as saying "this voxel gets no proxy and nobody will ever know".
+	   Dropping is still the right answer - a clamped cell key names a different
+	   place, so the proxy would be submitted somewhere the voxel is not - but
+	   it says so now. */
+	auto reject = [&v3Level](const char* pReason)
+	{
+		static bool s_bWarned = false;
+
+		if (!s_bWarned)
+		{
+			s_bWarned = true;
+			fprintf(stderr, "[loose] dropping a voxel at level (%.1f %.1f %.1f): %s - it will only be drawn "
+			                "when another model's proxy happens to cover it\n",
+			        v3Level.x, v3Level.y, v3Level.z, pReason);
+		}
+	};
+
 	if (v3Level.x < 0.f || v3Level.y < 0.f || v3Level.z < 0.f)
+	{
+		reject("negative level coordinate");
 		return;
+	}
+
+	const UVector3 v3Voxel(
+		static_cast<uint32_t>(v3Level.x),
+		static_cast<uint32_t>(v3Level.y),
+		static_cast<uint32_t>(v3Level.z));
 
 	const UVector3 v3Cell(
-		static_cast<uint32_t>(v3Level.x) >> k_uiLooseCellShift,
-		static_cast<uint32_t>(v3Level.y) >> k_uiLooseCellShift,
-		static_cast<uint32_t>(v3Level.z) >> k_uiLooseCellShift);
+		v3Voxel.x >> k_uiLooseCellShift,
+		v3Voxel.y >> k_uiLooseCellShift,
+		v3Voxel.z >> k_uiLooseCellShift);
 
 	/* Ten bits an axis is a level of 32768 voxels a side at this cell size,
 	   which is 21 times the largest one here. */
 	if (v3Cell.x > 1023 || v3Cell.y > 1023 || v3Cell.z > 1023)
+	{
+		reject("outside the ten-bit cell grid");
 		return;
+	}
 
 	const uint32_t uiKey = v3Cell.x | (v3Cell.y << 10) | (v3Cell.z << 20);
 
-	std::unordered_map<uint32_t, Box>::iterator it = m_LooseVoxelCells.find(uiKey);
+	/* Five bits an axis inside the cell. */
+	const uint16_t uiOffset = static_cast<uint16_t>(
+		(v3Voxel.x & (k_uiLooseCellSize - 1)) |
+		((v3Voxel.y & (k_uiLooseCellSize - 1)) << 5) |
+		((v3Voxel.z & (k_uiLooseCellSize - 1)) << 10));
+
+	std::unordered_map<uint32_t, LooseVoxelCell>::iterator it = m_LooseVoxelCells.find(uiKey);
 
 	if (it == m_LooseVoxelCells.end())
 	{
-		Box box;
-		box.Min = v3Level;
-		box.Max = v3Level;
+		if (m_LooseVoxelCells.size() >= k_uiMaxLooseCells)
+			EvictFarthestLooseCell();
 
-		m_LooseVoxelCells.emplace(uiKey, box);
+		LooseVoxelCell cell;
+		cell.Bounds.Min = v3Level;
+		cell.Bounds.Max = v3Level;
+		cell.Offsets.push_back(uiOffset);
+
+		m_LooseVoxelCells.emplace(uiKey, std::move(cell));
+		m_bLooseCellKeysDirty = true;
 
 		return;
 	}
 
-	it->second.Min = glm::min(it->second.Min, v3Level);
-	it->second.Max = glm::max(it->second.Max, v3Level);
+	it->second.Bounds.Min = glm::min(it->second.Bounds.Min, v3Level);
+	it->second.Bounds.Max = glm::max(it->second.Bounds.Max, v3Level);
+
+	/* Sorted insert, so registering the same voxel twice - which debris landing
+	   in the same spot does routinely - costs a search rather than a duplicate
+	   the validator would then have to test twice. */
+	std::vector<uint16_t>& offsets = it->second.Offsets;
+	std::vector<uint16_t>::iterator at = std::lower_bound(offsets.begin(), offsets.end(), uiOffset);
+
+	if (at == offsets.end() || *at != uiOffset)
+		offsets.insert(at, uiOffset);
+}
+
+/* The cell whose box is farthest from the window, dropped when the registry
+   hits its cap. See k_uiMaxLooseCells: this loses a proxy, not the debris. */
+void RenderSystem::EvictFarthestLooseCell()
+{
+	if (m_LooseVoxelCells.empty())
+		return;
+
+	const Vector3 v3Offset = m_pPhysicsSystem->m_VoxelGrid.GetWorldOffset();
+	const Vector3 v3WindowCentre = v3Offset + Vector3(m_v3WorldSize) * 0.5f;
+
+	uint32_t uiWorstKey = 0;
+	float fWorstDistance = -1.f;
+
+	for (const std::pair<const uint32_t, LooseVoxelCell>& cell : m_LooseVoxelCells)
+	{
+		const Vector3 v3Centre = (cell.second.Bounds.Min + cell.second.Bounds.Max) * 0.5f;
+		const float fDistance = glm::distance2(v3Centre, v3WindowCentre);
+
+		if (fDistance > fWorstDistance)
+		{
+			fWorstDistance = fDistance;
+			uiWorstKey = cell.first;
+		}
+	}
+
+	static bool s_bWarned = false;
+
+	if (!s_bWarned)
+	{
+		s_bWarned = true;
+		fprintf(stderr, "[loose] registry hit %zu cells; dropping the farthest from the window. "
+		                "Debris there stays in the world but loses its proxy.\n", m_LooseVoxelCells.size());
+	}
+
+	m_LooseVoxelCells.erase(uiWorstKey);
+	m_bLooseCellKeysDirty = true;
+}
+
+/* Judges one cell against the voxels it actually recorded, dropping the ones
+   that are no longer occupied and re-tightening the box around what is left.
+   Returns false when nothing of the cell survives.
+
+   This is ledger L1's fix and the whole reason a cell stores voxels rather than
+   a box. The old test asked the brick grid whether *any* 8^3 block overlapping
+   the cell held anything, which static geometry satisfies - so a cell over a
+   wall never retired, and its box re-tightened onto the wall's bricks, growing
+   a proxy that covered geometry the wall's own renderer already covered. */
+bool RenderSystem::ValidateLooseCell(uint32_t uiKey, LooseVoxelCell& cell, const Vector3& v3Offset)
+{
+	VoxelBrickGrid& brickGrid = m_pRenderContext->GetBrickGrid();
+
+	const UVector3 v3Cell(uiKey & 1023u, (uiKey >> 10) & 1023u, (uiKey >> 20) & 1023u);
+
+	const UVector3 v3CellBase(
+		v3Cell.x << k_uiLooseCellShift,
+		v3Cell.y << k_uiLooseCellShift,
+		v3Cell.z << k_uiLooseCellShift);
+
+	Vector3 v3Min(0.f);
+	Vector3 v3Max(0.f);
+	bool bAny = false;
+
+	size_t uiKept = 0;
+
+	for (size_t i = 0; i < cell.Offsets.size(); ++i)
+	{
+		const uint16_t uiOffset = cell.Offsets[i];
+
+		const Vector3 v3Level(
+			static_cast<float>(v3CellBase.x + (uiOffset & 31u)),
+			static_cast<float>(v3CellBase.y + ((uiOffset >> 5) & 31u)),
+			static_cast<float>(v3CellBase.z + ((uiOffset >> 10) & 31u)));
+
+		const Vector3 v3Grid = v3Level - v3Offset;
+
+		/* Only voxels inside the window can be judged - outside it they are not
+		   in the buffer at all, and erasing on that would delete debris that is
+		   merely far away. Those are kept untested. */
+		const bool bInside =
+			v3Grid.x >= 0.f && v3Grid.y >= 0.f && v3Grid.z >= 0.f &&
+			v3Grid.x < static_cast<float>(m_v3WorldSize.x) &&
+			v3Grid.y < static_cast<float>(m_v3WorldSize.y) &&
+			v3Grid.z < static_cast<float>(m_v3WorldSize.z);
+
+		if (bInside)
+		{
+			const uint32_t uiVoxelID =
+				static_cast<uint32_t>(v3Grid.x) +
+				static_cast<uint32_t>(v3Grid.y) * m_v3WorldSize.x +
+				static_cast<uint32_t>(v3Grid.z) * m_v3WorldSize.x * m_v3WorldSize.y;
+
+			if (!brickGrid.IsOccupied(uiVoxelID))
+				continue;
+		}
+
+		cell.Offsets[uiKept++] = uiOffset;
+
+		v3Min = bAny ? glm::min(v3Min, v3Level) : v3Level;
+		v3Max = bAny ? glm::max(v3Max, v3Level) : v3Level;
+		bAny = true;
+	}
+
+	cell.Offsets.resize(uiKept);
+
+	if (!bAny)
+		return false;
+
+	cell.Bounds.Min = v3Min;
+	cell.Bounds.Max = v3Max;
+
+	return true;
 }
 
 /* A proxy for each cell of loose voxels the resident window can see.
@@ -897,73 +1256,64 @@ void RenderSystem::SubmitLooseVoxelProxies(bool bAudit)
 	if (m_LooseVoxelCells.empty())
 		return;
 
+	ScopedFrameTimer timer("CPU RenderSystem::SubmitLooseVoxelProxies");
+
 	const Vector3 v3Offset = m_pPhysicsSystem->m_VoxelGrid.GetWorldOffset();
 	const Vector3 v3WindowMax = Vector3(m_v3WorldSize) - Vector3(1.f);
 
-	/* Retirement. Without this the map only ever grows: a cell is added the
-	   first time debris lands in it and stayed for the life of the session even
-	   after that debris was blown apart again, and its box only ever widened.
-	   Both compound directly with how much has been destroyed, which is the
-	   "more destruction, more lag" this was reported as - every surviving cell
-	   is a proxy submitted every frame, and a proxy is a full march for every
-	   fragment it covers.
+	/* Iterated through a stable key vector rather than through the map's own
+	   order, which changes on every rehash and made the round-robin cursor skip
+	   cells arbitrarily (ledger L3). */
+	if (m_bLooseCellKeysDirty)
+	{
+		m_LooseCellKeys.clear();
+		m_LooseCellKeys.reserve(m_LooseVoxelCells.size());
 
-	   The test is the brick grid, not the voxel buffer: it already holds an
-	   occupied count per 8^3 block in ordinary memory, so this costs no PCIe
-	   read of VRAM (see CLAUDE.md on the mapper being write-only). A cell whose
-	   bricks are all empty holds nothing and goes; one that still has something
-	   keeps a proxy, tightened to the bricks that are actually occupied.
+		for (const std::pair<const uint32_t, LooseVoxelCell>& cell : m_LooseVoxelCells)
+			m_LooseCellKeys.push_back(cell.first);
 
-	   Only cells wholly inside the resident window can be judged - outside it
-	   the voxels are not in the buffer at all, and erasing on that would delete
-	   debris that is merely far away. Budgeted per frame and walked round-robin
-	   so a level's worth of cells costs nothing in any single frame. */
-	VoxelBrickGrid& brickGrid = m_pRenderContext->GetBrickGrid();
-	const UVector3 v3BrickGrid = brickGrid.GetGridSize();
+		std::sort(m_LooseCellKeys.begin(), m_LooseCellKeys.end());
 
-	m_LooseValidateCursor += k_uiLooseValidatePerFrame;
-	if (m_LooseValidateCursor >= m_LooseVoxelCells.size())
+		m_bLooseCellKeysDirty = false;
+	}
+
+	if (m_LooseValidateCursor >= m_LooseCellKeys.size())
 		m_LooseValidateCursor = 0;
 
 	const size_t uiValidateFrom = m_LooseValidateCursor;
 	const size_t uiValidateTo = uiValidateFrom + k_uiLooseValidatePerFrame;
-	size_t uiCellIndex = 0;
+
+	m_LooseValidateCursor += k_uiLooseValidatePerFrame;
 
 	std::vector<uint32_t> retired;
 
-	for (std::pair<const uint32_t, Box>& cell : m_LooseVoxelCells)
+	for (size_t uiIndex = 0; uiIndex < m_LooseCellKeys.size(); ++uiIndex)
 	{
-		const bool bValidate = (uiCellIndex >= uiValidateFrom && uiCellIndex < uiValidateTo);
-		++uiCellIndex;
+		const uint32_t uiKey = m_LooseCellKeys[uiIndex];
+
+		std::unordered_map<uint32_t, LooseVoxelCell>::iterator it = m_LooseVoxelCells.find(uiKey);
+
+		if (it == m_LooseVoxelCells.end())
+			continue;
+
+		LooseVoxelCell& cell = it->second;
+
+		if (uiIndex >= uiValidateFrom && uiIndex < uiValidateTo)
+		{
+			if (!ValidateLooseCell(uiKey, cell, v3Offset))
+			{
+				retired.push_back(uiKey);
+				continue;
+			}
+		}
 
 		/* Level space back to the window's grid space. */
-		Vector3 v3Min = cell.second.Min - v3Offset;
-		Vector3 v3Max = cell.second.Max - v3Offset;
+		Vector3 v3Min = cell.Bounds.Min - v3Offset;
+		Vector3 v3Max = cell.Bounds.Max - v3Offset;
 
 		if (v3Max.x < 0.f || v3Max.y < 0.f || v3Max.z < 0.f ||
 			v3Min.x > v3WindowMax.x || v3Min.y > v3WindowMax.y || v3Min.z > v3WindowMax.z)
 			continue;
-
-		if (bValidate &&
-			v3Min.x >= 0.f && v3Min.y >= 0.f && v3Min.z >= 0.f &&
-			v3Max.x <= v3WindowMax.x && v3Max.y <= v3WindowMax.y && v3Max.z <= v3WindowMax.z)
-		{
-			Vector3 v3TightMin(0.f);
-			Vector3 v3TightMax(0.f);
-
-			if (!FindOccupiedBrickBounds(brickGrid, v3BrickGrid, v3Min, v3Max, v3TightMin, v3TightMax))
-			{
-				retired.push_back(cell.first);
-				continue;
-			}
-
-			/* Back to level space, where the registry lives. */
-			cell.second.Min = v3TightMin + v3Offset;
-			cell.second.Max = v3TightMax + v3Offset;
-
-			v3Min = v3TightMin;
-			v3Max = v3TightMax;
-		}
 
 		/* Same one-voxel slack the renderer proxies carry: a voxel at index v
 		   occupies [v, v + 1), and the ray wants to enter off the geometry. */
@@ -989,6 +1339,9 @@ void RenderSystem::SubmitLooseVoxelProxies(bool bAudit)
 
 	for (uint32_t uiKey : retired)
 		m_LooseVoxelCells.erase(uiKey);
+
+	if (!retired.empty())
+		m_bLooseCellKeysDirty = true;
 }
 
 /* Bounds of the occupied bricks inside a window-space box, or false if none of

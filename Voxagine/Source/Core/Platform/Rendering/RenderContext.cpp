@@ -86,22 +86,22 @@ void RenderContext::Initialize()
 	// Create the loop on the XY plane first
 	for (float a = 0.f; a < twoPi; a += step)
 	{
-		m_UnitDebugSphere.push_back(Vector3(std::cosf(a), std::sinf(a), 0.f));
-		m_UnitDebugSphere.push_back(Vector3(std::cosf(a + step), std::sinf(a + step), 0.f));
+		m_UnitDebugSphere.push_back(Vector3(std::cos(a), std::sin(a), 0.f));
+		m_UnitDebugSphere.push_back(Vector3(std::cos(a + step), std::sin(a + step), 0.f));
 	}
 
 	// Next on the XZ plane
 	for (float a = 0.f; a < twoPi; a += step)
 	{
-		m_UnitDebugSphere.push_back(Vector3(std::cosf(a), 0.f, std::sinf(a)));
-		m_UnitDebugSphere.push_back(Vector3(std::cosf(a + step), 0.f, std::sinf(a + step)));
+		m_UnitDebugSphere.push_back(Vector3(std::cos(a), 0.f, std::sin(a)));
+		m_UnitDebugSphere.push_back(Vector3(std::cos(a + step), 0.f, std::sin(a + step)));
 	}
 
 	// Finally on the YZ plane
 	for (float a = 0.f; a < twoPi; a += step)
 	{
-		m_UnitDebugSphere.push_back(Vector3(0.f, std::cosf(a), std::sinf(a)));
-		m_UnitDebugSphere.push_back(Vector3(0.f, std::cosf(a + step), std::sinf(a + step)));
+		m_UnitDebugSphere.push_back(Vector3(0.f, std::cos(a), std::sin(a)));
+		m_UnitDebugSphere.push_back(Vector3(0.f, std::cos(a + step), std::sin(a + step)));
 	}
 #endif
 }
@@ -211,7 +211,6 @@ void RenderContext::Submit(StructuredVoxelBuffer& renderData)
 
 void RenderContext::SortAABBs()
 {
-	Vector3 invRayDirection = m_CameraData.m_ModelView * Vector4(0.0f, 0.0f, 1.0f, 0.f);
 	//Vector3 invRayDirection = Vector3::Transform(Vector3(0.0f, 0.0f, 1.0f), m_CameraData.m_ModelView);
 	//CLEANUP
 
@@ -226,10 +225,6 @@ void RenderContext::EnableDebugLines(bool bEnabled)
 {
 	m_bDebugEnabled = bEnabled;
 	m_bDebugCleared = false;
-
-#if defined(_DEBUG) || defined(EDITOR)
-	ForceUpdate();
-#endif
 }
 
 bool RenderContext::ResizeWorldBuffer()
@@ -436,17 +431,13 @@ bool RenderContext::Present()
 	Buffer* pAABBBuffer = m_mBuffers["AABB Data"].get();
 
 	Buffer* pSpriteBuffer = m_mBuffers["Sprite Data"].get();
-	Buffer* pVoxelBakeBuffer = m_mBuffers["Bake Command Data"].get();
 
 	PRenderPass* pParticlePass = m_pRenderPasses["Particles"].get();
 	PRenderPass* pVoxelPass = m_pRenderPasses["Voxel"].get();
 	PRenderPass* pUIPass = m_pRenderPasses["UI Renderer"].get();
 	PRenderPass* pPostProcessingPass = m_pRenderPasses["Post Processing"].get();
 
-	PComputePass* pVoxelBakePass = m_pComputePasses["Voxel Baker"].get();
-
 	PCommandEngine* pVDirectEngine = m_pCommandEngines["VDirect"].get();
-	PCommandEngine* pComputeEngine = m_pCommandEngines["Compute"].get();
 
 	PCommandEngine* pDirectEngine = m_pCommandEngines["Direct"].get();
 
@@ -584,9 +575,10 @@ bool RenderContext::Present()
 		}
 
 		// AABB buffer. Uploaded every frame: the list is rebuilt each frame and
-		// entity AABBs move without necessarily setting m_bWorldUpdated, so
-		// gating the upload on it rendered from a stale list. It is ~32 bytes
-		// per drawn model, so the upload is not worth guarding.
+		// entity AABBs move whether or not any voxel did, so gating the upload
+		// on a "the world changed" flag rendered from a stale list. It is ~32
+		// bytes per drawn model, so the upload is not worth guarding - which is
+		// the reason that flag ended up with no readers at all (ledger M1).
 		{
 			pAABBBuffer->Clear();
 			pAABBBuffer->AddStructuredData(
@@ -732,7 +724,6 @@ void RenderContext::InitializeRenderLoop()
 
 	Buffer* pCameraBuffer = nullptr;
 	Buffer* pAABBBuffer = nullptr;
-	Buffer* pBakeCommandBuffer = nullptr;
 
 	Mapper* pParticleMapper = nullptr;
 	Buffer* pSpriteBuffer = nullptr;
@@ -772,7 +763,6 @@ void RenderContext::InitializeRenderLoop()
 		bakeCmdBufInfo.m_Type = Buffer::E_CONSTANT;
 
 		m_mBuffers.emplace(bakeCmdBufInfo.m_Name, std::make_unique<Buffer>(Get(), bakeCmdBufInfo));
-		pBakeCommandBuffer = m_mBuffers[bakeCmdBufInfo.m_Name].get();
 	}
 
 	// Sprite buffer

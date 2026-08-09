@@ -143,7 +143,7 @@ void VoxAnimator::SetCurrentAnimationFile(std::string filePath)
 
 bool VoxAnimator::HasAnimation(std::string filePath)
 {
-	return (GetAnimationIndex(filePath) != -1);
+	return (GetAnimationIndex(filePath) != UINT_MAX);
 }
 
 unsigned int VoxAnimator::GetAnimationIndex(std::string filePath)
@@ -238,7 +238,7 @@ VoxModel * VoxAnimator::GetActiveAnimationModel()
 
 void VoxAnimator::AddAnimationFile(std::string animationFile, unsigned int animationFileIndex)
 {
-	if (animationFileIndex >= 0 && animationFileIndex <= m_AnimationFiles.size())
+	if (animationFileIndex <= m_AnimationFiles.size())
 	{
 		if (animationFileIndex == m_AnimationFiles.size())
 		{
@@ -271,7 +271,7 @@ void VoxAnimator::AddAnimationFile(std::string animationFile, unsigned int anima
 
 void VoxAnimator::RemoveAnimationFile(unsigned int animationFileIndex)
 {
-	if (animationFileIndex >= 0 && animationFileIndex < m_AnimationFiles.size())
+	if (animationFileIndex < m_AnimationFiles.size())
 	{
 		if (m_AnimationModels[animationFileIndex] != nullptr)
 			m_AnimationModels[animationFileIndex]->Release();
@@ -301,9 +301,6 @@ void VoxAnimator::CheckCurrentAnimation()
 {
 	if (m_CurrentAnimationIndex >= m_AnimationFiles.size())
 		m_CurrentAnimationIndex = static_cast<uint32_t>((m_AnimationFiles.size() == 0) ? 0 : m_AnimationFiles.size() - 1);
-
-	if (m_CurrentAnimationIndex < 0)
-		m_CurrentAnimationIndex = 0;
 
 	SetToCurrentAnimation(0);
 }

@@ -1,7 +1,11 @@
 #pragma once
-#pragma warning(push, 0) 
+#ifdef _MSC_VER
+#pragma warning(push, 0)
+#endif
 #include <External/moodycamel/concurrentqueue.h>
+#ifdef _MSC_VER
 #pragma warning(pop)
+#endif
 
 #include "Core/Threading/Job.h"
 #include "Core/Threading/GenericJob.h"

@@ -307,11 +307,6 @@ bool AudioSystem::StopIfEnded(AudioSource* pSource, bool bApplyToSystem /*= true
 
 			float fPosition = pSource->GetPosition(it.first, i);
 
-			if (fPosition != 0.0f)
-			{
-				int i = 9;
-			}
-
 			if (fPosition < 0 || fPosition < it.first->GetLength())
 			{
 				bAllEnded = false;

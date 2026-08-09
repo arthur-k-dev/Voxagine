@@ -198,8 +198,6 @@ void PropertyRenderer::InitializePropertyLookUp()
 	// IMGUI Component Rendering
 	CreatePropertyLookUp<Component>([=](rttr::instance& rInstance, rttr::property& rProperty, const std::string& rLabel, bool* bIsElementAndChanged)
 	{
-		const ImGuiInputTextFlags PropertyFlags = ImGuiInputTextFlags_ReadOnly;
-
 		rttr::variant rTempValueVar = rProperty.get_value(rInstance);
 		rttr::instance rCompInstance = rTempValueVar;
 
@@ -399,7 +397,6 @@ void PropertyRenderer::InitializePropertyLookUp()
 			const std::string SubclassSetter = "SubclassSetter";
 			const ImGuiInputTextFlags PropertyFlags = ImGuiInputTextFlags_ReadOnly;
 
-			const ImGuiID PopUpID = ImGui::GetID(SubclassSetter.c_str());
 			const bool PopUpOpen = ImGui::IsPopupOpen(SubclassSetter.c_str());
 
 			const auto derived_classes = TempValueVar.get_type().invoke("GetDerivedTypes", TempValueVar, {}).get_value<rttr::array_range<rttr::type>>();
@@ -978,7 +975,7 @@ void PropertyRenderer::InitializePropertyLookUp()
 				Render(vClassInstance, prop, elPropName, bIsElementAndChanged);
 			}
 
-			bool b = TempValueVar.convert(rArrView.get_value_type());
+			TempValueVar.convert(rArrView.get_value_type());
 			if (!rArrView.set_value(uiIndex, TempValueVar))
 			{
 				m_pEditor->GetApplication()->GetLoggingSystem().Log(LogLevel::LOGLEVEL_WARNING, "PropertyRenderer", "Unable to replace element inside vector! : " + rLabel);
@@ -1294,8 +1291,6 @@ void PropertyRenderer::RenderArrayProperty(rttr::instance& rInstance, rttr::prop
 				// Render if we have a VClass 
 				if (isVClass && ImGui::CollapsingHeader((strIndex + "##").c_str()))
 				{
-
-					rttr::type arrType = arrView.get_value(i).get_type();
 
 					m_ArrayPropertyLookUp[rRenderType](rInstance, rProperty, arrView, i, Label, &bIsChanged);
 
@@ -1614,8 +1609,6 @@ void PropertyRenderer::RenderArrayResource(const std::string & ResourceExtension
 				ImGui::Text("%s", strIndex.c_str());
 				ImGui::NextColumn();
 
-				rttr::type arrType = arrView.get_value(i).get_type();
-
 				const bool arrElementChanged = m_ArrayResourcePropertyLookUp[ResourceExtension](rInstance, rProperty, arrView, i, Label);
 
 				bIsChanged = bIsChanged || arrElementChanged;
@@ -1644,7 +1637,6 @@ void PropertyRenderer::CreateDefaultResourcePropertyLookUp(const std::string & R
 		// Resource title
 		const std::string ResourceSetter = ResourceExtension + "Setter" + rLabel;
 
-		const ImGuiID PopUpID = ImGui::GetID(ResourceSetter.c_str());
 		const bool PopUpOpen = ImGui::IsPopupOpen(ResourceSetter.c_str());
 
 		const std::string filename = GetResourceFileName(rProperty.get_value(rInstance).to_string());
@@ -1719,7 +1711,6 @@ void PropertyRenderer::CreateDefaultResourcePropertyLookUp(const std::string & R
 		// Resource title
 		std::string ResourceSetter = "###_" + ResourceExtension + "Setter" + rInstance.get_derived_type().get_name().to_string() + rProperty.get_value(rInstance).to_string() + "_ArrayIndex" + std::to_string(uiIndex);
 
-		const ImGuiID PopUpID = ImGui::GetID(ResourceSetter.c_str());
 		const bool PopUpOpen = ImGui::IsPopupOpen(ResourceSetter.c_str());
 
 		const std::string filename = GetResourceFileName(rArrView.get_value(uiIndex).to_string());

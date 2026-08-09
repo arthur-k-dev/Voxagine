@@ -54,9 +54,14 @@
 class VoxelBrickGrid
 {
 public:
-	static const uint32_t k_uiBrickShift = 3;
-	static const uint32_t k_uiBrickSize = 1u << k_uiBrickShift;
-	static const uint32_t k_uiBrickVolume = k_uiBrickSize * k_uiBrickSize * k_uiBrickSize;
+	/* constexpr, not const: anything that takes one of these by reference - a
+	   test assertion, vector::assign, unordered_map::emplace - odr-uses it and
+	   needs a definition. Release inlines every use and links; Debug does not.
+	   This tree has shipped that difference twice (see CLAUDE.md on the owner
+	   slot constants); constexpr is implicitly inline in C++17 and ends it. */
+	static constexpr uint32_t k_uiBrickShift = 3;
+	static constexpr uint32_t k_uiBrickSize = 1u << k_uiBrickShift;
+	static constexpr uint32_t k_uiBrickVolume = k_uiBrickSize * k_uiBrickSize * k_uiBrickSize;
 
 	/* Reallocates for a new window size and zeroes every count. Touches CPU
 	   state only and drops the mirror pointers - the caller resizes the brick
@@ -201,9 +206,16 @@ public:
 	   bricks that disagreed. */
 	uint32_t Validate(bool bBack, const uint32_t* pVoxelData) const;
 
+	/* Order-independent-free FNV-1a over every count and every occupancy word,
+	   for DESTRUCTION_PLAN.md phase 0's gauntlet state hash. Two runs of the
+	   same script must produce the same value; a refactor that changes it has
+	   changed what the grid holds, which is the whole point of having it.
+	   Reads only CPU state, so it costs no PCIe traffic. */
+	uint64_t Hash(bool bBack) const;
+
 private:
-	static const uint32_t k_uiWordShift = 6;
-	static const uint32_t k_uiWordMask = (1u << k_uiWordShift) - 1u;
+	static constexpr uint32_t k_uiWordShift = 6;
+	static constexpr uint32_t k_uiWordMask = (1u << k_uiWordShift) - 1u;
 
 	uint32_t Index(bool bBack) const { return bBack ? (m_uiFront ^ 1u) : m_uiFront; }
 

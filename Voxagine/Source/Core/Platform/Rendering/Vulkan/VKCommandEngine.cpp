@@ -382,7 +382,25 @@ void VKCommandEngine::WaitForGPU()
 uint64_t VKCommandEngine::GetCompletedValue() const
 {
 	uint64_t uiValue = 0;
-	vkGetSemaphoreCounterValue(m_pDevice->Get(), m_Timeline, &uiValue);
+	const VkResult result = vkGetSemaphoreCounterValue(m_pDevice->Get(), m_Timeline, &uiValue);
+
+	/* The result was discarded here, and that mattered more than it looks. On
+	   VK_ERROR_DEVICE_LOST this leaves uiValue at 0, so GetCompletedValue() <
+	   GetValue() stays true forever and RenderContext reports "GPU has not
+	   completed for 600 frames" - for a device that no longer exists. A dead
+	   GPU and a busy one were indistinguishable from inside the engine, which
+	   is why every "the GPU is stuck on slow work" reading of that diagnostic
+	   was unfalsifiable. Say which it is. */
+	if (result != VK_SUCCESS && !m_bDeviceLostReported)
+	{
+		m_bDeviceLostReported = true;
+
+		fprintf(stderr,
+		        "[vulkan] '%s' timeline query failed (%d)%s - any [stall] line after this is a "
+		        "dead device, not a slow frame\n",
+		        m_Info.m_Name.c_str(), result,
+		        result == VK_ERROR_DEVICE_LOST ? " VK_ERROR_DEVICE_LOST" : "");
+	}
 
 	return uiValue;
 }

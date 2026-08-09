@@ -10,14 +10,14 @@
 namespace pathfinding
 {
 	Chunk::Chunk() :
+		m_bGenerateVerticalNodes(true),
 		m_worldPos(-1, -1, -1),
-		m_parentGrid(nullptr),
-		m_bGenerateVerticalNodes(true)
+		m_parentGrid(nullptr)
 	{}
 
 	Chunk::Chunk(ChunkGrid& grid, IVector3 worldPos, bool generateVerticalNodes, bool rebuildNodes) :
-		m_parentGrid(&grid),
-		m_bGenerateVerticalNodes(generateVerticalNodes)
+		m_bGenerateVerticalNodes(generateVerticalNodes),
+		m_parentGrid(&grid)
 	{
 		m_worldPos.x = ChunkGrid::getGridPos(worldPos).x * (int)(g_CHUNKSIZE * g_NODESIZE);
 		m_worldPos.z = ChunkGrid::getGridPos(worldPos).y * (int)(g_CHUNKSIZE * g_NODESIZE);
@@ -43,10 +43,6 @@ namespace pathfinding
 		{
 			// Render node connections
 			color = VColors::Red;
-			Node* northNode = node.getNeighbourNode(Node::NORTH, *m_parentGrid);
-			Node* eastNode = node.getNeighbourNode(Node::EAST, *m_parentGrid);
-			Node* southNode = node.getNeighbourNode(Node::SOUTH, *m_parentGrid);
-			Node* westNode = node.getNeighbourNode(Node::WEST, *m_parentGrid);
 
 			// DO NOT UNCOMMENT, CAUSES MEMORY LEAKS
 			//if (northNode != nullptr) renderer.AddLine(node.m_worldPos, northNode->m_worldPos, color);
@@ -99,9 +95,9 @@ namespace pathfinding
 			chunkConnections->reserve(g_CHUNKSIZE * 4);
 
 		// Rebuild the grid for each chunk pos
-		for (int chunkZ = 0; chunkZ < g_CHUNKSIZE; chunkZ++)
+		for (unsigned int chunkZ = 0; chunkZ < g_CHUNKSIZE; chunkZ++)
 		{
-			for (int chunkX = 0; chunkX < g_CHUNKSIZE; chunkX++)
+			for (unsigned int chunkX = 0; chunkX < g_CHUNKSIZE; chunkX++)
 			{
 				rebuild(voxelGrid, IVector2(chunkX, chunkZ), chunkConnections);
 			}
@@ -168,8 +164,8 @@ namespace pathfinding
 
 	NodeContainer * Chunk::getNodeContainer(int chunkPosX, int chunkPosZ)
 	{
-		if (chunkPosX < 0 || chunkPosX >= g_CHUNKSIZE ||
-			chunkPosZ < 0 || chunkPosZ >= g_CHUNKSIZE)
+		if (chunkPosX < 0 || chunkPosX >= static_cast<int>(g_CHUNKSIZE) ||
+			chunkPosZ < 0 || chunkPosZ >= static_cast<int>(g_CHUNKSIZE))
 			return nullptr;
 		return &m_nodeGridLookup[chunkPosZ * g_CHUNKSIZE + chunkPosX];
 	}
@@ -266,9 +262,9 @@ namespace pathfinding
 		// Check each layer of voxels
 		for (int y = height - 1; y >= 0; y -= m_parentGrid->m_iGridCoarseness)
 		{
-			for (int z = 0; z < g_NODESIZE; z += m_parentGrid->m_iGridCoarseness)
+			for (int z = 0; z < static_cast<int>(g_NODESIZE); z += m_parentGrid->m_iGridCoarseness)
 			{
-				for (int x = 0; x < g_NODESIZE; x += m_parentGrid->m_iGridCoarseness)
+				for (int x = 0; x < static_cast<int>(g_NODESIZE); x += m_parentGrid->m_iGridCoarseness)
 				{
 					IVector3 voxelPos = nodePos + IVector3(x, y, z);
 
@@ -293,13 +289,6 @@ namespace pathfinding
 		IVector3 distance = node1.m_worldPos - node2.m_worldPos;
 		if (glm::length(Vector2(distance.x, distance.z)) != g_NODESIZE)
 			return false;
-
-		// Get direction
-		Node::Directions direction;
-		if (distance.y > 0) direction = Node::NORTH;
-		else if (distance.x > 0) direction = Node::EAST;
-		else if (distance.y < 0) direction = Node::SOUTH;
-		else if (distance.x < 0) direction = Node::WEST;
 
 		// Get top and bottom node
 		const Node* topNode = &node1;

@@ -92,7 +92,7 @@ void StartToJoinPlayerComponent::Tick(float fDeltaTime)
 
 		// Increment join visual
 		m_iCurrentStartToJoinVisual++;
-		if (m_iCurrentStartToJoinVisual >= m_pStartToJoinVisuals.size())
+		if (m_iCurrentStartToJoinVisual >= static_cast<int>(m_pStartToJoinVisuals.size()))
 			m_iCurrentStartToJoinVisual = 0;
 	}
 
@@ -158,7 +158,7 @@ void StartToJoinPlayerComponent::SetJoinVisualActive(int index)
 		entity->SetEnabled(index < 0);
 	
 	for (size_t i = 0; i < m_pStartToJoinVisuals.size(); i++)
-		m_pStartToJoinVisuals[i]->SetEnabled(i == index);
+		m_pStartToJoinVisuals[i]->SetEnabled(static_cast<int>(i) == index);
 }
 
 void StartToJoinPlayerComponent::SetPlayerAnimIndex(unsigned int animIndex)

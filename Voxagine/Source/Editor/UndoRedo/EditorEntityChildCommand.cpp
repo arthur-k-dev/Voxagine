@@ -38,7 +38,7 @@ void AttachEntityToParent(World * pWorld, uint64_t EntityID, uint64_t ParentEnti
 void DetachEntityFromParent(World * pWorld, uint64_t EntityID, uint64_t LastParentEntityID)
 {
 	Entity* pTargetEntity = pWorld->FindEntity(EntityID);
-	Entity* pParentEntity = (LastParentEntityID != -1) ? pWorld->FindEntity(LastParentEntityID) : nullptr;
+	Entity* pParentEntity = (LastParentEntityID != static_cast<uint64_t>(-1)) ? pWorld->FindEntity(LastParentEntityID) : nullptr;
 
 	pTargetEntity->SetParent(pParentEntity);
 }

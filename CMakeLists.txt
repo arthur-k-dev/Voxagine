@@ -21,6 +21,7 @@ option(VOXAGINE_CHECK_RTTR    "Compile the reflection TU to prove RTTR works" OF
 option(VOXAGINE_ENABLE_FMOD   "Enable FMOD audio (needs the FMOD Linux SDK)" OFF)
 option(VOXAGINE_ENABLE_OPTICK "Enable Optick profiling" OFF)
 option(VOXAGINE_ENABLE_NFD    "Enable native file dialogs" OFF)
+option(VOXAGINE_BUILD_TESTS   "Build the gtest suite (needs VOXAGINE_BUILD_ENGINE)" OFF)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -75,22 +76,12 @@ target_compile_options(voxagine_warnings INTERFACE
     $<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang>:-Wall;-Wextra;-Wno-unused-parameter>
 )
 
+# Tests are one target, built by VOXAGINE_BUILD_TESTS further down. There used
+# to be two standalone executables here as well - a worker-count test and a
+# DateTime test, each with its own main - which ran without the engine and so
+# without VOXAGINE_BUILD_TESTS. Both are checks in the one suite now; a second
+# way to write a test is a way that gets forgotten.
 include(CTest)
-if(BUILD_TESTING)
-    add_executable(voxagine_job_manager_config_test
-        UnitTesting/UnitTests/Source/Core/Threading/JobManagerConfigTest.cpp
-    )
-    target_include_directories(voxagine_job_manager_config_test PRIVATE ${VOXAGINE_SOURCE_DIR})
-    target_link_libraries(voxagine_job_manager_config_test PRIVATE voxagine_warnings)
-    add_test(NAME job_manager_worker_count COMMAND voxagine_job_manager_config_test)
-
-    add_executable(voxagine_date_time_test
-        UnitTesting/UnitTests/Source/Core/Utils/DateTimeTest.cpp
-    )
-    target_include_directories(voxagine_date_time_test PRIVATE ${VOXAGINE_SOURCE_DIR})
-    target_link_libraries(voxagine_date_time_test PRIVATE voxagine_warnings)
-    add_test(NAME date_time_utc_conversion COMMAND voxagine_date_time_test)
-endif()
 
 # ---------------------------------------------------------------------------
 # Vulkan backend
@@ -171,6 +162,27 @@ if(VOXAGINE_BUILD_ENGINE)
         ${VOXAGINE_SOURCE_DIR}/External/STB/image_helper.c
         ${VOXAGINE_SOURCE_DIR}/External/STB/stb_image_aug.c
         PROPERTIES LANGUAGE CXX
+    )
+
+    # Vendored sources are compiled straight into the voxagine target (see
+    # EngineSources.cmake), so they inherit -Wall -Wextra from voxagine_warnings
+    # like everything else - unlike External/*.h, which is only ever reached by
+    # #include and stays out of the way on its own. -w keeps our own warning set
+    # meaningful without patching code that isn't ours to fix.
+    set_source_files_properties(
+        ${VOXAGINE_SOURCE_DIR}/External/STB/image_DXT.c
+        ${VOXAGINE_SOURCE_DIR}/External/STB/image_helper.c
+        ${VOXAGINE_SOURCE_DIR}/External/STB/stb_image_aug.c
+        ${VOXAGINE_SOURCE_DIR}/External/imgui/imgui.cpp
+        ${VOXAGINE_SOURCE_DIR}/External/imgui/imgui_demo.cpp
+        ${VOXAGINE_SOURCE_DIR}/External/imgui/imgui_draw.cpp
+        ${VOXAGINE_SOURCE_DIR}/External/imgui/imgui_dropdown.cpp
+        ${VOXAGINE_SOURCE_DIR}/External/imgui/imgui_stdlib.cpp
+        ${VOXAGINE_SOURCE_DIR}/External/imgui/imgui_widgets.cpp
+        ${VOXAGINE_SOURCE_DIR}/External/imguizmo/ImGuizmo.cpp
+        ${VOXAGINE_SOURCE_DIR}/External/imguizmo/ImSequencer.cpp
+        ${VOXAGINE_SOURCE_DIR}/External/teenypath/teenypath.cpp
+        PROPERTIES COMPILE_OPTIONS "-w"
     )
 
     target_include_directories(voxagine PUBLIC ${VOXAGINE_SOURCE_DIR})
@@ -261,7 +273,62 @@ if(VOXAGINE_BUILD_ENGINE)
     # EDITOR itself is defined on the voxagine library above, PUBLIC, so both
     # the library and this executable see it.
 
-    add_dependencies(BitBuster voxagine_shaders_game)
+    # Guarded because voxagine_add_shaders returns without creating the target
+    # when dxc is missing, and add_dependencies on a target that does not exist
+    # is a generate-time error. That is not hypothetical: it is what stopped CI
+    # from building the engine at all, and CI has no Vulkan SDK. The executable
+    # still links; it just cannot render until someone compiles the shaders.
+    if(TARGET voxagine_shaders_game)
+        add_dependencies(BitBuster voxagine_shaders_game)
+    endif()
+endif()
+
+# ---------------------------------------------------------------------------
+# Tests
+#
+# One target, three modes: `checks`, `scenarios` and `perf`. See Tests/README.md
+# for what each is for and how to add a case to it.
+#
+# It links the engine library and runs with no GPU and no display, which is what
+# lets CI cover it - see Tests/Harness/VoxelWorldHarness.h for why the voxel
+# write path is reachable without either.
+#
+# Not linked WHOLE_ARCHIVE, unlike BitBuster: the tests do not read Settings.vgs
+# and do not need the reflection-only translation units dragged in. If a test
+# ever does need RTTR registrations, it needs the same treatment and the comment
+# on BitBuster explains why.
+#
+# No GTest dependency any more. The assertion macros in Tests/Framework/Check.h
+# are a few dozen lines and cover what the suite used, and one registry that can
+# hold checks, scenarios, invariants and benchmarks is worth more here than a
+# third-party one that can only hold the first.
+# ---------------------------------------------------------------------------
+if(VOXAGINE_BUILD_TESTS)
+    if(NOT VOXAGINE_BUILD_ENGINE)
+        message(FATAL_ERROR "VOXAGINE_BUILD_TESTS needs VOXAGINE_BUILD_ENGINE=ON")
+    endif()
+
+    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/TestSources.cmake)
+
+    add_executable(voxagine_tests ${VOXAGINE_TEST_SOURCES})
+
+    target_include_directories(voxagine_tests PRIVATE ${VOXAGINE_TEST_DIR})
+    target_link_libraries(voxagine_tests PRIVATE voxagine voxagine_warnings)
+
+    # Assertions about one unit at a time. Seconds.
+    add_test(NAME checks COMMAND voxagine_tests checks)
+
+    # Every scenario against every invariant, twice each for determinism. Under
+    # a minute in Release and several times that in Debug, which is the price of
+    # running the real pipeline over real worlds rather than a mock of it.
+    add_test(NAME scenarios COMMAND voxagine_tests scenarios)
+
+    # The benchmarks, gated on their machine-independent work counters. Timings
+    # are printed but cannot fail the run: the baseline file holds only the
+    # exact counts, precisely so this test means the same thing on a CI runner
+    # as it does on a workstation. Framework/Benchmark.h has the reasoning.
+    add_test(NAME perf COMMAND voxagine_tests perf
+        --baseline ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Baselines/perf.txt)
 endif()
 
 # ---------------------------------------------------------------------------

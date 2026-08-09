@@ -21,6 +21,21 @@ ParticlePass::ParticlePass(
 	RenderPassData.m_TargetFormat.push_back(E_R32_FLOAT);
 	RenderPassData.m_TopologyType = E_PRIMITIVE_TOPOLOGY_TRIANGLE;
 	RenderPassData.m_Topology = E_TOPOLOGY_TRIANGLELIST;
+	/* 24 of the shader's 36 indices, which is four of a cube's six faces: the
+	   bottom and the back are never drawn.
+	 *
+	 * DESTRUCTION_PLAN.md phase 3 asked for this to be either fixed or
+	 * explained, and it is closer to a real artefact than to an optimization.
+	 * Particles.vs.hlsl shades per face from a normal table, and the pass culls
+	 * nothing - so from behind or below a particle is not a hole, it is the
+	 * *inside* of its front and top faces, lit as though they were facing the
+	 * camera. Depth and silhouette are right; only the shading is.
+	 *
+	 * Left at 24 deliberately. Going to 36 is one number, but it is +50% vertex
+	 * invocations in a pass that can run 150,000 instances, and the difference
+	 * it buys is a lighting change nobody has reported - which needs somebody
+	 * watching the screen while the camera rotates to judge, not a unit test.
+	 * See the phase 3 notes. */
 	RenderPassData.m_uiVertexCount = 24;
 	RenderPassData.m_uiInstanceCount = 0;
 	RenderPassData.m_fRenderScale = pContext->GetPlatform()->GetApplication()->GetSettings().GetResolutionScale();

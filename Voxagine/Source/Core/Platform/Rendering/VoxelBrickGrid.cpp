@@ -386,6 +386,39 @@ uint32_t VoxelBrickGrid::Validate(bool bBack, const uint32_t* pVoxelData) const
 	return uiMismatches + uiBitMismatches;
 }
 
+uint64_t VoxelBrickGrid::Hash(bool bBack) const
+{
+	const uint32_t uiIndex = Index(bBack);
+
+	uint64_t uiHash = 1469598103934665603ull;
+
+	auto fold = [&uiHash](uint64_t uiValue)
+	{
+		for (uint32_t uiByte = 0; uiByte < 8; ++uiByte)
+		{
+			uiHash ^= (uiValue >> (uiByte * 8)) & 0xFFull;
+			uiHash *= 1099511628211ull;
+		}
+	};
+
+	fold(m_uiBrickCount);
+	fold(m_uiVoxelCount);
+
+	if (m_pCounts[uiIndex] != nullptr)
+	{
+		for (uint32_t uiBrick = 0; uiBrick < m_uiBrickCount; ++uiBrick)
+			fold(m_pCounts[uiIndex][uiBrick].load(std::memory_order_relaxed));
+	}
+
+	if (m_pOccupancy[uiIndex] != nullptr)
+	{
+		for (uint32_t uiWord = 0; uiWord < m_uiWordCount; ++uiWord)
+			fold(m_pOccupancy[uiIndex][uiWord].load(std::memory_order_relaxed));
+	}
+
+	return uiHash;
+}
+
 void VoxelBrickGrid::ReportUnderflow(uint32_t uiBrickID)
 {
 	static bool s_bWarned = false;

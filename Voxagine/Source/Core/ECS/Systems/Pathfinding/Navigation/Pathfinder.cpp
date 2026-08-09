@@ -31,19 +31,19 @@ namespace pathfinding
 {
 	Pathfinder::Pathfinder(Entity * pOwner) :
 		BehaviorScript(pOwner),
-		m_group(nullptr),
 		m_findPath(true),
-		m_bCanMoveDiagonal(true),
-		m_fMinVelocity(170.f),
-		m_fMaxVelocity(170.f),
-		m_desiredVelocity(0),
-		m_flockVelocityX(0),
-		m_flockVelocityY(0),
 		m_applyVelocity(true),
 		m_applyHeight(true),
-		m_bIsOnGrid(false),
+		m_group(nullptr),
+		m_fMinVelocity(170.f),
+		m_fMaxVelocity(170.f),
+		m_bCanMoveDiagonal(true),
 		m_bCohesion(false),
-		m_bClampVelocity(true)
+		m_bClampVelocity(true),
+		m_flockVelocityX(0),
+		m_flockVelocityY(0),
+		m_bIsOnGrid(false),
+		m_desiredVelocity(0)
 	{}
 
 	Pathfinder::~Pathfinder()

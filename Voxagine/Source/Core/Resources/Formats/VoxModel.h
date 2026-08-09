@@ -129,7 +129,7 @@ private:
 		int id;
 		int contentSize;
 		int childrenSize;
-		long end;
+		FSize end;
 	};
 
 	bool Read(FH fileHandle);

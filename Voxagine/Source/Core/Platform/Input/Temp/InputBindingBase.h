@@ -3,7 +3,7 @@
 #include <stdint.h>
 #include <string>
 
-#define INVALID_UNIQUE_INPUT_HANDLE 18446744073709551615
+#define INVALID_UNIQUE_INPUT_HANDLE 18446744073709551615ULL
 
 class InputBindingBase
 {

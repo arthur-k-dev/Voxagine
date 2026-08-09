@@ -132,7 +132,7 @@ void VoxModel::SaveBatch(FileSystem* pFileSystem, const std::string & path, cons
 
 		helper << VoxXYZI{ (int)frame.m_uiVoxelCount };
 
-		for ( auto i = 0; i < frame.m_uiVoxelCount; i++ )
+		for ( uint32_t i = 0; i < frame.m_uiVoxelCount; i++ )
 		{
 			auto& data = frame.m_pData[i];
 			helper << VoxVoxel(data.x, data.y, data.z, data.colorIndex);
@@ -178,7 +178,7 @@ void VoxModel::Save(FileSystem* pFileSystem, const std::string& path, UVector3 s
 	}
 
 	RGBA pallette[256];
-	memset(pallette, 5, 256);
+	memset(pallette, 5, sizeof(pallette));
 
 	helper << VoxRGBA(pallette);
 
@@ -188,7 +188,7 @@ void VoxModel::Save(FileSystem* pFileSystem, const std::string& path, UVector3 s
 void VoxModel::Save2(FileSystem* pFileSystem, const std::string& path, UVector3 size, const uint32_t* data)
 {
 #define UINT_TO_CHAR(x) { ((char*)&x)[0], ((char*)&x)[1], ((char*)&x)[2], ((char*)&x)[3] }
-#define COL_TO_CHAR(x) { static_cast<const char>((x >> 16) & 0xFF), static_cast<const char>((x >> 8) & 0xFF), static_cast<const char>(x & 0xFF), static_cast<const char>((x >> 24) & 0xFF) }
+#define COL_TO_CHAR(x) { static_cast<char>((x >> 16) & 0xFF), static_cast<char>((x >> 8) & 0xFF), static_cast<char>(x & 0xFF), static_cast<char>((x >> 24) & 0xFF) }
 #define COPY_MEM(x, y) std::memcpy(&output[memoryOffset], x, y); memoryOffset += y;
 #define SET_MEM(x, y) std::memset(&output[memoryOffset], x, y); memoryOffset += y;
 
@@ -263,7 +263,6 @@ void VoxModel::Save2(FileSystem* pFileSystem, const std::string& path, UVector3 
 	static const char* ID_SIZE = "SIZE";
 	static const char* ID_XYZI = "XYZI";
 	static const char* ID_RGBA = "RGBA";
-	static const char* ID_PACK = "PACK";
 
 	static const uint32_t uintSize = sizeof(uint32_t);
 
@@ -283,7 +282,7 @@ void VoxModel::Save2(FileSystem* pFileSystem, const std::string& path, UVector3 
 
 	// MAIN chunk
 	COPY_MEM(ID_MAIN, 4);
-	SET_MEM(NULL, 4);
+	SET_MEM(0, 4);
 
 	const char MAINSize[4] = UINT_TO_CHAR(totalChunks);
 
@@ -294,7 +293,7 @@ void VoxModel::Save2(FileSystem* pFileSystem, const std::string& path, UVector3 
 
 	const char MAINCSize[4] = UINT_TO_CHAR(MAINContentSize);
 	COPY_MEM(MAINCSize, 4);
-	SET_MEM(NULL, 4);
+	SET_MEM(0, 4);
 
 	const char ModelX[4] = UINT_TO_CHAR(size.x);
 	COPY_MEM(ModelX, 4);
@@ -310,7 +309,7 @@ void VoxModel::Save2(FileSystem* pFileSystem, const std::string& path, UVector3 
 
 	const char XYZISize[4] = UINT_TO_CHAR(XYZIContentSize);
 	COPY_MEM(XYZISize, 4);
-	SET_MEM(NULL, 4);
+	SET_MEM(0, 4);
 
 	const char VoxCount[4] = UINT_TO_CHAR(voxCount);
 	COPY_MEM(VoxCount, 4);
@@ -321,7 +320,7 @@ void VoxModel::Save2(FileSystem* pFileSystem, const std::string& path, UVector3 
 
 	const char PaletteCount[4] = UINT_TO_CHAR(PaletteDataSize);
 	COPY_MEM(PaletteCount, 4);
-	SET_MEM(NULL, 4);
+	SET_MEM(0, 4);
 
 	COPY_MEM(palette.data(), PaletteDataSize);
 
@@ -403,7 +402,7 @@ VoxFrame VoxModel::CreateHollowFrame(const VoxFrame& frame)
 	res.m_pData = new VoxFrame::Data[res.m_uiVoxelCount];
 	std::memcpy(res.m_pData, &newData[0], res.m_uiVoxelCount * sizeof(VoxFrame::Data));
 
-	return std::move(res);
+	return res;
 }
 
 void VoxModel::MakeHollow(const std::string& filePath)
@@ -537,8 +536,6 @@ void VoxModel::Reset()
 			maxZ = std::max(maxZ, y);
 		}
 
-		Vector3 v3Original = frame.m_v3Size;
-
 		frame.m_v3Size.x = std::min(frame.m_v3Size.x, (float)(maxX - minX) + 1.0f);
 		frame.m_v3Size.y = std::min(frame.m_v3Size.y, (float)(maxY - minY) + 1.0f);
 		frame.m_v3Size.z = std::min(frame.m_v3Size.z, (float)(maxZ - minZ) + 1.0f);
@@ -618,7 +615,6 @@ bool VoxModel::Read(FH fileHandle)
 	const int ID_SIZE = GetID('S', 'I', 'Z', 'E');
 	const int ID_XYZI = GetID('X', 'Y', 'Z', 'I');
 	const int ID_RGBA = GetID('R', 'G', 'B', 'A');
-	const int ID_PACK = GetID('P', 'A', 'C', 'K');
 
 	/* Magic number */
 	const int iMagic = ReadInt(fileHandle);
@@ -784,4 +780,6 @@ uint32_t VoxFrame::GetVoxelColor(uint8_t x, uint8_t y, uint8_t z) const
 		if (m_pPositions[i] == uiPosition)
 			return m_pColors[i];
 	}
+
+	return 0;
 }

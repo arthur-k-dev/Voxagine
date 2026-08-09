@@ -18,7 +18,7 @@ void SnappingTool::SetUsingIndex(ImGuizmo::OPERATION TargetOperation, size_t Usi
 	if (TargetOperation == ImGuizmo::BOUNDS)
 		return;
 
-	if (UsingIndex >= 0 && UsingIndex <= 2)
+	if (UsingIndex <= 2)
 	{
 		m_ActiveSnappingValues[TargetOperation] = UsingIndex;
 	}
@@ -93,7 +93,7 @@ SnappingTool::SnappingValues* SnappingTool::GetSnappingValues(ImGuizmo::OPERATIO
 {
 	if (TargetOperation == ImGuizmo::TRANSLATE)
 	{
-		if (UsingIndex >= 0 && UsingIndex <= 2)
+		if (UsingIndex <= 2)
 			return &TranslateValues[UsingIndex];
 	}
 

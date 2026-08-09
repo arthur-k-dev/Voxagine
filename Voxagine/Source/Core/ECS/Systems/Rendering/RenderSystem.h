@@ -6,6 +6,7 @@
 
 #include "DebugRenderer.h"
 #include "VoxelBaker.h"
+#include "Core/Voxels/VoxelEditBatch.h"
 
 class SpriteRenderer;
 class TextRenderer;
@@ -15,7 +16,7 @@ struct Voxel;
 class VoxRenderer;
 class VoxAnimator;
 
-class RenderSystem : public ComponentSystem
+class RenderSystem : public ComponentSystem, public ILooseVoxelSink
 {
 	friend class PhysicsSystem;
 	friend class World;
@@ -51,6 +52,13 @@ public:
 	   Triggered by VOXAGINE_VOXEL_AUDIT=<seconds>. */
 	void AuditVoxelRepresentation();
 
+	/* DESTRUCTION_PLAN.md phase 0. Every representation of a voxel, checked
+	   against every other one: CPU colour, mapped GPU word, occupancy bitmap
+	   and brick count. Triggered periodically by VOXAGINE_SYNC_AUDIT=<seconds>
+	   and available from the editor's View menu, which is where the brick half
+	   of it already lived. See the definition. */
+	void AuditRepresentationSync();
+
 	void EnableDebugLines(bool bEnabled);
 
 	void SetFadeTime(float fFadeTime);
@@ -71,7 +79,17 @@ public:
 	   that comes and goes with the camera, not a steady absence. A particle
 	   baking itself into the world where it landed is the writer this exists
 	   for: PhysicsSystem, bake-on-impact. */
-	void AddLooseVoxel(const Vector3& v3GridPosition);
+	void AddLooseVoxel(const Vector3& v3GridPosition) override;
+
+	/* Everything a VoxelEditBatch needs to maintain every representation of a
+	   voxel, assembled from the pieces only this system has together: the
+	   physics grid's CPU voxels and owner slots, the render context's mapping
+	   and brick grid, and itself as the loose-voxel sink.
+
+	   Any destruction, island conversion or bake-on-impact write goes through a
+	   batch built from this rather than through a pair of ModifyVoxel calls -
+	   see DESTRUCTION_PLAN.md phase 1 on why the pair was the problem. */
+	VoxelEditTarget MakeEditTarget();
 	bool FindOccupiedBrickBounds(VoxelBrickGrid& brickGrid, const UVector3& v3BrickGrid,
 	                             const Vector3& v3Min, const Vector3& v3Max,
 	                             Vector3& o_v3Min, Vector3& o_v3Max) const;
@@ -129,20 +147,62 @@ private:
 	/* One proxy per cell of loose voxels that overlaps the resident window. */
 	void SubmitLooseVoxelProxies(bool bAudit);
 
-	/* Loose voxels, bucketed into cells of this many voxels a side and stored
-	   as the tight box of what actually landed in each. Kept in *level* space,
-	   not window space, so the registry survives the window sliding and a chunk
-	   unloading and coming back - debris lives in the chunk's voxels and
-	   returns with it, and a window-space registry would have had to be shifted
-	   and would have lost anything that left and came back. */
-	static const uint32_t k_uiLooseCellShift = 5;
+	struct LooseVoxelCell;
 
-	std::unordered_map<uint32_t, Box> m_LooseVoxelCells;
+	/* Drops the recorded voxels a cell no longer has and re-tightens its box.
+	   False when nothing survives. */
+	bool ValidateLooseCell(uint32_t uiKey, LooseVoxelCell& cell, const Vector3& v3Offset);
+
+	void EvictFarthestLooseCell();
+
+	/* Loose voxels, bucketed into cells of this many voxels a side. Kept in
+	   *level* space, not window space, so the registry survives the window
+	   sliding and a chunk unloading and coming back - debris lives in the
+	   chunk's voxels and returns with it, and a window-space registry would
+	   have had to be shifted and would have lost anything that left and came
+	   back. */
+	static constexpr uint32_t k_uiLooseCellShift = 5;
+	static constexpr uint32_t k_uiLooseCellSize = 1u << k_uiLooseCellShift;
+
+	/* A cell records *which voxels* debris actually wrote, not just a box
+	   around them (ledger L1). Retirement used to ask the brick grid whether
+	   anything at all was still occupied nearby, which any writer satisfies -
+	   so a cell overlapping static geometry could never retire and its box
+	   re-tightened onto that geometry instead of onto its debris. Asking about
+	   the exact voxels answers the actual question.
+
+	   The offsets are cell-local, five bits an axis, so a voxel costs two bytes
+	   and the list is bounded by the cell rather than by the level. Kept sorted
+	   so re-registering the same voxel is idempotent. */
+	struct LooseVoxelCell
+	{
+		Box Bounds;
+		std::vector<uint16_t> Offsets;
+	};
+
+	std::unordered_map<uint32_t, LooseVoxelCell> m_LooseVoxelCells;
+
+	/* Iteration order for the round-robin validator. An unordered_map's order
+	   changes on rehash, so a cursor into it skipped cells arbitrarily and some
+	   were never judged at all (ledger L3). This is rebuilt only when the map
+	   changes size. */
+	std::vector<uint32_t> m_LooseCellKeys;
+	bool m_bLooseCellKeysDirty = true;
 
 	/* Round-robin cursor and per-frame budget for retiring loose cells. The
 	   registry is only bounded because of this - see SubmitLooseVoxelProxies. */
-	static const size_t k_uiLooseValidatePerFrame = 32;
+	static constexpr size_t k_uiLooseValidatePerFrame = 32;
 	size_t m_LooseValidateCursor = 0;
+
+	/* Cells outside the window cannot be judged - their voxels are not in the
+	   buffer to test - so a level walked far enough would accumulate them
+	   without bound (ledger L2). This is the backstop: past it, the cell
+	   farthest from the window is dropped. Dropping loses a proxy, not the
+	   debris; those voxels are still in the chunk and still drawn whenever some
+	   other model's box covers them, which is the pre-registry behaviour rather
+	   than a new defect. 8192 cells is a level 8x the largest one here, fully
+	   littered. */
+	static constexpr size_t k_uiMaxLooseCells = 8192;
 
 	/* False until Start() has wiped and sized the voxel buffer. See
 	   OnComponentAdded. */

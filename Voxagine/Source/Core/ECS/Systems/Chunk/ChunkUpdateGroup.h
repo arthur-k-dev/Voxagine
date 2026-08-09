@@ -26,9 +26,9 @@ public:
 
 		Item(Target _target, Chunk* _pChunk, UVector2 _gridIndex, bool bDone = true) :
 			ItemTarget(_target),
+			bIsDone(bDone),
 			pChunk(_pChunk),
-			GridTargetIndex(_gridIndex),
-			bIsDone(bDone) {}
+			GridTargetIndex(_gridIndex) {}
 
 		Target ItemTarget;
 		bool bIsDone = true;

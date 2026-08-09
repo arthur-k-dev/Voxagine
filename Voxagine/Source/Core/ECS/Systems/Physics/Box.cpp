@@ -30,7 +30,6 @@ bool Box::Intersects(const Box& boxB, Manifold& manifold)
 			overlapZ = boxB.Min.z - (Min.z + size.z);
 		else overlapZ = boxB.Min.z + boxBSize.z - Min.z;
 
-		Vector3 normal = Vector3(0.f);
 		if (fabs(overlapX) <= fabs(overlapY) && fabs(overlapX) <= fabs(overlapZ))
 		{
 			manifold.Overlap = fabs(overlapX);

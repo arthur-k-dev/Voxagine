@@ -70,6 +70,11 @@ public:
 	   ID3D12Fence::GetCompletedValue(). */
 	uint64_t GetCompletedValue() const;
 
+	/* Set by GetCompletedValue() when the timeline query fails, which after a
+	   device loss it does every frame. Mutable because that query is const and
+	   is the only place the failure is visible. */
+	mutable bool m_bDeviceLostReported = false;
+
 	/* Whole-resource copy, as ID3D12GraphicsCommandList::CopyResource was.
 	   Transitions both sides into the required layouts first. */
 	void CopyResource(VKResource* pDest, VKResource* pSource);

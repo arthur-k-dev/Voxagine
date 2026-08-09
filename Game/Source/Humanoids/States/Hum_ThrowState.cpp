@@ -11,7 +11,6 @@ Hum_ThrowState::Hum_ThrowState()
 void Hum_ThrowState::Start(Player* pOwner) 
 {
 	m_fTimer = pOwner->m_fThrowAnimationTime;
-	int subtract;
 	// Shoot
 	pOwner->GetComponent<VoxAnimator>()->SetFPS(pOwner->m_iThrowAnimationFPS);
 	if (!pOwner->m_throwAnimation.empty())

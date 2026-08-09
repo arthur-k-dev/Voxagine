@@ -130,8 +130,7 @@ void ChunkSystem::FixedTick(const GameTimer& fixedTimer)
 
 	Vector3 worldOffset = CalculateWorldOffset(cameraPosition);
 	Vector3 currWorldOffset = m_pWorld->GetPhysics()->GetVoxelGrid()->GetWorldOffset();
-	if (currWorldOffset != worldOffset && 
-		(m_ClampedCameraPosition.x >= 0 && m_ClampedCameraPosition.y >= 0) && 
+	if (currWorldOffset != worldOffset &&
 		(m_ClampedCameraPosition.x < m_uiNumChunkX && m_ClampedCameraPosition.y < m_uiNumChunkY))
 	{
 		IVector2 gridOffset(worldOffset.x / (float)m_ChunkSize.x, worldOffset.z / (float)m_ChunkSize.y);
@@ -238,12 +237,12 @@ void ChunkSystem::UpdateChunks(IVector2 gridOffset, ChunkUpdateGroup& group, boo
 	{
 		for (uint32_t y = 0; y < m_uiNumChunkY; ++y)
 		{
-			if (x < 0 || x >= m_uiNumChunkX || y < 0 || y >= m_uiNumChunkY) continue;
+			if (x >= m_uiNumChunkX || y >= m_uiNumChunkY) continue;
 
 			Chunk* pChunk = m_Chunks[x + y * m_uiNumChunkX];
 			if (!pChunk) continue;
 
-			if (x >= gridOffset.x && x < (gridOffset.x + 3) && y >= gridOffset.y && y < (gridOffset.y + 3))
+			if (x >= static_cast<uint32_t>(gridOffset.x) && x < static_cast<uint32_t>(gridOffset.x + 3) && y >= static_cast<uint32_t>(gridOffset.y) && y < static_cast<uint32_t>(gridOffset.y + 3))
 			{
 				UVector2 gridTarget(x - gridOffset.x, y - gridOffset.y);
 				if (!pChunk->IsTargetLoaded())
@@ -396,7 +395,6 @@ void ChunkSystem::UpdateGroup(ChunkUpdateGroup& group)
 
 				// Update offsets
 				m_pWorld->GetPhysics()->GetVoxelGrid()->SetWorldOffset(group.GetWorldOffset());
-				m_pWorld->GetApplication()->GetPlatform().GetRenderContext()->UpdateWorld();
 				m_pWorld->GetApplication()->GetPlatform().GetRenderContext()->GetVoxelMapper()->SwapBuffer();
 
 				// Update camera
@@ -417,6 +415,17 @@ void ChunkSystem::UpdateGroup(ChunkUpdateGroup& group)
 				{
 					if (item.ItemTarget == ChunkUpdateGroup::Item::Target::T_ASYNC_UNLOAD)
 					{
+						/* Detach before enqueuing, not after it finishes.
+						   UnloadAsync's job body calls EncodeVoxels, which
+						   frees this chunk's voxel vector and owner volume on
+						   a worker thread - and the grid still pointed at both,
+						   so a main-thread GetCell could read freed storage
+						   (ledger P7). Nulling the slot here, on this thread,
+						   before the job exists, means a reader sees "not
+						   resident" instead. Every grid accessor already
+						   handles that; since phase 1 they all check for it. */
+						m_pVoxelGrid->DetachChunkStorage(&item.pChunk->GetVoxelData());
+
 						item.bIsDone = false;
 						item.pChunk->UnloadAsync(&item, std::bind(&ChunkSystem::OnChunkUnloaded, this, std::placeholders::_1));
 					}
@@ -547,8 +556,6 @@ void ChunkSystem::ClearChunk(UVector2 gridTargetIndex)
 	std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
 	auto execTime = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
 	m_pWorld->GetApplication()->GetLoggingSystem().Log(LOGLEVEL_MESSAGE, "ChunkSystem", "Chunk clear (ms): " + std::to_string(execTime.count()));
-
-	m_pWorld->GetApplication()->GetPlatform().GetRenderContext()->UpdateWorld();
 }
 
 void ChunkSystem::OnChunkLoaded(ChunkUpdateGroup::Item* pUpdateItem)

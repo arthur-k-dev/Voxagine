@@ -237,7 +237,6 @@ bool VKRenderContext::Present()
 	}
 
 	m_uiFrameIndex = (m_uiFrameIndex + 1) % m_uiFrameCount;
-	m_bWorldUpdated = false;
 
 	return true;
 }

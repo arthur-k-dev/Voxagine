@@ -41,22 +41,22 @@ CameraMultiplayer::CameraMultiplayer(World * pWorld) :
 	m_fMaxTargetDistance(175),
 	m_pPlayer1(nullptr),
 	m_pPlayer2(nullptr),
-	m_pMainCamera(nullptr),
-	m_updateCamera(true),
-	m_targetPosition(0),
 	m_fMovementSmoothing(0.1f),
 	m_fZoomOutBound(0.1f),
 	m_fZoomInBound(0.2f),
 	m_fZoomSpeed(1.5f),
-	m_fTargetDistance(m_fMinTargetDistance),
 	m_fPlayerMovementBound(0.05f, 0.2f),
-	m_player1PrevPosition(-1),
-	m_player2PrevPosition(-1),
-	m_fShakeStrength(0.f),
+	m_fPlayerBoundOffset(0),
 	m_fMaxShakeAngle(10.f),
 	m_fShakeFalloff(1.f),
-	m_fPlayerBoundOffset(0),
-	m_ChunkLoadOffset(0, 0, 64)
+	m_ChunkLoadOffset(0, 0, 64),
+	m_pMainCamera(nullptr),
+	m_updateCamera(true),
+	m_targetPosition(0),
+	m_fTargetDistance(m_fMinTargetDistance),
+	m_player1PrevPosition(-1),
+	m_player2PrevPosition(-1),
+	m_fShakeStrength(0.f)
 {
 	SetName("CameraMultiplayerController");
 }

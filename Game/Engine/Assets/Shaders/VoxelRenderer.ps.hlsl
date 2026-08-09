@@ -13,7 +13,7 @@ RW_STRUCTURED_BUFFER(uint) voxelBrickData : register(u1);
 Texture2D<float4> particlePass : register(t1);
 Texture2D<float> particleDepthPass : register(t2);
 
-VOXEL_BUFFER voxelModelData[] : register(t4) {};
+VOXEL_BUFFER voxelModelData[] : register(t4);
 
 struct PS_in
 {
@@ -53,7 +53,7 @@ float4 main(PS_in IN) : TAR_OUT
 		primaryBrickSteps
 	);
 
-    if (particleDepth < distance(marchDiffuse.SmoothPosition + camOffset, camPosition.xyz) && particleColor.a != 0.0)
+    if (particleDepth < distance(marchDiffuse.SmoothPosition + camOffset.xyz, camPosition.xyz) && particleColor.a != 0.0)
     {
         return particleColor;
     }

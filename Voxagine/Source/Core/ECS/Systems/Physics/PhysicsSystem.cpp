@@ -22,6 +22,10 @@
 #include <iostream>
 
 #include "Core/Platform/Platform.h"
+#include "Core/Platform/Rendering/FrameProfiler.h"
+#include "Core/Particles/ParticleLanding.h"
+#include "Core/Particles/ParticleSimulation.h"
+#include "Core/Voxels/SphericalDestruction.h"
 #include "Core/Platform/Rendering/Passes/ParticlePass.h"
 #include "External/optick/optick.h"
 
@@ -34,11 +38,19 @@ const Vector3 PhysicsSystem::PARTICLE_GRAVITY = Vector3(0.f, -39.81, 0.f);
 #define PHYSICS_MAGICAL_EVERYTHING_SOLVING_VALUE 0.1f
 
 PhysicsSystem::PhysicsSystem(World* pWorld, Vector3 gridSize, uint32_t voxelSize, uint32_t uiMaxParticles, UVector3 chunkSize) :
-	ComponentSystem(pWorld),
-	m_ParticlePool(uiMaxParticles)
-
+	ComponentSystem(pWorld)
 {
 	m_uiMaxParticleCount = uiMaxParticles;
+
+	/* Split once, here, rather than raced for per tick. Both budgets together
+	   are the size of the GPU buffer, and the two sources write disjoint,
+	   contiguous ranges of it - debris from 0, emitters from the debris count -
+	   so the instanced draw sees one run and neither source can consume the
+	   other's share (ledger P14). */
+	const uint32_t uiDebrisBudget = static_cast<uint32_t>(uiMaxParticles * k_fDebrisBudgetShare);
+
+	m_Debris.Create(uiDebrisBudget);
+	m_uiEmitterBudget = uiMaxParticles - uiDebrisBudget;
 	m_pStaticEntityBody = new Entity(m_pWorld);
 	m_pStaticBody = m_pStaticEntityBody->AddComponent<PhysicsBody>();
 	m_pStaticBody->SetInvMass(0);
@@ -76,14 +88,17 @@ bool PhysicsSystem::CanProcessComponent(Component* pComponent)
 void PhysicsSystem::FixedTick(const GameTimer& fixedTimer)
 {
 	OPTICK_CATEGORY("Physics", Optick::Category::Physics);
+	ScopedFrameTimer tick("CPU PhysicsSystem::FixedTick");
+
 	ProcessIntegrityChecks();
 
-	/* Update particles */
+	/* Update particles. Debris first, so it occupies the GPU buffer from index
+	   zero and the emitters fill in above it - the two ranges are disjoint and
+	   contiguous, which is what an instanced draw needs and what stops either
+	   source from starving the other (ledger P14). */
 	m_uiActiveParticleCount = 0;
-	TickParticleSystems(fixedTimer);
 	SimulateParticles(static_cast<float>(fixedTimer.GetElapsedSeconds()));
-	if (m_uiActiveParticleCount > 0)
-		m_pWorld->GetApplication()->GetPlatform().GetRenderContext()->ForceUpdate();
+	TickParticleSystems(fixedTimer);
 
 	ResolveContinousCollision(static_cast<float>(fixedTimer.GetElapsedSeconds()));
 	TickBodies(fixedTimer);
@@ -163,8 +178,16 @@ void PhysicsSystem::OnComponentDestroyed(Component* pComponent)
 
 void PhysicsSystem::OnWorldPaused(World* pWorld)
 {
-	/* Positions queued against the paused world are not worth resuming. */
+	/* Positions queued against the paused world are not worth resuming, and
+	   neither is a half-converted island - nor, since phase 3, a pool full of
+	   debris whose level-space positions refer to a world that is about to stop
+	   existing (ledger P10). */
 	m_IntegrityChecker.Reset();
+	m_PendingIslands.clear();
+	m_PendingIslandVoxels.clear();
+	m_uiIslandCursor = 0;
+	m_Debris.Clear();
+	m_uiActiveParticleCount = 0;
 }
 
 void PhysicsSystem::OnWorldResumed(World* pWorld)
@@ -207,8 +230,24 @@ void PhysicsSystem::TickBodies(const GameTimer& fixedTimer)
 void PhysicsSystem::TickParticleSystems(const GameTimer& fixedTimer)
 {
 	OPTICK_EVENT();
+	ScopedFrameTimer timer("CPU PhysicsSystem::TickParticleSystems");
+
+	if (m_pGPUParticles == nullptr)
+		return;
+
 	GPUParticle* pGPUParticles = reinterpret_cast<GPUParticle*>(m_pGPUParticles->GetData());
+
+	if (pGPUParticles == nullptr)
+		return;
+
 	GPUParticle gpuParticle;
+
+	/* Emitters write the range *above* the debris, and only as far as their own
+	   budget. The old code shared one running counter with debris and consumed
+	   it first, so a busy emitter could take the whole cap and leave the
+	   destruction the player is looking at unsimulated and undrawn (P14). */
+	const uint32_t uiFirst = m_uiActiveParticleCount;
+	const uint32_t uiLimit = std::min(uiFirst + m_uiEmitterBudget, m_uiMaxParticleCount);
 
 	for (ParticleSystem* pSystem : m_ParticleSystems)
 	{
@@ -221,19 +260,19 @@ void PhysicsSystem::TickParticleSystems(const GameTimer& fixedTimer)
 		{
 			pool.Position[i] += pool.Velocity[i] * (float)fixedTimer.GetElapsedSeconds();
 
-			if (m_uiActiveParticleCount < m_uiMaxParticleCount)
+			if (m_uiActiveParticleCount < uiLimit)
 			{
-				m_uiActiveParticleCount++;
-
 				// Create GPU particle
 				gpuParticle.Position = pool.Position[i];
 				gpuParticle.VoxelColor = pool.Color[i];
 
 				std::memcpy(
-					&pGPUParticles[m_uiActiveParticleCount - 1],
+					&pGPUParticles[m_uiActiveParticleCount],
 					&gpuParticle,
 					sizeof(GPUParticle)
 				);
+
+				m_uiActiveParticleCount++;
 			}
 		}
 	}
@@ -243,15 +282,90 @@ void PhysicsSystem::ProcessIntegrityChecks()
 {
 	OPTICK_EVENT();
 
-	/* Runs the flood fill inline, for a bounded number of voxel visits, and
-	   consumes whatever islands completed in the same tick. */
+	/* Runs the flood fill inline for a bounded number of voxel visits. */
 	std::vector<std::vector<uint64_t>> results;
-	m_IntegrityChecker.Process(IntegrityChecker::VISIT_BUDGET_PER_TICK, results);
+
+	{
+		ScopedFrameTimer timer("CPU IntegrityChecker::Process");
+		m_IntegrityChecker.Process(IntegrityChecker::VISIT_BUDGET_PER_TICK, results);
+	}
 
 	for (std::vector<uint64_t>& checkedVoxels : results)
 	{
-		for (uint64_t& vecHash : checkedVoxels)
+		m_PendingIslandVoxels.insert(checkedVoxels.begin(), checkedVoxels.end());
+		m_PendingIslands.push_back(std::move(checkedVoxels));
+	}
+
+	if (m_PendingIslands.empty())
+		return;
+
+	/* One batch for the whole tick's conversion. It maintains the CPU voxel,
+	   the mapped word, the occupancy bitmap, the brick count and - new in phase
+	   1 - the owner slot, which this loop used to leave behind on every voxel
+	   it cleared. A cleared-but-owned voxel lies to VoxelBaker::Clear's "is
+	   somebody else's voxel here" test for the rest of the world's life. */
+	VoxelEditBatch batch(m_pRenderSystem->MakeEditTarget());
+
+	/* Same one-element cache the destruction path uses, for the same reason:
+	   an island is overwhelmingly one model's voxels in a row. */
+	uint16_t uiCachedSlot = VoxelOwnerVolume::k_uiNoOwnerSlot;
+	bool bCachedDestructible = true;
+	bool bCacheValid = false;
+
+	/* Conversion deliberately seeds nothing, and the argument is worth keeping
+	   because the opposite looks obviously right.
+	 *
+	 * "A converted voxel disappeared, so whatever rested on it has lost
+	 * support" - true of a *burst*, false of an island. An island is a maximal
+	 * 26-connected component: the walk collects everything reachable, and
+	 * EndCheck only reports when the stack is exhausted, so a component is
+	 * always complete. Anything adjacent to an island is therefore *in* it and
+	 * falls with it. Nothing can rest on an island without being part of it.
+	 *
+	 * Seeding it anyway cost 6.99 ms of the gauntlet's 10.83 ms conversion
+	 * total - 65% of it - and the oracle never once attributed a find to it.
+	 * That is rule 11 in miniature: it was insurance against a case the data
+	 * structure makes impossible.
+	 *
+	 * The one narrow hole: a debris voxel that bakes onto an island in the
+	 * frames between classification and conversion is not part of the
+	 * component, and loses its support without being seeded. It is one floating
+	 * voxel, it is what the pre-rewrite code did too, and it is not worth seven
+	 * milliseconds. */
+
+	/* Below the early return, so the accumulator holds only ticks that actually
+	   converted something - an average over the ticks that did nothing says
+	   nothing about what conversion costs. */
+	ScopedFrameTimer convertTimer("CPU IntegrityChecker island conversion");
+
+	/* Converting an island is budgeted too, and that is not symmetry for its
+	   own sake. An island is however large the disconnected structure is, and
+	   the more of a level has been destroyed the more it fragments, so islands
+	   grow over a session. Every voxel in one costs a particle spawn and a
+	   batched clear, and doing a whole island in one tick is a frame as long as
+	   the island is big - measured as 127 frames over 30 ms in a single
+	   session, several pegged at 100 ms, with 94 ms and 41 ms immediately
+	   before a GPU timeout that a bullet penetration triggered.
+
+	   Part of that clear reaches the GPU: it writes the voxel mapper, which is
+	   DEVICE_LOCAL | HOST_VISIBLE, so an unbounded burst is an unbounded burst
+	   of CPU writes into VRAM the voxel pass is reading at the same time.
+
+	   The cost of spreading it is that a large island takes a few frames to
+	   fall rather than one. At 16384 voxels a tick that is 60 ms for a 64 K
+	   island, against a 100 ms stall for the same work done at once. */
+	uint32_t uiConvertBudget = k_uiIntegrityConvertPerTick;
+
+	while (uiConvertBudget > 0 && !m_PendingIslands.empty())
+	{
+		std::vector<uint64_t>& checkedVoxels = m_PendingIslands.front();
+
+		for (; m_uiIslandCursor < checkedVoxels.size() && uiConvertBudget > 0; ++m_uiIslandCursor)
 		{
+			--uiConvertBudget;
+
+			uint64_t& vecHash = checkedVoxels[m_uiIslandCursor];
+			{
 			const Vector3 vec = IntegrityChecker::HashToPosition(vecHash);
 
 			const VoxelCell cell = m_VoxelGrid.GetCell(
@@ -262,35 +376,215 @@ void PhysicsSystem::ProcessIntegrityChecks()
 			//If the voxel is not active we don't make it into a particle
 			if (!cell.IsActive()) continue;
 
-			Particle* pParticle = m_ParticlePool.SpawnParticle();
-			if (pParticle)
+			/* An island does not get to ignore destructibility.
+			 *
+			 * Conversion never checked it, which was latent for as long as
+			 * seeding only ever reached geometry a burst had just cut. It
+			 * stopped being latent the moment phase 2 widened the seed set:
+			 * a structure that was never ground-connected in the first place -
+			 * a pristine level has 14,532 such voxels - would be found and
+			 * converted whole, destructible or not. Joey saw a non-destructible
+			 * building collapse while a bullet bounced off it.
+			 *
+			 * Phase 2's seeding is scoped properly now, which stops the
+			 * *discovery*. This stops the conversion, and it is the half that
+			 * has to hold even when discovery is correct: an indestructible
+			 * thing that genuinely loses its support is meant to stay put. */
+			const uint16_t uiSlot = cell.GetSlot();
+
+			if (!bCacheValid || uiSlot != uiCachedSlot)
 			{
-				pParticle->Live.BakeOnImpact = true;
-				pParticle->Live.GridPosition = vec;
-				pParticle->Live.Position = m_VoxelGrid.GridToWorld(vec);
-				pParticle->Live.VoxelColor = cell.GetColor();
-				cell.SetParticleOwner((uintptr_t)pParticle);
+				const uint64_t uiOwnerID = m_VoxelGrid.ResolveOwnerSlot(uiSlot);
+				const Entity* pOwner = m_pWorld->FindEntity(uiOwnerID);
+
+				uiCachedSlot = uiSlot;
+				bCachedDestructible = (pOwner == nullptr || pOwner->IsDestructible());
+				bCacheValid = true;
 			}
 
-			/* Clearing the colour is what makes the voxel inactive now -
-			   there is no separate flag to clear afterwards. */
-			m_VoxelGrid.ModifyVoxel(
-				static_cast<int>(vec.x),
-				static_cast<int>(vec.y),
-				static_cast<int>(vec.z),
-				0
-			);
-			m_pRenderSystem->ModifyVoxel(
-				static_cast<uint32_t>(vec.x),
-				static_cast<uint32_t>(vec.y),
-				static_cast<uint32_t>(vec.z),
-				0
-			);
+			if (!bCachedDestructible) continue;
+
+			/* One particle per voxel, and that is not an inconsistency with the
+			   explosion's one-per-four (ledger P17 read it as one).
+			 *
+			 * An explosion scatters debris, so its density is cosmetic. An
+			 * island *falls as a shape* - a roof, a balcony, a chunk of wall -
+			 * and the particles are that shape. Thinning them to one in four
+			 * took three quarters of it away: the sampling runs in sorted hash
+			 * order, which is x then y then z, so it thins along one axis and
+			 * leaves stripes. Joey reported it as gaps between voxels and the
+			 * shape not being preserved during the fall, which is exactly what
+			 * it was. */
+			ParticleSpawn spawn;
+			spawn.v3Position = m_VoxelGrid.GridToWorld(vec);
+			spawn.uiColor = cell.GetColor();
+			spawn.bBakeOnImpact = true;
+
+			m_Debris.Spawn(spawn);
+
+			batch.Clear(vec);
+			}
+		}
+
+		if (m_uiIslandCursor >= checkedVoxels.size())
+		{
+			m_PendingIslands.pop_front();
+			m_uiIslandCursor = 0;
 		}
 	}
+
+	/* Conversion cleared voxels, so anything the checker had classified about
+	   the geometry around them is no longer true. */
+	if (uiConvertBudget < k_uiIntegrityConvertPerTick)
+		m_IntegrityChecker.Invalidate();
 }
 
 
+
+void PhysicsSystem::AuditParticlePool() const
+{
+	const ParticleCore::AuditResult result = m_Debris.Audit();
+
+	fprintf(stderr, "[pool-audit] debris %u alive + %u free of %u%s%s%s\n",
+	        result.uiCount, result.uiFreeListSize, result.uiCapacity,
+	        result.uiBrokenMappings ? " - the slot table and the dense arrays disagree" : "",
+	        result.uiDuplicateSlots ? " - a slot is claimed twice" : "",
+	        result.IsSound() ? "" : " - UNSOUND");
+}
+
+/* The connectivity oracle. DESTRUCTION_PLAN.md phase 4.
+ *
+ * Phase 4 made the checker remember what it has already classified, which is
+ * what stops an explosion's thousands of seeds each re-flooding the same
+ * building. A memo is exactly the kind of optimization that can be subtly wrong
+ * for a long time before anyone notices - the failure is "a thing that should
+ * have fallen did not", which reads as level design rather than as a bug.
+ *
+ * So the pre-phase-4 walk is kept, verbatim and unbudgeted, as
+ * IntegrityChecker::ClassifyExhaustive, and this runs it over the window and
+ * compares.
+ *
+ * **The absolute number is not the finding; the delta is.** A pristine
+ * Fishing_Village_Beat1 reports 14,532 voxels in 211 ungrounded components
+ * before anything has been destroyed - decorative geometry, props resting on
+ * other props, models whose only contact with the ground is through another
+ * model the checker's 26-connectivity does not join. None of that is a defect:
+ * nothing ever seeds those voxels, so they simply stand, which is what a level
+ * designer intended. The first run is therefore taken as the baseline and every
+ * run after it reports against it. A delta that grows with destruction and does
+ * not come back down is the checker failing to find an island.
+ *
+ * It walks the whole resident window with an exhaustive flood fill per
+ * component, so it costs seconds - 18.7 of them on a 2.1 M-voxel window. On
+ * demand only.
+ */
+void PhysicsSystem::AuditIntegrity()
+{
+	const UVector3 v3Dimensions = m_VoxelGrid.GetDimensions();
+
+	if (v3Dimensions.x == 0 || v3Dimensions.y == 0 || v3Dimensions.z == 0)
+	{
+		fprintf(stderr, "[integrity-audit] skipped: no voxel window yet\n");
+		return;
+	}
+
+	/* Voxels already known to belong to an island the checker has found and is
+	   waiting to convert. Those are correctly classified by construction. */
+	std::unordered_set<uint64_t> pending;
+
+	for (const std::vector<uint64_t>& island : m_PendingIslands)
+		pending.insert(island.begin(), island.end());
+
+	std::unordered_set<uint64_t> classified;
+	std::vector<uint64_t> island;
+
+	uint64_t uiOccupied = 0;
+	uint64_t uiUngrounded = 0;
+	uint64_t uiMissed = 0;
+	uint64_t uiIslands = 0;
+
+	const std::chrono::high_resolution_clock::time_point start =
+		std::chrono::high_resolution_clock::now();
+
+	for (uint32_t uiZ = 0; uiZ < v3Dimensions.z; ++uiZ)
+	for (uint32_t uiY = 1; uiY < v3Dimensions.y; ++uiY)
+	for (uint32_t uiX = 0; uiX < v3Dimensions.x; ++uiX)
+	{
+		const Voxel* pVoxel = m_VoxelGrid.GetVoxel(uiX, uiY, uiZ);
+
+		if (pVoxel == nullptr || !pVoxel->IsActive())
+			continue;
+
+		++uiOccupied;
+
+		const uint64_t uiHash = IntegrityChecker::PositionToHash(uiX, uiY, uiZ);
+
+		if (classified.count(uiHash) != 0)
+			continue;
+
+		if (!m_IntegrityChecker.ClassifyExhaustive(
+			Vector3(static_cast<float>(uiX), static_cast<float>(uiY), static_cast<float>(uiZ)), island))
+		{
+			/* Grounded. Nothing to compare - the checker never claims
+			   something is an island without having walked it. */
+			continue;
+		}
+
+		++uiIslands;
+		uiUngrounded += island.size();
+
+		classified.insert(island.begin(), island.end());
+
+		/* An ungrounded component that the checker has not queued for
+		   conversion is one it will never find, because nothing will seed it
+		   again. That is the failure this audit exists for. */
+		if (pending.count(uiHash) == 0)
+			uiMissed += island.size();
+	}
+
+	const std::chrono::duration<double, std::milli> span =
+		std::chrono::high_resolution_clock::now() - start;
+
+	const IntegrityChecker::Stats& stats = m_IntegrityChecker.GetStats();
+
+	/* Set on the first run and never again - see the function comment on why
+	   the absolute count is not the interesting number. */
+	static bool s_bHaveBaseline = false;
+	static uint64_t s_uiBaselineMissed = 0;
+	static uint64_t s_uiBaselineComponents = 0;
+
+	if (!s_bHaveBaseline)
+	{
+		s_bHaveBaseline = true;
+		s_uiBaselineMissed = uiMissed;
+		s_uiBaselineComponents = uiIslands;
+
+		fprintf(stderr, "[integrity-audit] baseline: %llu occupied, %llu voxels in %llu ungrounded components "
+		                "standing before anything was destroyed; %.0f ms. Later runs report against this.\n",
+		        (unsigned long long)uiOccupied, (unsigned long long)uiUngrounded,
+		        (unsigned long long)uiIslands, span.count());
+	}
+	else
+	{
+		const int64_t iDeltaMissed = static_cast<int64_t>(uiMissed) - static_cast<int64_t>(s_uiBaselineMissed);
+		const int64_t iDeltaComponents = static_cast<int64_t>(uiIslands) - static_cast<int64_t>(s_uiBaselineComponents);
+
+		fprintf(stderr, "[integrity-audit] %llu occupied; %llu voxels in %llu ungrounded components not queued "
+		                "for conversion (%+lld voxels, %+lld components against the baseline); %.0f ms\n",
+		        (unsigned long long)uiOccupied, (unsigned long long)uiMissed,
+		        (unsigned long long)uiIslands,
+		        (long long)iDeltaMissed, (long long)iDeltaComponents, span.count());
+	}
+
+	fprintf(stderr, "[integrity-audit] checker since last reset: %llu seeds offered, %llu deduplicated, "
+	                "%llu answered from the memo, %llu visits, %llu memo hits mid-walk, %llu islands emitted\n",
+	        (unsigned long long)stats.uiSeedsOffered,
+	        (unsigned long long)stats.uiSeedsDeduplicated,
+	        (unsigned long long)stats.uiSeedsSkippedByMemo,
+	        (unsigned long long)stats.uiVisits,
+	        (unsigned long long)stats.uiMemoHits,
+	        (unsigned long long)stats.uiIslandsEmitted);
+}
 
 bool PhysicsSystem::RayCast(Vector3 start, Vector3 dir, HitResult& hitResult, float fLength /*= FLT_MAX*/, uint32_t uiLayer /*= CollisionLayer::CL_ALL*/)
 {
@@ -422,122 +716,123 @@ bool PhysicsSystem::RayCastGroup(std::vector<BoxCollider*>& colliders, Vector3 s
 
 void PhysicsSystem::ApplySphericalDestruction(const Vector3& position, float fRadius, float fForceMin, float fForceMax, bool bBakeParticle /* true */)
 {
-	Vector3 clampedGridPos = m_VoxelGrid.WorldToGrid(position);
-	clampedGridPos.x = round(clampedGridPos.x);
-	clampedGridPos.y = round(clampedGridPos.y);
-	clampedGridPos.z = round(clampedGridPos.z);
+	ScopedFrameTimer timer("CPU PhysicsSystem::ApplySphericalDestruction");
 
-	fRadius = round(fRadius);
-	uint32_t diameter = (uint32_t)fRadius * 2;
-
-	std::vector<uint64_t> integrityChecks;
-	uint32_t numVoxels = diameter * diameter * diameter;
-	Voxel** voxels = new Voxel*[numVoxels];
-	uint16_t* ownerSlots = new uint16_t[numVoxels];
-
-	float fDiameter = static_cast<float>(diameter);
-	bool isValid = m_VoxelGrid.GetChunk(voxels, clampedGridPos - Vector3(fRadius), Vector3(fDiameter), true, ownerSlots);
-
-	if (!isValid) return;
-
-	Vector3 volumePos = clampedGridPos - Vector3(fRadius);
-	volumePos.x = round(volumePos.x);
-	volumePos.y = round(volumePos.y);
-	volumePos.z = round(volumePos.z);
-
-	Entity* pCachedEntity = nullptr;
-
-	uint32_t particlesSpawned = 0;
-	for (uint32_t i = 0; i < numVoxels; ++i)
+	/* Ledger D9. Nothing in PhysicsSystem ever set this - RenderSystem's
+	   constructor is the only wiring - so a world without a RenderSystem
+	   dereferenced a garbage pointer here. It is null-initialised now and the
+	   two paths that need it say so instead of crashing. */
+	if (m_pRenderSystem == nullptr)
 	{
-		++volumePos.x;
-		if (volumePos.x >= clampedGridPos.x + fRadius)
+		static bool s_bWarned = false;
+
+		if (!s_bWarned)
 		{
-			volumePos.x = clampedGridPos.x - fRadius;
-			++volumePos.y;
-		}
-		if (volumePos.y >= clampedGridPos.y + fRadius)
-		{
-			volumePos.y = clampedGridPos.y - fRadius;
-			++volumePos.z;
+			s_bWarned = true;
+			fprintf(stderr, "[physics] destruction requested with no RenderSystem attached; ignored\n");
 		}
 
-		if (!voxels[i] || !voxels[i]->IsActive() || volumePos.y < 1) continue;
+		return;
+	}
 
-		Vector3 diff = volumePos - clampedGridPos;
-		if (glm::length(diff) <= fRadius)
+	const Vector3 v3GridCenter = m_VoxelGrid.WorldToGrid(position, true);
+
+	VoxelEditBatch batch(m_pRenderSystem->MakeEditTarget());
+
+	/* One-element cache, as before: a burst walks a sphere and consecutive
+	   voxels overwhelmingly belong to the same model. */
+	uint16_t uiCachedSlot = VoxelOwnerVolume::k_uiNoOwnerSlot;
+	bool bCachedDestructible = true;
+	bool bCacheValid = false;
+
+	uint32_t uiSpawnCounter = 0;
+	std::vector<uint64_t> integrityChecks;
+
+	const SphericalDestruction::Result result = SphericalDestruction::Apply(
+		batch, m_VoxelGrid, v3GridCenter, fRadius,
+		[&](uint16_t uiOwnerSlot)
 		{
+			if (bCacheValid && uiOwnerSlot == uiCachedSlot)
+				return bCachedDestructible;
+
 			/* A particle claim resolves to 0, so FindEntity gets nothing and
 			   the voxel counts as destructible - which is what it did when the
 			   field held a raw Particle* and FindEntity failed to match it. */
-			const uint64_t uiOwnerID = m_VoxelGrid.ResolveOwnerSlot(ownerSlots[i]);
+			const uint64_t uiOwnerID = m_VoxelGrid.ResolveOwnerSlot(uiOwnerSlot);
+			const Entity* pOwner = m_pWorld->FindEntity(uiOwnerID);
 
-			if (pCachedEntity == nullptr || uiOwnerID != pCachedEntity->GetId())
-			{
-				pCachedEntity = m_pWorld->FindEntity(uiOwnerID);
-			}
+			uiCachedSlot = uiOwnerSlot;
+			bCachedDestructible = (pOwner == nullptr || pOwner->IsDestructible());
+			bCacheValid = true;
 
-			if (pCachedEntity == nullptr || pCachedEntity->IsDestructible())
-			{
-				uint32_t color = m_pRenderSystem->GetVoxel(
-					static_cast<int32_t>(volumePos.x - 1),
-					static_cast<int32_t>(volumePos.y),
-					static_cast<int32_t>(volumePos.z)
-				);
+			return bCachedDestructible;
+		},
+		[&](const Vector3& v3Position, uint32_t uiColor)
+		{
+			/* One particle per four destroyed voxels, as before. The counter
+			   advances for every destroyed voxel whether or not the pool had
+			   room, so the debris stays evenly spread through the sphere
+			   rather than clumping wherever the pool happened to refill. */
+			const bool bSpawn = (uiSpawnCounter % 4) == 0;
+			++uiSpawnCounter;
 
-				if (particlesSpawned % 4 == 0)
-				{
-					Particle* pParticle = m_ParticlePool.SpawnParticle();
-					if (pParticle)
-					{
-						pParticle->Live.GridPosition = volumePos;
-						pParticle->Live.Position = m_VoxelGrid.GridToWorld(volumePos);
-						pParticle->Live.BakeOnImpact = bBakeParticle;
+			if (!bSpawn)
+				return;
 
-						diff = glm::normalize(diff);
-						pParticle->Live.Velocity = diff * glm::linearRand(fForceMin, fForceMax);
-						pParticle->Live.VoxelColor = color;
+			Vector3 v3Away = v3Position - v3GridCenter;
 
-						/* volumePos is pre-incremented at the top of the loop,
-						   so voxels[i] is the cell at volumePos.x - 1 - the
-						   same one ModifyVoxel clears below. */
-						m_VoxelGrid.SetParticleOwner(
-							static_cast<uint32_t>(volumePos.x - 1),
-							static_cast<uint32_t>(volumePos.y),
-							static_cast<uint32_t>(volumePos.z),
-							(uintptr_t)pParticle);
-					}
-				}
-				++particlesSpawned;
+			/* A voxel exactly at the centre normalises a zero vector, which is
+			   NaN - and a NaN velocity becomes a NaN position, a non-finite
+			   proxy AABB and a frame the marcher never finishes. */
+			const float fLengthSquared = glm::length2(v3Away);
 
-				int32_t volX, volY, volZ;
-				volX = static_cast<int32_t>(volumePos.x - 1);
-				volY = static_cast<int32_t>(volumePos.y);
-				volZ = static_cast<int32_t>(volumePos.z);
-				m_VoxelGrid.ModifyVoxel(volX, volY, volZ, 0);
-				m_pRenderSystem->ModifyVoxel(volX, volY, volZ, 0);
+			v3Away = fLengthSquared > 0.f
+				? v3Away / std::sqrt(fLengthSquared)
+				: Vector3(0.f, 1.f, 0.f);
 
-				for (float x = -1.0f; x <= 1.0f; ++x)
-				{
-					for (float z = -1.0f; z <= 1.0f; ++z)
-					{
-						Vector3 vec = volumePos + Vector3(x, 1, z);
+			ParticleSpawn spawn;
+			spawn.v3Position = m_VoxelGrid.GridToWorld(v3Position);
+			spawn.v3Velocity = v3Away * m_ParticleRandom.Range(fForceMin, fForceMax);
+			spawn.uiColor = uiColor;
+			spawn.bBakeOnImpact = bBakeParticle;
 
-						uint64_t hash = 0;
-						((uint16_t*)&hash)[0] = (uint16_t)vec.z;
-						((uint16_t*)&hash)[1] = (uint16_t)vec.y;
-						((uint16_t*)&hash)[2] = (uint16_t)vec.x;
-						integrityChecks.push_back(hash);
-					}
-				}
-			}
+			/* No claim on the cell it came from. The claim system is deleted -
+			   see DESTRUCTION_PLAN.md phase 3 on why every consumer of it had a
+			   cheaper answer or was satisfied by "particles own nothing". */
+			m_Debris.Spawn(spawn);
+		},
+		&integrityChecks);
+
+	if (result.bRadiusClamped)
+	{
+		static bool s_bWarned = false;
+
+		if (!s_bWarned)
+		{
+			s_bWarned = true;
+			fprintf(stderr, "[physics] destruction radius %.1f clamped to %.1f\n",
+			        fRadius, SphericalDestruction::k_fMaxRadius);
 		}
 	}
 
-	m_IntegrityChecker.EnqueueBulk(integrityChecks);
+	if (result.uiDestroyed == 0)
+		return;
 
-	delete[] voxels;
-	delete[] ownerSlots;
+	/* Seeds come from what is *left* standing around the hole, gathered after
+	   the clear - see SphericalDestruction::CollectSeeds. The old code pushed
+	   nine per destroyed voxel during the loop, most of them naming voxels the
+	   same loop destroyed moments later. */
+	/* The memo describes a world this burst has just changed, so it goes first.
+	   Ordering matters: invalidating *after* enqueuing would leave the new
+	   seeds answerable from stale classifications. */
+	m_IntegrityChecker.Invalidate();
+
+	/* The candidates were gathered as neighbours of voxels this burst removed;
+	   most of them were then removed by the same burst. What is left standing
+	   is what could have lost support. */
+	SphericalDestruction::FilterSeeds(m_VoxelGrid, integrityChecks);
+
+	m_IntegrityChecker.EnqueueBulk(integrityChecks);
 }
 
 bool PhysicsSystem::OverlapSphere(std::vector<BoxCollider*>& colliders, Vector3 center, float fRadius, uint32_t uiLayer /*= -1*/, bool queryTriggers /*= false*/) const
@@ -1202,259 +1497,102 @@ bool PhysicsSystem::CheckContinousCollision(BoxCollider* pColliderA, Manifold& m
 void PhysicsSystem::SimulateParticles(float fDeltaTime)
 {
 	OPTICK_EVENT();
-	Particle* aliveParticle = m_ParticlePool.GetLastAlive();
-	
+	ScopedFrameTimer timer("CPU PhysicsSystem::SimulateParticles");
+
+	if (m_pRenderSystem == nullptr || m_pGPUParticles == nullptr)
+		return;
+
+	/* Ledger P12: this used to dereference the mapper unconditionally, and the
+	   mapper stays null when PhysicsSystem is constructed without a World -
+	   which is exactly the unit-test path. */
 	GPUParticle* pGPUParticles = reinterpret_cast<GPUParticle*>(m_pGPUParticles->GetData());
-	GPUParticle gpuParticle;
 
-	while (aliveParticle != nullptr)
+	if (pGPUParticles == nullptr)
+		return;
+
+	VoxelEditBatch batch(m_pRenderSystem->MakeEditTarget());
+
+	const VoxelBrickGrid& bricks = m_pRenderSystem->m_pRenderContext->GetBrickGrid();
+	const UVector3 v3WindowSize = m_VoxelGrid.GetDimensions();
+	const Vector3 v3WorldOffset = m_VoxelGrid.GetWorldOffset();
+
+	ParticleSimulation::Settings settings;
+	settings.v3Gravity = PARTICLE_GRAVITY;
+	settings.fDestroyThreshold = PARTICLE_DESTROY_THRESHOLD;
+	settings.fBounceMultiplier = PARTICLE_BOUNCE_MULIPLIER;
+
+	uint32_t uiIndex = 0;
+
+	while (uiIndex < m_Debris.GetCount())
 	{
-		if (m_uiActiveParticleCount >= m_uiMaxParticleCount)
-			break;
+		const ParticleSimulation::Outcome outcome = ParticleSimulation::Step(
+			m_Debris, uiIndex, fDeltaTime, m_VoxelGrid, bricks, v3WindowSize, v3WorldOffset, settings);
 
-		++m_uiActiveParticleCount;
-
-		// Simulate CPU particle
-		Particle* nextParticle = aliveParticle->Prev;
-
-		// Handle particle timer
-		if (aliveParticle->Live.Timer > 0.f)
+		if (outcome.bRetire)
 		{
-			if (UpdateParticleTimer(aliveParticle, fDeltaTime))
+			/* Not onto something that is already falling, or that is about to
+			   be told it is falling.
+			 *
+			 * The support would be cleared within a few ticks and the debris
+			 * left in mid-air, and nothing would ever seed it - a burst seeds
+			 * its neighbours, but island conversion deliberately seeds nothing
+			 * (see ProcessIntegrityChecks on why it cannot need to). Keeping
+			 * the particle alive lets it settle once the island has gone, which
+			 * is what it would do anyway.
+			 *
+			 * Two sets, because a walk is resumable: a voxel can be already
+			 * enumerated into an island that has not been reported yet, and
+			 * debris landing on it in that window is invisible to both the
+			 * island and any future seed. */
+			const uint64_t uiSupport = IntegrityChecker::PositionToHash(
+				static_cast<uint32_t>(outcome.iImpactX),
+				static_cast<uint32_t>(outcome.iImpactY),
+				static_cast<uint32_t>(outcome.iImpactZ));
+
+			if (m_PendingIslandVoxels.count(uiSupport) != 0 ||
+				m_IntegrityChecker.IsClassifying(uiSupport))
 			{
-				aliveParticle = nextParticle;
+				++uiIndex;
 				continue;
 			}
 		}
 
-		Vector3& prevGridPos = aliveParticle->Live.GridPosition;
-		Vector3 newGridPos = m_VoxelGrid.WorldToGrid(aliveParticle->Live.Position, true);
-
-		//Clamp previous grid position when its distance exceeds 100 units
-		if (glm::distance2(newGridPos, prevGridPos) > 10000)
+		if (outcome.bBake)
 		{
-			prevGridPos = newGridPos;
-			aliveParticle->Live.GridPosition = prevGridPos;
+			batch.Set(
+				Vector3(static_cast<float>(outcome.iBakeX),
+				        static_cast<float>(outcome.iBakeY),
+				        static_cast<float>(outcome.iBakeZ)),
+				m_Debris.Color[uiIndex],
+				VoxelOwnerVolume::k_uiNoOwnerSlot);
 		}
 
-		aliveParticle->Live.Velocity += PARTICLE_GRAVITY * fDeltaTime;
-		aliveParticle->Live.Position += aliveParticle->Live.Velocity * fDeltaTime;
-
-		newGridPos = m_VoxelGrid.WorldToGrid(aliveParticle->Live.Position, true);
-
-		// Clamp y to zero to avoid particles being destroyed by to high velocities
-		if (newGridPos.y < 0.f)
-			newGridPos.y = 0.f;
-
-		// Update the particles position if its positions has changed
-		if (prevGridPos != newGridPos)
+		if (outcome.bRetire)
 		{
-			const VoxelCell cell = m_VoxelGrid.GetCell(
-				static_cast<int>(newGridPos.x),
-				static_cast<int>(newGridPos.y),
-				static_cast<int>(newGridPos.z)
-			);
-
-			/* "The claim on my old voxel is mine, or there is none" - the same
-			   test the raw UserPointer comparison made, asked of the sparse
-			   particle map instead. Resolved where it is needed rather than up
-			   front, because the bounce path below never asks and the map
-			   lookup is the one part of this that is not a plain array index.
-			   See RENDERING_PLAN.md phase 4d. */
-			const VoxelCell oldCell = m_VoxelGrid.GetCell(
-				static_cast<int>(prevGridPos.x),
-				static_cast<int>(prevGridPos.y),
-				static_cast<int>(prevGridPos.z)
-			);
-
-			auto ownsOldCell = [&oldCell, aliveParticle]()
-			{
-				return oldCell &&
-					(oldCell.GetParticleOwner() == (uintptr_t)aliveParticle || !oldCell.HasOwner());
-			};
-
-			if (cell && cell.IsActive())
-			{
-				float speed = glm::length(aliveParticle->Live.Velocity);
-
-				Vector3 normal = glm::normalize(prevGridPos - newGridPos);
-				Vector3 particleVelocity = glm::normalize(aliveParticle->Live.Velocity);
-
-				// Bake particle and destroy if velocity is to low or the particle is going straight down
-				if (speed < PARTICLE_DESTROY_THRESHOLD || normal == Vector3(0, 1, 0) || prevGridPos.y < 0) //particleVelocity.y + 1.f <= 0.001f
-				{
-					// Only handle particle if its old voxel is still valid
-					if (ownsOldCell())
-					{
-						/* Set previous voxel to default state if the particle shouldn't bake */
-						if (!aliveParticle->Live.BakeOnImpact)
-						{
-							oldCell.ClearOwner();
-						}
-						/* Bake the particle into the grid */
-						else if (aliveParticle->Live.BakeOnImpact)
-						{
-							oldCell.ClearOwner();
-
-							Vector3 bakeVoxelPos = newGridPos;
-							bakeVoxelPos.y += 1;
-
-							Vector3 bakeCellPos = bakeVoxelPos;
-							VoxelCell bakeCell = m_VoxelGrid.GetCell(
-								static_cast<int>(bakeVoxelPos.x),
-								static_cast<int>(bakeVoxelPos.y),
-								static_cast<int>(bakeVoxelPos.z)
-							);
-
-							if (bakeCell && bakeCell.IsActive())
-							{
-								if (bakeVoxelPos.y > 1) 
-									bakeVoxelPos.y -= 1;
-								bakeCell = FindEmtpyNeighbor(bakeVoxelPos, bakeCellPos);
-							}
-
-							if (bakeCell && !bakeCell.IsActive())
-							{
-								/* bakeCellPos is where bakeCell actually is, which
-								   is not bakeVoxelPos once FindEmtpyNeighbor has
-								   answered - a pre-existing mismatch, left alone
-								   here so this change stays about representation.
-								   The owner has to follow the cell, though, or it
-								   would clear a claim on an unrelated voxel. */
-								m_VoxelGrid.ModifyVoxel(
-									(int)bakeVoxelPos.x,
-									(int)bakeVoxelPos.y,
-									(int)bakeVoxelPos.z,
-									aliveParticle->Live.VoxelColor.inst.Color
-								);
-								m_pRenderSystem->ModifyVoxel(
-									(uint32_t)bakeVoxelPos.x,
-									(uint32_t)bakeVoxelPos.y,
-									(uint32_t)bakeVoxelPos.z,
-									aliveParticle->Live.VoxelColor.inst.Color
-								);
-
-								/* This voxel belongs to no renderer, so nothing
-								   would submit an AABB proxy covering it and the
-								   voxel pass - which rasterizes proxies and
-								   nothing else - would never start a ray at it.
-								   It would still appear whenever some other
-								   model's box happened to cover the pixel, which
-								   is why debris that has settled flickers as the
-								   camera moves rather than being plainly
-								   missing. See RenderSystem::AddLooseVoxel. */
-								m_pRenderSystem->AddLooseVoxel(bakeVoxelPos);
-
-								/* Live.UserPointer is never assigned anywhere, so
-								   this has always cleared the owner rather than
-								   set one. Kept as a clear. */
-								bakeCell.SetParticleOwner((uintptr_t)aliveParticle->Live.UserPointer);
-							}
-						}
-					}
-					m_ParticlePool.DestroyParticle(aliveParticle);
-				}
-				else
-				{
-					/* Apply simple bounce physics to particle */
-					float contactVel = glm::dot(aliveParticle->Live.Velocity, normal);
-					if (contactVel < 0)
-					{
-						aliveParticle->Live.Velocity += -normal * contactVel * PARTICLE_BOUNCE_MULIPLIER;
-					}
-				}
-			}
-			else if (cell && !cell.IsActive())
-			{
-				if (ownsOldCell())
-					oldCell.ClearOwner();
-
-				/* Fill and Clear voxels based on the new grid position */
-				aliveParticle->Live.GridPosition = newGridPos;
-				cell.SetParticleOwner((uintptr_t)aliveParticle);
-			}
-			else
-			{
-				/* Clear voxels that reach out of bounds */
-				if (ownsOldCell())
-					oldCell.ClearOwner();
-
-				m_ParticlePool.DestroyParticle(aliveParticle);
-			}
+			/* Retire swaps the last particle into this index, so the loop must
+			   not advance. */
+			m_Debris.Retire(uiIndex);
+			continue;
 		}
 
-		// Create GPU particle
-		gpuParticle.Position = aliveParticle->Live.Position;
-		gpuParticle.VoxelColor = aliveParticle->Live.VoxelColor;
+		/* The GPU record is written *before* anything can retire this particle,
+		   and only for particles that survive the tick. The old code wrote it
+		   after DestroyParticle, so a retired particle - whose free-list link
+		   aliased its own position through a union - was drawn one more frame
+		   from whatever that pointer looked like as a float3 (P1). */
+		GPUParticle gpuParticle;
+		gpuParticle.Position = m_Debris.Position[uiIndex];
+		gpuParticle.VoxelColor = m_Debris.Color[uiIndex];
 
-		std::memcpy(
-			&pGPUParticles[m_uiActiveParticleCount - 1],
-			&gpuParticle,
-			sizeof(GPUParticle)
-		);
+		std::memcpy(&pGPUParticles[uiIndex], &gpuParticle, sizeof(GPUParticle));
 
-		// Iterate to next particle
-		aliveParticle = nextParticle;
-	}
-}
-
-bool PhysicsSystem::UpdateParticleTimer(Particle* pParticle, float fDeltaTime)
-{
-	pParticle->Live.Timer -= fDeltaTime;
-	if (pParticle->Live.Timer <= 0.f)
-	{
-		Vector3 prevGridPos = pParticle->Live.GridPosition;
-		const VoxelCell oldCell = m_VoxelGrid.GetCell(
-			static_cast<int>(prevGridPos.x),
-			static_cast<int>(prevGridPos.y),
-			static_cast<int>(prevGridPos.z)
-		);
-
-		if (oldCell && (oldCell.GetParticleOwner() == (uintptr_t)pParticle || !oldCell.HasOwner()))
-		{
-			oldCell.ClearOwner();
-		}
-
-		m_ParticlePool.DestroyParticle(pParticle);
-		return true;
-	}
-	return false;
-}
-
-/* Reports where it found the cell as well as the cell itself: ownership no
-   longer lives inside the voxel, so a caller that means to write an owner has
-   to know the coordinates rather than just hold a pointer. */
-VoxelCell PhysicsSystem::FindEmtpyNeighbor(Vector3 gridPos, Vector3& foundGridPos, uint32_t ySearchCount)
-{
-	for (int y = 0; y < static_cast<int>(ySearchCount); ++y)
-	{
-		for (int x = -1; x <= 1; ++x)
-		{
-			for (int z = -1; z <= 1; ++z)
-			{
-				if (x == 0 && z == 0) continue;
-
-				Vector3 bakeVoxelPos = gridPos + Vector3(
-					static_cast<float>(x),
-					static_cast<float>(y),
-					static_cast<float>(z));
-
-				const VoxelCell bakeCell = m_VoxelGrid.GetCell(
-					static_cast<int>(bakeVoxelPos.x),
-					static_cast<int>(bakeVoxelPos.y),
-					static_cast<int>(bakeVoxelPos.z)
-				);
-
-				if (bakeCell && !bakeCell.IsActive())
-				{
-					foundGridPos = bakeVoxelPos;
-					return bakeCell;
-				}
-			}
-		}
+		++uiIndex;
 	}
 
-	return VoxelCell();
+	/* The live count, exactly. The old counter incremented for particles it
+	   then destroyed, so the instance count could exceed the number of records
+	   actually written and the pass drew stale ones (P15). */
+	m_uiActiveParticleCount = m_Debris.GetCount();
 }
 
 

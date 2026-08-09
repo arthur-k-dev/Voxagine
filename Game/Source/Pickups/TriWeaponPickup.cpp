@@ -49,7 +49,7 @@ void TriWeaponPickup::OnTriWeaponPickedUp(Collider* pCollider)
 {
 	if (pCollider->GetOwner()->GetName() == "Player")
 	{
-		if(Player* player = dynamic_cast<Player*>(pCollider->GetOwner()))
+		if(dynamic_cast<Player*>(pCollider->GetOwner()))
 		{
 			//player->GetCurrentWeapon()->ResetWeaponAmmo(EWeaponFlags_Triple);
 		}

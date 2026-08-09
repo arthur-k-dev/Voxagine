@@ -380,7 +380,7 @@ Entity* JsonSerializer::ValueToEntity(Value& val, World& world, bool bGenerateNe
 	Value& childrenVal = val["Children"];
 	for (SizeType i = 0; i < childrenVal.Size(); i++)
 	{
-		Entity* pChild = ValueToEntity(childrenVal[i], world, bGenerateNewId, pEntity);
+		ValueToEntity(childrenVal[i], world, bGenerateNewId, pEntity);
 	}
 	return pEntity;
 }
@@ -479,7 +479,6 @@ void JsonSerializer::SetPropertyFromValue(World* world, const Value& val, rttr::
 
 void JsonSerializer::ChunkifyWorld(World& world, Value& chunkDataVal, UVector2 chunkSize, Document::AllocatorType& alloc)
 {
-	UVector3 voxelGridDimensions = world.GetVoxelGrid()->GetDimensions();
 	UVector2 dimensions = world.GetWorldSize();
 	uint32_t numX = dimensions.x / chunkSize.x;
 	uint32_t numY = dimensions.y / chunkSize.y;
@@ -897,9 +896,6 @@ void JsonSerializer::ValueToVariant(World* world, rttr::instance& instance, rttr
 		if (rttr::type::get<VClass>().is_base_of(instance.get_derived_type()))
 			return;
 
-		Entity* pEntity = instance.try_convert<Entity>();
-		Component* pComponent = instance.try_convert<Component>();
-
 		if(world)
 			world->m_vWorldConnections.push_back({ instance, property, variantType, val.GetInt64(), index });
 	}
@@ -908,9 +904,6 @@ void JsonSerializer::ValueToVariant(World* world, rttr::instance& instance, rttr
 	{
 		if (rttr::type::get<VClass>().is_base_of(instance.get_derived_type()))
 			return;
-
-		Entity* pEntity = instance.try_convert<Entity>();
-		Component* pComponent = instance.try_convert<Component>();
 
 		if(world)
 			world->m_vWorldConnections.push_back({ instance, property, variantType, val.GetInt64(), index });
@@ -1181,7 +1174,7 @@ bool JsonSerializer::SetInstanceArrayProperty(rttr::instance& instance, const rt
 	// it is already the right size
 	const size_t ContainerSize = arrView.get_size();
 
-	if (ContainerSize > 0 && index < static_cast<const int>(ContainerSize))
+	if (ContainerSize > 0 && index < static_cast<int>(ContainerSize))
 	{
 		// const bool isContainer = (arrView.get_value(0).extract_wrapped_value().is_associative_container() ||
 			// arrView.get_value(0).extract_wrapped_value().is_sequential_container());

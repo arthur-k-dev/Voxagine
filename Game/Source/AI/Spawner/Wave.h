@@ -44,24 +44,24 @@ public:
 	 */
 	/*struct SpawnProperties
 	{
-		/*!
+		*!
 		 * @brief - what kind of monster do you want to spawn
 		 *
 		EMonsterType eMonsterType = static_cast<EMonsterType>(iMonsterType{ 0 });
 		std::vector<TSubclass<Monster> m_MonsterClasses;
 
-		/*! 
-		 *@brief How fast should the next one spawn 
+		*!
+		 *@brief How fast should the next one spawn
 		*
 		float fNextSpawnTimer = 2.5f;
 
-		/*!
+		*!
 		 * @brief - Should we spawn the entities
 		 * in a random sphere or at location
 		 *
 		bool bRandomLocation = true;
 
-		/*!
+		*!
 		 * @brief custom location.
 		 * This position is relative to the spawner owner.
 		 *

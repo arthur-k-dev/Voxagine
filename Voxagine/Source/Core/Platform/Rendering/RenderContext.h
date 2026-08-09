@@ -303,6 +303,20 @@ public:
 	   uncached memory. */
 	uint32_t ValidateBrickGrid();
 
+	/* Pushes whatever of the coverage pyramid's finest level the texture does
+	   not yet hold, and rebuilds the rest of its mip chain. Once a frame, on
+	   the engine that records the voxel pass and before it opens - the pass
+	   samples the result. See m_pPyramidView. */
+	void UploadVoxelPyramid(PCommandEngine* pEngine);
+
+	/* Reads the coverage texture back and checks it against the mirror the CPU
+	   maintains, plus every coarser mip against the average of its children.
+	   The failure it exists for is a dirty region that was never uploaded:
+	   ValidateBrickGrid proves the mirror, and nothing else proves that what
+	   the GPU holds is the mirror. Blocking, and it allocates the whole chain
+	   again to read into - a menu item, not a frame check. */
+	uint32_t ValidateVoxelPyramid();
+
 	/* Cross-checks the far field's placement against the resident window, which
 	   holds the same geometry at full resolution. See FarFieldVolume::Validate.
 	   On demand only, for the same reason. */
@@ -453,6 +467,20 @@ protected:
 
 	Mapper* m_pBrickMapper = nullptr;
 	VoxelBrickGrid m_BrickGrid;
+
+	/* The coverage pyramid's GPU form (RENDERING_PLAN.md 7.1b route B): a 3D
+	   R8 texture whose mip chain is the pyramid, so an AO cone step is one
+	   SampleLevel instead of the eight hand-written fetches route A measured
+	   at 4.6x the rest of the cone.
+
+	   The staging mapper is the pyramid's finest level as unorm bytes, written
+	   by VoxelBrickGrid::FlushDirty and copied box by box into mip 0; the rest
+	   of the chain is blitted from it on the GPU. Back-buffered in lockstep
+	   with the voxel and brick mappers, for the same reason they are. */
+	View* m_pPyramidView = nullptr;
+	Mapper* m_pPyramidStaging = nullptr;
+	std::vector<ImageRegion> m_PyramidRegions;
+	float m_fPyramidAuditTimer = 0.f;
 
 	/* Far field. Its own brick grid, over its own cell grid rather than the
 	   window's voxels - the two never interact, and keeping them separate is

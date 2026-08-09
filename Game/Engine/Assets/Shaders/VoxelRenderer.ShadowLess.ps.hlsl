@@ -3,6 +3,9 @@
 
 SamplerState s0 : register(s0);
 
+/* See VoxelRenderer.ps.hlsl. */
+SamplerState pyramidSampler : register(s1);
+
 VOXEL_RW_BUFFER voxelWorldData : register(u0);
 
 /* Occupancy counts per BRICK_SIZE^3 block - see SDFMarcher.hlsl. */
@@ -11,7 +14,11 @@ RW_STRUCTURED_BUFFER(uint) voxelBrickData : register(u1);
 Texture2D<float4> particlePass : register(t1);
 
 /* t2 is the particle depth target, which this variant does not read; the pass
-   binds it either way, so the register is spoken for and t3 stays free. */
+   binds it either way, so the register is spoken for. */
+
+/* Coverage pyramid - RENDERING_PLAN.md 7.1b route B, and t3 rather than t4
+   because this variant has no shadow map in front of it. */
+Texture3D<float> voxelPyramid : register(t3);
 
 VOXEL_BUFFER voxelModelData[] : register(t4);
 

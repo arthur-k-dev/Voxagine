@@ -250,8 +250,25 @@ bool RenderContext::ResizeWorldBuffer()
 	   Order matters: the grid drops its mirror pointers first, the mapper is
 	   then free to reallocate underneath it, and Flush repopulates. */
 	m_BrickGrid.Resize(uWorldSize);
-	m_pBrickMapper->Resize(m_BrickGrid.GetPyramidElementCount(), sizeof(uint32_t));
+	m_pBrickMapper->Resize(m_BrickGrid.GetBrickCount(), sizeof(uint32_t));
 	m_BrickGrid.SetBuffers(m_pBrickMapper->GetData(), m_pBrickMapper->GetBackBufferData());
+
+	/* Same order again for the coverage texture and its staging: the grid is
+	   holding pointers into a mapper that is about to be reallocated, so it
+	   drops them (in Resize, above), the mapper resizes, and Flush repopulates
+	   both mirrors. The texture's mip 0 is the pyramid's finest level, so its
+	   extent is that level's grid rather than the window's. */
+	if (m_BrickGrid.GetFineCellCount() > 0)
+	{
+		m_pPyramidStaging->Resize(m_BrickGrid.GetFineCellCount(), sizeof(uint8_t));
+
+		m_BrickGrid.SetDensityBuffers(
+			reinterpret_cast<uint8_t*>(m_pPyramidStaging->GetData()),
+			reinterpret_cast<uint8_t*>(m_pPyramidStaging->GetBackBufferData()));
+
+		m_pPyramidView->Resize(m_BrickGrid.GetFineGridSize());
+	}
+
 	m_BrickGrid.Flush();
 
 	/* Whatever the bakers stamped is gone. See GetVoxelGeneration. */
@@ -263,6 +280,192 @@ bool RenderContext::ResizeWorldBuffer()
 uint32_t RenderContext::ValidateBrickGrid()
 {
 	return m_BrickGrid.Validate(false, m_pVoxelData);
+}
+
+uint32_t RenderContext::ValidateVoxelPyramid()
+{
+	if (m_pPyramidView == nullptr || m_pPyramidView->GetNative() == nullptr ||
+		m_pPyramidStaging == nullptr || m_pPyramidStaging->GetData() == nullptr)
+	{
+		fprintf(stderr, "[pyramid] no coverage texture to validate\n");
+		return 0;
+	}
+
+	const UVector3 v3Base = m_pPyramidView->GetInfo().m_Size;
+	const uint32_t uiMips = m_pPyramidView->GetNative()->GetMipLevels();
+
+	std::vector<UVector3> levelSize;
+	std::vector<size_t> levelOffset;
+	size_t uiTotal = 0;
+
+	for (uint32_t uiLevel = 0; uiLevel < uiMips; ++uiLevel)
+	{
+		const UVector3 v3Size(
+			std::max(v3Base.x >> uiLevel, 1u),
+			std::max(v3Base.y >> uiLevel, 1u),
+			std::max(v3Base.z >> uiLevel, 1u));
+
+		levelSize.push_back(v3Size);
+		levelOffset.push_back(uiTotal);
+
+		uiTotal += static_cast<size_t>(v3Size.x) * v3Size.y * v3Size.z;
+	}
+
+	Mapper::Info readbackDesc;
+	readbackDesc.m_Name = "Voxel Pyramid Readback";
+	readbackDesc.m_ColorFormat = E_UNKNOWN;
+	readbackDesc.m_GPUAccessType = E_READ_ONLY;
+
+	std::unique_ptr<Mapper> pReadback = std::make_unique<Mapper>(Get(), readbackDesc, false);
+	pReadback->Resize(static_cast<uint32_t>(uiTotal), sizeof(uint8_t));
+
+	/* The uploads are recorded on VDirect and read back here on Texture, and
+	   two submissions to the same queue carry no dependency on each other. A
+	   readback that overtakes the frame that filled the texture reports the
+	   part of the upload that had not landed yet, which reads exactly like a
+	   missed dirty region. */
+	m_pCommandEngines["VDirect"]->WaitForGPU();
+
+	PCommandEngine* pEngine = m_pCommandEngines["Texture"]->Get();
+
+	if (pReadback->GetNative() == nullptr ||
+		!pEngine->ReadbackImageMips(m_pPyramidView->GetNative(), pReadback->GetNative(), sizeof(uint8_t)))
+	{
+		fprintf(stderr, "[pyramid] readback of the coverage texture failed\n");
+		return 0;
+	}
+
+	const uint8_t* pRead = reinterpret_cast<const uint8_t*>(pReadback->GetData());
+	const uint8_t* pMirror = reinterpret_cast<const uint8_t*>(m_pPyramidStaging->GetData());
+
+	uint32_t uiMismatches = 0;
+
+	/* Mip 0 against the mirror the CPU maintains, exactly. This is the check
+	   that matters: ValidateBrickGrid proves the mirror against the voxel
+	   buffer, and nothing else proves that what the GPU holds is the mirror.
+	   A disagreement here is a dirty region that was never uploaded - stale
+	   ambient occlusion, which is invisible in a code review and reads as art
+	   in the image. */
+	{
+		const size_t uiFine = static_cast<size_t>(levelSize[0].x) * levelSize[0].y * levelSize[0].z;
+
+		uint32_t uiBad = 0;
+		size_t uiFirst = 0;
+
+		for (size_t i = 0; i < uiFine; ++i)
+		{
+			if (pRead[i] == pMirror[i])
+				continue;
+
+			if (uiBad == 0)
+				uiFirst = i;
+
+			++uiBad;
+		}
+
+		if (uiBad > 0)
+		{
+			fprintf(stderr, "[pyramid] mip 0 disagrees with the staging mirror for %u of %zu cells, "
+			                "first at %zu (texture %u, mirror %u)\n",
+			        uiBad, uiFine, uiFirst, pRead[uiFirst], pMirror[uiFirst]);
+		}
+
+		uiMismatches += uiBad;
+	}
+
+	/* Every coarser mip against the average of its eight children. The blit
+	   that produced them is a linear resample, which *is* that average when
+	   all three axes halve exactly and is something else when one of them does
+	   not - so an odd axis is reported as unchecked rather than as wrong. */
+	uint32_t uiSkipped = 0;
+
+	for (uint32_t uiLevel = 1; uiLevel < uiMips; ++uiLevel)
+	{
+		const UVector3& v3Size = levelSize[uiLevel];
+		const UVector3& v3Child = levelSize[uiLevel - 1];
+
+		if (v3Child.x != v3Size.x * 2 || v3Child.y != v3Size.y * 2 || v3Child.z != v3Size.z * 2)
+		{
+			++uiSkipped;
+			continue;
+		}
+
+		const uint8_t* pLevel = pRead + levelOffset[uiLevel];
+		const uint8_t* pBelow = pRead + levelOffset[uiLevel - 1];
+
+		uint32_t uiBad = 0;
+
+		for (uint32_t uiZ = 0; uiZ < v3Size.z; ++uiZ)
+		for (uint32_t uiY = 0; uiY < v3Size.y; ++uiY)
+		for (uint32_t uiX = 0; uiX < v3Size.x; ++uiX)
+		{
+			uint32_t uiSum = 0;
+
+			for (uint32_t uiChildZ = 0; uiChildZ < 2; ++uiChildZ)
+			for (uint32_t uiChildY = 0; uiChildY < 2; ++uiChildY)
+			for (uint32_t uiChildX = 0; uiChildX < 2; ++uiChildX)
+			{
+				uiSum += pBelow[(uiX * 2 + uiChildX)
+					+ (uiY * 2 + uiChildY) * v3Child.x
+					+ (uiZ * 2 + uiChildZ) * v3Child.x * v3Child.y];
+			}
+
+			const int32_t iExpected = static_cast<int32_t>((uiSum + 4) / 8);
+			const int32_t iActual = pLevel[uiX + uiY * v3Size.x + uiZ * v3Size.x * v3Size.y];
+
+			/* Two, not zero: the hardware filter rounds its own way and the
+			   reference above rounds to nearest. A stale level is off by far
+			   more than the rounding of an eight-way mean. */
+			if (std::abs(iActual - iExpected) > 2)
+				++uiBad;
+		}
+
+		if (uiBad > 0)
+		{
+			fprintf(stderr, "[pyramid] mip %u (%ux%ux%u) disagrees with the average of its children "
+			                "for %u cells\n", uiLevel, v3Size.x, v3Size.y, v3Size.z, uiBad);
+		}
+
+		uiMismatches += uiBad;
+	}
+
+	fprintf(stderr, "[pyramid] validated %zu texels over %u mips of %ux%ux%u: %u disagree%s\n",
+	        uiTotal, uiMips, v3Base.x, v3Base.y, v3Base.z, uiMismatches,
+	        uiSkipped > 0 ? " (levels with an odd axis are resampled rather than averaged and are not checked)" : "");
+
+	return uiMismatches;
+}
+
+void RenderContext::UploadVoxelPyramid(PCommandEngine* pEngine)
+{
+	if (pEngine == nullptr || m_pPyramidView == nullptr || m_pPyramidStaging == nullptr)
+		return;
+
+	if (m_pPyramidView->GetNative() == nullptr || m_pPyramidStaging->GetNative() == nullptr)
+		return;
+
+	/* True means the texture holds the wrong buffer's densities entirely - a
+	   resize, a clear, a window slide, or more dirty boxes than are worth
+	   issuing separately. See VoxelBrickGrid::TakeDensityRegions. */
+	if (m_BrickGrid.TakeDensityRegions(m_PyramidRegions))
+	{
+		const UVector3& v3Fine = m_BrickGrid.GetFineGridSize();
+
+		ImageRegion whole;
+		whole.m_uiWidth = std::max(v3Fine.x, 1u);
+		whole.m_uiHeight = std::max(v3Fine.y, 1u);
+		whole.m_uiDepth = std::max(v3Fine.z, 1u);
+
+		m_PyramidRegions.assign(1, whole);
+	}
+
+	if (m_PyramidRegions.empty())
+		return;
+
+	pEngine->UploadImageRegions(
+		m_pPyramidView->GetNative(), m_pPyramidStaging->GetNative(),
+		m_PyramidRegions.data(), static_cast<uint32_t>(m_PyramidRegions.size()),
+		sizeof(uint8_t));
 }
 
 uint32_t RenderContext::ValidateFarField()
@@ -316,7 +519,7 @@ void RenderContext::BuildFarField(World* pWorld)
 	m_FarFieldBricks.Resize(m_FarField.GetGridSize());
 
 	m_pFarFieldMapper->Resize(m_FarField.GetCellCount(), sizeof(uint32_t));
-	m_pFarFieldBrickMapper->Resize(m_FarFieldBricks.GetPyramidElementCount(), sizeof(uint32_t));
+	m_pFarFieldBrickMapper->Resize(m_FarFieldBricks.GetBrickCount(), sizeof(uint32_t));
 
 	m_FarFieldBricks.SetBuffers(m_pFarFieldBrickMapper->GetData(), nullptr);
 
@@ -385,6 +588,33 @@ bool RenderContext::Present()
 	   maintaining it per voxel measured 3.9x the write cost of the bricks
 	   alone. Main thread; chunk streaming marks the back buffer from job
 	   threads and the marks are atomic. */
+	/* Before the flush, and only while nothing is outstanding: at this point
+	   the texture holds everything the last upload carried and the mirror
+	   holds everything the last flush wrote, which is the one moment in the
+	   frame when the two are supposed to be identical. RENDERING_PLAN.md 7.1b
+	   route B; VOXAGINE_SYNC_AUDIT's counterpart for the coverage texture, and
+	   run it *during destruction* for the same reason - a missed dirty region
+	   is produced by a write and does not exist at rest. */
+	{
+		static const float s_fPyramidAuditInterval = []
+		{
+			const char* pValue = std::getenv("VOXAGINE_PYRAMID_AUDIT");
+
+			return pValue != nullptr ? static_cast<float>(atof(pValue)) : 0.f;
+		}();
+
+		if (s_fPyramidAuditInterval > 0.f && !m_BrickGrid.HasPendingDensityRegions())
+		{
+			m_fPyramidAuditTimer += static_cast<float>(m_pPlatform->GetApplication()->GetTimer().GetElapsedSeconds());
+
+			if (m_fPyramidAuditTimer >= s_fPyramidAuditInterval)
+			{
+				m_fPyramidAuditTimer = 0.f;
+				ValidateVoxelPyramid();
+			}
+		}
+	}
+
 	m_BrickGrid.FlushDirty();
 
 	// Hold timer that counts drawn frames
@@ -686,6 +916,10 @@ bool RenderContext::Present()
 		pVDirectEngine->Reset();
 		pVDirectEngine->Start();
 
+		/* Before any pass opens: the voxel pass samples the coverage texture,
+		   and a copy cannot be recorded inside a render pass instance. */
+		UploadVoxelPyramid(pVDirectEngine);
+
 		/* One render pass instance per pass: dynamic rendering cannot nest
 		   them, so the DX12-style interleaved Begin order would silently skip
 		   every pass after the first. The voxel pass samples the particle
@@ -828,6 +1062,7 @@ void RenderContext::InitializeRenderLoop()
 
 	Sampler* pLinearSampler = nullptr;
 	Sampler* pPointSampler = nullptr;
+	Sampler* pPyramidSampler = nullptr;
 
 #if defined(_DEBUG) || defined(EDITOR)
 	DebugPass* pDebugPass = nullptr;
@@ -920,8 +1155,14 @@ void RenderContext::InitializeRenderLoop()
 			   rather than at the ChunkSystem call site is what guarantees the
 			   three stay in lockstep. */
 			m_pBrickMapper->SwapBuffer();
+			m_pPyramidStaging->SwapBuffer();
+
 			m_BrickGrid.Swap();
 			m_BrickGrid.SetBuffers(m_pBrickMapper->GetData(), m_pBrickMapper->GetBackBufferData());
+
+			m_BrickGrid.SetDensityBuffers(
+				reinterpret_cast<uint8_t*>(m_pPyramidStaging->GetData()),
+				reinterpret_cast<uint8_t*>(m_pPyramidStaging->GetBackBufferData()));
 		}, this);
 	}
 
@@ -946,6 +1187,59 @@ void RenderContext::InitializeRenderLoop()
 
 		m_pMappers.push_back(std::make_unique<Mapper>(Get(), brickMapperDesc, false));
 		m_pBrickMapper = m_pMappers.back().get();
+	}
+
+	/* Coverage pyramid texture (RENDERING_PLAN.md 7.1b route B)
+	 *
+	 * Mip L is pyramid level L: a single channel holding the occupied fraction
+	 * of the cell, which is all an occlusion term needs and quantizes exactly
+	 * at the finest level (a 2^3 cell holds at most eight voxels).
+	 *
+	 * One element and 1x1x1 until a world is loaded, so the descriptor and the
+	 * image layout are valid from the first frame. ResizeWorldBuffer gives both
+	 * their real size. */
+	{
+		Mapper::Info pyramidStagingDesc;
+		pyramidStagingDesc.m_Name = "Voxel Pyramid Staging";
+		pyramidStagingDesc.m_ColorFormat = E_UNKNOWN;
+		pyramidStagingDesc.m_GPUAccessType = E_READ_ONLY;
+		pyramidStagingDesc.m_bHasBackBuffer = true;
+
+		m_pMappers.push_back(std::make_unique<Mapper>(Get(), pyramidStagingDesc, false));
+		m_pPyramidStaging = m_pMappers.back().get();
+		m_pPyramidStaging->Resize(1, sizeof(uint8_t));
+
+		View::Info pyramidDesc;
+		pyramidDesc.m_Name = "Voxel Pyramid";
+		pyramidDesc.m_DimensionType = E_TEXTURE_3D;
+		pyramidDesc.m_ColorFormat = E_R8_UNORM;
+		pyramidDesc.m_Size = UVector3(1, 1, 1);
+		pyramidDesc.m_Type = View::E_SHADER_RESOURCE_VIEW;
+		pyramidDesc.m_State = E_STATE_PIXEL_SHADER_RESOURCE;
+		pyramidDesc.m_uiMipLevels = VoxelBrickGrid::k_uiPyramidLevels;
+		pyramidDesc.m_bIsAttachment = false;
+
+		m_pViews.push_back(std::make_unique<View>(Get(), pyramidDesc));
+		m_pPyramidView = m_pViews.back().get();
+
+		/* Linear within a level, point across them, and transparent-black
+		   outside the window. Each of the three is load-bearing:
+
+		   - linear is the whole reason the pyramid moved into a texture; a
+		     point sample of a 2-voxel lattice reports whichever way a block
+		     happens to fall in it, which is the artefact route A's hand-written
+		     filter existed to remove.
+		   - point across levels keeps a cone step at one fetch. Blending two
+		     mips is smoother and costs twice what route B is buying.
+		   - the border is what makes a cone that leaves the window read as open
+		     sky rather than as a smear of whatever was at the edge. */
+		Sampler::Info pyramidSamplerDesc;
+		pyramidSamplerDesc.m_FilterMode = E_LINEAR;
+		pyramidSamplerDesc.m_MipFilterMode = E_POINT;
+		pyramidSamplerDesc.m_WrapMode = E_BORDER;
+
+		m_pSamplers.push_back(std::make_unique<Sampler>(Get(), pyramidSamplerDesc));
+		pPyramidSampler = m_pSamplers.back().get();
 	}
 
 	/* Far-field LOD volume (RENDERING_PLAN.md phase 4)
@@ -1074,8 +1368,8 @@ void RenderContext::InitializeRenderLoop()
 		/* The shadow map goes in as the third texture, so t3 - see
 		   VoxelRenderer.ps.hlsl. Null under ShadowLess, where that variant
 		   declares no t3 and VoxelPass skips the binding. */
-		pVoxelPass = new VoxelPass(Get(), pVertexShader, pPixelShader, pPointSampler, m_pVoxelMapper, m_pBrickMapper, pCameraBuffer, pAABBBuffer, m_pParticlePass->GetTargetView(0), m_pParticlePass->GetTargetView(1),
-			pSunShadowPass != nullptr ? pSunShadowPass->GetTargetView() : nullptr);
+		pVoxelPass = new VoxelPass(Get(), pVertexShader, pPixelShader, pPointSampler, pPyramidSampler, m_pVoxelMapper, m_pBrickMapper, pCameraBuffer, pAABBBuffer, m_pParticlePass->GetTargetView(0), m_pParticlePass->GetTargetView(1),
+			pSunShadowPass != nullptr ? pSunShadowPass->GetTargetView() : nullptr, m_pPyramidView);
 		m_pRenderPasses.emplace(pVoxelPass->GetData().m_Name, std::unique_ptr<VoxelPass>(pVoxelPass));
 	}
 

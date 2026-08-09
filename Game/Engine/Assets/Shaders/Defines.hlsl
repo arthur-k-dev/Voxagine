@@ -45,15 +45,21 @@
 #define BRICK_INV_SIZE 0.25
 
 /* Coverage pyramid (RENDERING_PLAN.md 7.1b). The bricks above are one level of
-   it: PYRAMID_LEVELS counts over the same window, each level's cell twice the
-   edge of the one below, the finest at 1 << PYRAMID_FINE_SHIFT voxels. They
-   share the brick buffer, laid end to end, and VoxelPyramid.hlsl derives where
-   each one starts. These three are VoxelBrickGrid's k_uiFineShift,
-   k_uiPyramidLevels and k_uiBrickLevel - change both sides or neither.
+   it: PYRAMID_LEVELS coverage values over the same window, each level's cell
+   twice the edge of the one below, the finest at 1 << PYRAMID_FINE_SHIFT
+   voxels. These three are VoxelBrickGrid's k_uiFineShift, k_uiPyramidLevels
+   and k_uiBrickLevel - change both sides or neither.
 
    A level finer than the brick is the whole point: a cone traced against the
    4-voxel bricks alone cannot serve ambient occlusion, which was established on
-   screen rather than argued (see AO_CONE_ENABLED below). */
+   screen rather than argued (see AO_CONE_ENABLED below).
+
+   Two representations, and the split is route B's (see AO_CONE_ENABLED). The
+   *brick* level is counts in a storage buffer, because the marcher wants an
+   exact "is anything in here" and reads one cell at a time; VoxelPyramid.hlsl
+   addresses it. Every level including that one is also a mip of the
+   voxelPyramid 3D texture as a filtered density, because a cone wants its own
+   width filtered and one SampleLevel is the whole operation. */
 #define PYRAMID_FINE_SHIFT 1
 #define PYRAMID_LEVELS 5
 #define PYRAMID_BRICK_LEVEL (BRICK_SHIFT - PYRAMID_FINE_SHIFT)
@@ -181,26 +187,19 @@
    pyramid the image is right: no self-occlusion wedges, no lattice, and a wall
    that reads as stone with gaps in it.
 
-   OFF for cost, which is a different reason from the first cut's. The voxel
-   pass, headless, same vantage:
+   It was off through route A, for cost rather than for image. With the levels
+   as counts in a storage buffer the filter had to be eight fetches by hand,
+   and the voxel pass measured, headless, same vantage:
 
                       1920x1080   3840x2160
      off                0.745       2.426
      one fetch a step   1.051       3.565
-     trilinear          2.320       7.666
+     trilinear by hand  2.320       7.666
 
-   The filter is 4.6x the whole rest of the cone, because eight fetches by hand
-   is what a storage buffer costs where a 3D texture would charge one sample -
-   and +5.24 ms at 4K is the entire lighting budget several times over. That is
-   the measurement 7.1b said would decide route B, and it decides it. */
-#define AO_CONE_ENABLED 0
-
-/* Trilinear filtering of a pyramid sample, which costs eight fetches by hand
-   because the levels live in a storage buffer rather than a 3D texture. Set to
-   0 to price a step at one fetch - the cost a hardware SampleLevel would have
-   - which is the measurement 7.1b route B turns on. Not a quality setting: at
-   0 the lattice artefact the pyramid exists to remove comes back. */
-#define AO_CONE_TRILINEAR 1
+   The filter alone was 4.6x the whole rest of the cone. Route B moves the
+   pyramid into a 3D texture's mip chain, where a step is one SampleLevel and
+   the filter is the sampler's - the middle row is what that was priced at. */
+#define AO_CONE_ENABLED 1
 
 /* Half-angle of a cone as a radius-over-distance ratio. Five cones covering a
    hemisphere is ~45 degrees each; a little under that keeps them from
@@ -233,8 +232,12 @@
 #define AO_CONE_GROWTH 1.7
 
 /* How much a fully solid cell occludes per step. Under 1 because a cone step
-   samples one point of a footprint that is mostly not that point; tune by eye
-   against how heavy enclosed areas look. */
+   samples one point of a footprint that is mostly not that point.
+
+   Tuned by eye against how heavy enclosed areas look, which is the only way to
+   tune it - and 0.35 was confirmed on screen once the pyramid was a texture
+   (RENDERING_PLAN.md 7.1b route B), so it is a judged value now rather than a
+   plausible one. */
 #define AO_CONE_STRENGTH 0.35
 
 /* Where a cone starts, along the surface normal. Enough to leave the finest

@@ -18,13 +18,14 @@ namespace
 		{
 			m_Grid.Resize(v3Size);
 
-			/* Sized for the whole coverage pyramid: the levels share one
-			   buffer, so a mirror sized to the bricks alone is overrun by the
-			   first write to any other level. */
-			m_Front.assign(m_Grid.GetPyramidElementCount(), 0u);
-			m_Back.assign(m_Grid.GetPyramidElementCount(), 0u);
+			m_Front.assign(m_Grid.GetBrickCount(), 0u);
+			m_Back.assign(m_Grid.GetBrickCount(), 0u);
+
+			m_Density.assign(m_Grid.GetFineCellCount(), 0u);
+			m_DensityBack.assign(m_Grid.GetFineCellCount(), 0u);
 
 			m_Grid.SetBuffers(m_Front.data(), m_Back.data());
+			m_Grid.SetDensityBuffers(m_Density.data(), m_DensityBack.data());
 			m_Grid.Flush();
 
 			m_Words.assign(static_cast<size_t>(v3Size.x) * v3Size.y * v3Size.z, 0u);
@@ -66,16 +67,20 @@ namespace
 
 		uint32_t Validate() { return m_Grid.Validate(false, m_Words.data()); }
 
-		/* The bricks no longer start at element zero, so a mirror read has to
-		   go through the level offset the shader also derives. */
-		const uint32_t* Mirror() const
-		{
-			return m_Front.data() + m_Grid.GetLevelOffset(VoxelBrickGrid::k_uiBrickLevel);
-		}
+		/* The buffer the marcher binds holds the brick level and nothing else
+		   (RENDERING_PLAN.md 7.1b route B), so it starts at element zero
+		   again. */
+		const uint32_t* Mirror() const { return m_Front.data(); }
 
-		const uint32_t* LevelMirror(uint32_t uiLevel) const
+		/* The staging side of the coverage texture: the finest level as one
+		   unorm byte a cell. */
+		const uint8_t* Density() const { return m_Density.data(); }
+
+		static uint8_t DensityOf(uint32_t uiCount)
 		{
-			return m_Front.data() + m_Grid.GetLevelOffset(uiLevel);
+			const uint32_t uiVolume = VoxelBrickGrid::LevelVolume(0);
+
+			return static_cast<uint8_t>((uiCount * 255u + uiVolume / 2u) / uiVolume);
 		}
 
 	private:
@@ -83,6 +88,8 @@ namespace
 		VoxelBrickGrid m_Grid;
 		std::vector<uint32_t> m_Front;
 		std::vector<uint32_t> m_Back;
+		std::vector<uint8_t> m_Density;
+		std::vector<uint8_t> m_DensityBack;
 		std::vector<uint32_t> m_Words;
 	};
 
@@ -180,11 +187,9 @@ VOXAGINE_CHECK(VoxelBrickGrid, TheHashSeesTheCountsAndTheBits)
 
 /* --- Coverage pyramid (RENDERING_PLAN.md 7.1b) ---------------------------- */
 
-VOXAGINE_CHECK(VoxelBrickGrid, TheLevelsAreLaidEndToEndFromTheFinest)
+VOXAGINE_CHECK(VoxelBrickGrid, EveryLevelHalvesTheOneBelowItAndKeepsItsEdge)
 {
 	BrickGrid grid;
-
-	uint32_t uiExpected = 0;
 
 	for (uint32_t uiLevel = 0; uiLevel < VoxelBrickGrid::k_uiPyramidLevels; ++uiLevel)
 	{
@@ -198,16 +203,16 @@ VOXAGINE_CHECK(VoxelBrickGrid, TheLevelsAreLaidEndToEndFromTheFinest)
 		CHECK_EQ(v3Level.z, (k_v3Size.z + uiCell - 1) / uiCell) << "level " << uiLevel;
 
 		CHECK_EQ(grid->GetLevelCellCount(uiLevel), v3Level.x * v3Level.y * v3Level.z);
-		CHECK_EQ(grid->GetLevelOffset(uiLevel), uiExpected) << "level " << uiLevel;
-
-		uiExpected += grid->GetLevelCellCount(uiLevel);
 	}
-
-	CHECK_EQ(grid->GetPyramidElementCount(), uiExpected);
 
 	/* The bricks are a level of this rather than a structure beside it. */
 	CHECK_EQ(grid->GetBrickCount(), grid->GetLevelCellCount(VoxelBrickGrid::k_uiBrickLevel));
 	CHECK_EQ(grid->GetGridSize().x, grid->GetLevelGridSize(VoxelBrickGrid::k_uiBrickLevel).x);
+
+	/* The finest level is what the coverage texture's mip 0 has to hold, one
+	   texel a cell. */
+	CHECK_EQ(grid->GetFineCellCount(), grid->GetLevelCellCount(0));
+	CHECK_EQ(grid->GetFineGridSize().x, grid->GetLevelGridSize(0).x);
 }
 
 VOXAGINE_CHECK(VoxelBrickGrid, OneVoxelIsCountedOnceAtEveryLevel)
@@ -241,7 +246,15 @@ VOXAGINE_CHECK(VoxelBrickGrid, OneVoxelIsCountedOnceAtEveryLevel)
 			+ (9u >> uiShift) * v3Level.x * v3Level.y;
 
 		CHECK_EQ(grid->GetLevelCount(false, uiLevel, uiCellID), 1u) << "level " << uiLevel;
-		CHECK_EQ(grid.LevelMirror(uiLevel)[uiCellID], 1u) << "level " << uiLevel;
+
+		/* Only two levels leave the CPU, and they leave it differently: the
+		   bricks as a count in the buffer the marcher binds, the finest as a
+		   density byte staged for the coverage texture. */
+		if (uiLevel == VoxelBrickGrid::k_uiBrickLevel)
+			CHECK_EQ(grid.Mirror()[uiCellID], 1u);
+
+		if (uiLevel == 0)
+			CHECK_EQ(uint32_t(grid.Density()[uiCellID]), uint32_t(BrickGrid::DensityOf(1)));
 	}
 
 	CHECK_EQ(grid.Validate(), 0u);
@@ -301,8 +314,17 @@ VOXAGINE_CHECK(VoxelBrickGrid, TheBulkRegionPathMaintainsEveryLevel)
 			CHECK_EQ(grid->GetLevelCount(false, uiLevel, uiCell), VoxelBrickGrid::LevelVolume(uiLevel))
 				<< "level " << uiLevel << " cell " << uiCell;
 
-			CHECK_EQ(grid.LevelMirror(uiLevel)[uiCell], VoxelBrickGrid::LevelVolume(uiLevel))
-				<< "level " << uiLevel << " cell " << uiCell;
+			if (uiLevel == VoxelBrickGrid::k_uiBrickLevel)
+			{
+				CHECK_EQ(grid.Mirror()[uiCell], VoxelBrickGrid::k_uiBrickVolume)
+					<< "cell " << uiCell;
+			}
+
+			/* Solid, so the density byte is saturated - and this is the check
+			   that the count-to-byte conversion is exact at full occupancy
+			   rather than one short of it. */
+			if (uiLevel == 0)
+				CHECK_EQ(uint32_t(grid.Density()[uiCell]), 255u) << "cell " << uiCell;
 		}
 	}
 
@@ -316,8 +338,111 @@ VOXAGINE_CHECK(VoxelBrickGrid, TheBulkRegionPathMaintainsEveryLevel)
 	for (uint32_t uiLevel = 0; uiLevel < VoxelBrickGrid::k_uiPyramidLevels; ++uiLevel)
 	{
 		for (uint32_t uiCell = 0; uiCell < grid->GetLevelCellCount(uiLevel); ++uiCell)
+		{
 			CHECK_EQ(grid->GetLevelCount(false, uiLevel, uiCell), 0u) << "level " << uiLevel;
+
+			if (uiLevel == 0)
+				CHECK_EQ(uint32_t(grid.Density()[uiCell]), 0u) << "cell " << uiCell;
+		}
 	}
 
 	CHECK_EQ(grid.Validate(), 0u);
+}
+
+/* --- What reaches the coverage texture (RENDERING_PLAN.md 7.1b route B) ---- */
+
+VOXAGINE_CHECK(VoxelBrickGrid, EveryDensityWriteIsCoveredByADirtyRegion)
+{
+	BrickGrid grid;
+
+	/* Two bursts far apart, so the regions cannot be one box by accident, and
+	   a run along x inside each so the merge is exercised. */
+	for (uint32_t uiX = 4; uiX < 16; ++uiX)
+		grid.Write(uiX, 5, 5, k_uiStone);
+
+	for (uint32_t uiX = 20; uiX < 24; ++uiX)
+		grid.Write(uiX, 17, 19, k_uiStone);
+
+	grid->FlushDirty();
+
+	std::vector<ImageRegion> regions;
+	const bool bFull = grid->TakeDensityRegions(regions);
+
+	/* The first take after a Flush is always "all of it" - the mirror has just
+	   been repopulated wholesale - so this drains that one and measures the
+	   next. */
+	CHECK_TRUE(bFull);
+	CHECK_TRUE(regions.empty());
+
+	for (uint32_t uiX = 4; uiX < 16; ++uiX)
+		grid.Write(uiX, 9, 5, k_uiStone);
+
+	grid->FlushDirty();
+
+	CHECK_FALSE(grid->TakeDensityRegions(regions));
+	CHECK_FALSE(regions.empty());
+
+	/* Every cell whose density is non-zero at the finest level and was written
+	   by that second burst has to be inside one of the boxes. A box the
+	   uploader never receives is stale ambient occlusion, which nothing about
+	   the image or the counts would report. */
+	const UVector3& v3Fine = grid->GetFineGridSize();
+
+	uint32_t uiUncovered = 0;
+
+	for (uint32_t uiX = 4; uiX < 16; ++uiX)
+	{
+		const UVector3 v3Cell(uiX >> VoxelBrickGrid::k_uiFineShift,
+		                      9u >> VoxelBrickGrid::k_uiFineShift,
+		                      5u >> VoxelBrickGrid::k_uiFineShift);
+
+		bool bCovered = false;
+
+		for (const ImageRegion& region : regions)
+		{
+			bCovered = bCovered ||
+				(v3Cell.x >= region.m_uiX && v3Cell.x < region.m_uiX + region.m_uiWidth &&
+				 v3Cell.y >= region.m_uiY && v3Cell.y < region.m_uiY + region.m_uiHeight &&
+				 v3Cell.z >= region.m_uiZ && v3Cell.z < region.m_uiZ + region.m_uiDepth);
+		}
+
+		if (!bCovered)
+			++uiUncovered;
+	}
+
+	CHECK_EQ(uiUncovered, 0u);
+
+	/* And no box may name a cell that does not exist: the finest grid is a
+	   ceil-div of a window that need not be a whole number of bricks. */
+	for (const ImageRegion& region : regions)
+	{
+		CHECK_TRUE(region.m_uiX + region.m_uiWidth <= v3Fine.x);
+		CHECK_TRUE(region.m_uiY + region.m_uiHeight <= v3Fine.y);
+		CHECK_TRUE(region.m_uiZ + region.m_uiDepth <= v3Fine.z);
+	}
+
+	/* Taking them clears them; nothing is uploaded twice and nothing is left
+	   behind to make the next audit report a backlog. */
+	CHECK_FALSE(grid->HasPendingDensityRegions());
+}
+
+VOXAGINE_CHECK(VoxelBrickGrid, ASwapMakesTheWholeTextureStale)
+{
+	BrickGrid grid;
+
+	std::vector<ImageRegion> regions;
+	grid->TakeDensityRegions(regions);
+
+	grid.Write(9, 9, 9, k_uiStone);
+	grid->FlushDirty();
+
+	CHECK_TRUE(grid->HasPendingDensityRegions());
+
+	/* The texture holds one buffer's densities, and the swap makes that the
+	   wrong buffer whatever either mirror has been kept current with - so the
+	   pending boxes are worthless and the answer is "all of it". */
+	grid->Swap();
+
+	CHECK_TRUE(grid->TakeDensityRegions(regions));
+	CHECK_TRUE(regions.empty());
 }

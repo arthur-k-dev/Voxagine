@@ -3,6 +3,11 @@
 
 SamplerState s0 : register(s0);
 
+/* Linear, point across mips, black outside - the coverage pyramid's sampler.
+   See RenderContext's "Coverage pyramid texture" block for why each of the
+   three matters. */
+SamplerState pyramidSampler : register(s1);
+
 VOXEL_RW_BUFFER voxelWorldData : register(u0);
 
 /* Occupancy counts per BRICK_SIZE^3 block - see SDFMarcher.hlsl. Declared
@@ -17,7 +22,13 @@ Texture2D<float> particleDepthPass : register(t2);
    VoxelPass, so t3; the bindless model array below stays at t4. */
 Texture2D<float> sunShadowMap : register(t3);
 
-VOXEL_BUFFER voxelModelData[] : register(t4);
+/* Coverage pyramid - RENDERING_PLAN.md 7.1b route B. Mip L is pyramid level L
+   over the resident window, holding the occupied fraction of a cell; one
+   SampleLevel is a cone step, filter included. Fourth texture pushed by
+   VoxelPass, so t4, and the bindless model array moves up to t5. */
+Texture3D<float> voxelPyramid : register(t4);
+
+VOXEL_BUFFER voxelModelData[] : register(t5);
 
 struct PS_in
 {

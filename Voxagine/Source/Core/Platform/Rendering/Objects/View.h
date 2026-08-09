@@ -45,6 +45,18 @@ public:
 		PResourceStates				m_State = R_DEF_RESOURCE_STATE_TYPE;
 		Type						m_Type = E_SHADER_RESOURCE_VIEW;
 
+		/* Mip levels, clamped to what the size can actually hold. Every view
+		   in the engine had exactly one until the coverage pyramid
+		   (RENDERING_PLAN.md 7.1b), whose levels *are* the mip chain - one
+		   SampleLevel is what makes a cone step cost one fetch. */
+		uint32_t					m_uiMipLevels = 1;
+
+		/* False for an image that is only ever sampled and copied into.
+		   Requesting colour-attachment usage for one is not free: it is a
+		   format-feature the driver has to support for that format and image
+		   type, and a 3D single-channel image is exactly where it may not. */
+		bool						m_bIsAttachment = true;
+
 		std::string					m_Name = "Unnamed";
 	};
 

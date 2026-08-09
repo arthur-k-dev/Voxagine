@@ -79,6 +79,29 @@ public:
 	   Transitions both sides into the required layouts first. */
 	void CopyResource(VKResource* pDest, VKResource* pSource);
 
+	/* Copies boxes of a host-visible buffer into mip 0 of an image, then
+	   rebuilds every remaining level of the chain from the one below it with
+	   a linear blit (RENDERING_PLAN.md 7.1b route B).
+
+	   The source buffer is a tightly packed image of mip 0 - one byte a texel
+	   for the coverage pyramid - so a box is addressed by row pitch rather
+	   than copied out to its own staging allocation first.
+
+	   The chain is blitted rather than uploaded because a Vulkan mip is a
+	   floor-halving of the one below while the pyramid's levels are ceil-divs
+	   of the window: the two agree only where the window is a multiple of the
+	   coarsest cell, and where they do not, a level uploaded by index lands on
+	   the wrong texels. A blit resamples whatever extents the image actually
+	   has, and for an exact halving it *is* the eight-child average. */
+	void UploadImageRegions(VKResource* pImage, VKResource* pSource,
+	                        const ImageRegion* pRegions, uint32_t uiRegionCount,
+	                        uint32_t uiTexelSize);
+
+	/* The reverse, for validation: every mip of an image laid end to end into
+	   a host-visible buffer, finest first. Blocking - it is a debugging tool,
+	   not a frame operation. Returns false if the buffer is too small. */
+	bool ReadbackImageMips(VKResource* pImage, VKResource* pDest, uint32_t uiTexelSize);
+
 	VKUploadBuffer* GetUploadBuffer() { return m_pUploadBuffer.get(); }
 
 	/* Dynamic rendering is a property of the command buffer, not of a pass, so

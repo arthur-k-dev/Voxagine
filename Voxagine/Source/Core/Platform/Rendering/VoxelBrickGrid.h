@@ -1,11 +1,13 @@
 #pragma once
 
 #include "Core/Math.h"
+#include "Core/Platform/Rendering/RenderDefines.h"
 
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <vector>
 
 /* Coarse occupancy over the resident voxel window: one count of occupied
  * voxels per 8^3 brick, so the marcher can skip empty space structurally
@@ -46,6 +48,11 @@
  * answers it out of cache and makes every voxel write path write-only with
  * respect to the mapping. 768x128x768 bits is 9.4 MiB a buffer.
  *
+ * There is a fourth, and it is the only one the GPU filters: m_pDensity, the
+ * finest pyramid level as one unorm byte a cell, staged for the 3D texture the
+ * ambient-occlusion cones sample (RENDERING_PLAN.md 7.1b route B). See
+ * SetDensityBuffers.
+ *
  * It is exact where the counts are allowed to be conservative: EndRegion may
  * mark a straddling brick fully occupied, but a bit that claims a voxel is
  * occupied when it is not turns the next clear of that voxel into a spurious
@@ -79,13 +86,14 @@ public:
 	   The finest level therefore has to be smaller than the brick, and
 	   k_uiFineShift is where that lives.
 
-	   The levels are appended into the *same* GPU buffer as the bricks, one
-	   after another, and the offsets are derivable on both sides from the
-	   window size by the same ceil-div the brick grid already does. That is
-	   deliberate: it means no new mapper, no new descriptor and no change to
-	   the SPIR-V/C++ binding contract (rule 1) for any of this. It does mean
-	   the bricks no longer start at element zero: level 0 is in front of them,
-	   and HLSL's PosToBrickID adds the same offset this computes. */
+	   Only the brick level reaches the GPU as counts, in the buffer phase 2
+	   already binds and starting at element zero. Route A appended every level
+	   into that same buffer; route B replaced the levels with a 3D texture the
+	   hardware filters, so the buffer went back to what the marcher actually
+	   reads - one exact count at a time - and the 76.8 MiB of mirror the other
+	   levels occupied went with it. The counts here are still kept for every
+	   level: they are what the density mirror and Validate are computed from,
+	   and they cost ordinary cached memory rather than a mapping. */
 	static constexpr uint32_t k_uiFineShift = 1;
 	static constexpr uint32_t k_uiPyramidLevels = 5;
 
@@ -112,23 +120,56 @@ public:
 	const UVector3& GetLevelGridSize(uint32_t uiLevel) const { return m_v3LevelGrid[uiLevel]; }
 	uint32_t GetLevelCellCount(uint32_t uiLevel) const { return m_uiLevelCells[uiLevel]; }
 
-	/* First element of a level within the shared buffer. Level 0 starts at 0
-	   and each one follows the last. The shader recomputes this rather than
-	   being told it, so the two cannot drift. */
-	uint32_t GetLevelOffset(uint32_t uiLevel) const { return m_uiLevelOffset[uiLevel]; }
-
-	/* Elements the shared buffer needs to hold every level. */
-	uint32_t GetPyramidElementCount() const { return m_uiLevelOffset[k_uiPyramidLevels]; }
-
 	/* Reallocates for a new window size and zeroes every count. Touches CPU
 	   state only and drops the mirror pointers - the caller resizes the brick
-	   Mapper to GetPyramidElementCount() elements afterwards, hands the new
-	   mappings back with SetBuffers, and calls Flush. */
+	   Mapper to GetBrickCount() elements afterwards, hands the new mappings
+	   back with SetBuffers, and calls Flush. */
 	void Resize(const UVector3& v3WorldSize);
 
 	/* The two host-visible mirrors, in the same front/back sense the voxel
 	   Mapper is in right now. Re-supply these after any mapper resize. */
 	void SetBuffers(uint32_t* pFront, uint32_t* pBack);
+
+	/* --- The pyramid's GPU form (RENDERING_PLAN.md 7.1b route B) -----------
+	   Route A kept every level as counts in the buffer the bricks bind and
+	   filtered a sample with eight fetches by hand; that cost 4.6x the rest of
+	   the cone. The levels are a mip chain over the window, so they belong in
+	   a 3D texture where one SampleLevel is the whole filter.
+
+	   What crosses to the GPU is therefore a *density* - the occupied fraction
+	   of a cell, 0..1 as a unorm byte - rather than a count, and only level 0
+	   of it. Everything coarser is a halving of level 0 and is blitted from it
+	   on the GPU. Two mirrors for the same reason the counts have two: the
+	   window's front and back buffers describe different voxels.
+
+	   Null for a grid with no texture behind it - the far field, and every
+	   headless test - and every path here checks. */
+	void SetDensityBuffers(uint8_t* pFront, uint8_t* pBack);
+
+	/* Cells the level-0 density mirror has to hold, i.e. the texel count of
+	   the texture's mip 0. */
+	uint32_t GetFineCellCount() const { return m_uiLevelCells[0]; }
+	const UVector3& GetFineGridSize() const { return m_v3LevelGrid[0]; }
+
+	/* What of the front mirror the texture does not yet hold, as boxes of
+	   level-0 cells, and clears the record. Returns true when the answer is
+	   "all of it" - a resize, a clear, or a buffer swap, since the texture
+	   only ever held the other buffer's contents - in which case the vector is
+	   emptied and the caller uploads the whole level.
+
+	   Also returns true when the boxes outnumber k_uiMaxDensityRegions: a
+	   world load dirties every brick in the window, and a million copy regions
+	   costs more to issue than the 9.4 MiB they would have saved. */
+	static constexpr uint32_t k_uiMaxDensityRegions = 4096;
+	bool TakeDensityRegions(std::vector<ImageRegion>& regions);
+
+	/* Whether the mirror is ahead of anything the texture can hold yet. Only
+	   an audit needs this: comparing the two while an upload is outstanding
+	   reports the backlog rather than a defect. */
+	bool HasPendingDensityRegions() const
+	{
+		return m_bDensityFull[m_uiFront] || !m_DensityRegions.empty();
+	}
 
 	/* Mirrors Mapper::SwapBuffer. */
 	void Swap();
@@ -368,9 +409,34 @@ private:
 
 	inline void WriteMirror(uint32_t uiBuffer, uint32_t uiLevel, uint32_t uiCellID, uint16_t uiValue)
 	{
-		if (m_pGPU[uiBuffer] != nullptr)
-			m_pGPU[uiBuffer][m_uiLevelOffset[uiLevel] + uiCellID] = uiValue;
+		/* Bricks only. Everything the marcher reads is this level and it reads
+		   one cell at a time; everything the cones read is the texture, and a
+		   count nobody reads still costs a streaming store into uncached
+		   host-visible memory on every write - which is the cost route A
+		   measured when it maintained five levels in this mirror. */
+		if (uiLevel == k_uiBrickLevel && m_pGPU[uiBuffer] != nullptr)
+			m_pGPU[uiBuffer][uiCellID] = uiValue;
+
+		/* Level 0 also goes out as a density byte, which is what the texture
+		   holds. A level-0 cell is LevelVolume(0) voxels, so the count and the
+		   byte are exactly inter-convertible and the quantization is free. */
+		if (uiLevel == 0 && m_pDensity[uiBuffer] != nullptr)
+		{
+			m_pDensity[uiBuffer][uiCellID] = static_cast<uint8_t>(
+				(static_cast<uint32_t>(uiValue) * 255u + k_uiFineVolume / 2u) / k_uiFineVolume);
+		}
 	}
+
+	/* Records that a brick's eight level-0 cells have to reach the texture.
+	   Only the front buffer is tracked: the back one is wholesale-rewritten by
+	   chunk streaming and becomes a full upload the moment it is swapped in,
+	   so listing its boxes would be work thrown away.
+
+	   Bricks arrive here in ascending id order - FlushDirty walks the dirty
+	   bitmap word by word and bit by bit - so a run along x is recognised by
+	   comparing against the last one, and a burst of a thousand bricks becomes
+	   a hundred boxes rather than a thousand. */
+	void RecordDensityRegion(uint32_t uiBuffer, uint32_t uiBrickID);
 
 	inline uint32_t VoxelID(uint32_t uiX, uint32_t uiY, uint32_t uiZ) const
 	{
@@ -443,7 +509,6 @@ private:
 	   does, in Resize, so the two sides cannot disagree. */
 	UVector3 m_v3LevelGrid[k_uiPyramidLevels];
 	uint32_t m_uiLevelCells[k_uiPyramidLevels] = {};
-	uint32_t m_uiLevelOffset[k_uiPyramidLevels + 1] = {};
 
 	/* One count array per level per buffer. m_pLevels[k_uiBrickLevel] is the
 	   brick grid phase 2 built; the rest are the pyramid around it. uint16 for
@@ -462,4 +527,18 @@ private:
 
 	std::unique_ptr<std::atomic<uint64_t>[]> m_pOccupancy[2];
 	uint32_t* m_pGPU[2] = { nullptr, nullptr };
+
+	/* Level 0 as unorm-byte densities, one mirror a buffer: the staging side
+	   of the coverage texture. See SetDensityBuffers. */
+	uint8_t* m_pDensity[2] = { nullptr, nullptr };
+
+	/* Voxels in a level-0 cell, i.e. what a density byte is a fraction of.
+	   Spelled out rather than LevelVolume(0) because a constexpr member
+	   function is not complete inside the class that defines it; the
+	   static_assert in the .cpp holds the two together. */
+	static constexpr uint32_t k_uiFineVolume = 1u << (3u * k_uiFineShift);
+
+	std::vector<ImageRegion> m_DensityRegions;
+	uint32_t m_uiLastDensityBrick = UINT32_MAX;
+	bool m_bDensityFull[2] = { true, true };
 };

@@ -25,9 +25,9 @@ void VoxelBrickGrid::Resize(const UVector3& v3WorldSize)
 	m_v3WorldSize = v3WorldSize;
 
 	/* Level geometry first: every level is a ceil-div of the window by its own
-	   cell size, and the offsets are those counts laid end to end. The shader
-	   derives both the same way from worldSize - see GetLevelOffset. */
-	uint32_t uiOffset = 0;
+	   cell size. The shader derives the brick level's the same way from
+	   worldSize, and the texture's mips are halvings of level 0 - see
+	   SetDensityBuffers. */
 	bool bLevelsChanged = false;
 
 	for (uint32_t uiLevel = 0; uiLevel < k_uiPyramidLevels; ++uiLevel)
@@ -46,12 +46,7 @@ void VoxelBrickGrid::Resize(const UVector3& v3WorldSize)
 
 		m_v3LevelGrid[uiLevel] = v3Grid;
 		m_uiLevelCells[uiLevel] = uiCells;
-		m_uiLevelOffset[uiLevel] = uiOffset;
-
-		uiOffset += uiCells;
 	}
-
-	m_uiLevelOffset[k_uiPyramidLevels] = uiOffset;
 
 	const uint32_t uiVoxelCount = v3WorldSize.x * v3WorldSize.y * v3WorldSize.z;
 	const uint32_t uiWordCount = CeilDiv(uiVoxelCount, 64);
@@ -112,6 +107,15 @@ void VoxelBrickGrid::Resize(const UVector3& v3WorldSize)
 
 	m_pGPU[0] = nullptr;
 	m_pGPU[1] = nullptr;
+
+	m_pDensity[0] = nullptr;
+	m_pDensity[1] = nullptr;
+
+	m_bDensityFull[0] = true;
+	m_bDensityFull[1] = true;
+
+	m_DensityRegions.clear();
+	m_uiLastDensityBrick = UINT32_MAX;
 }
 
 void VoxelBrickGrid::SetBuffers(uint32_t* pFront, uint32_t* pBack)
@@ -120,9 +124,115 @@ void VoxelBrickGrid::SetBuffers(uint32_t* pFront, uint32_t* pBack)
 	m_pGPU[m_uiFront ^ 1u] = pBack;
 }
 
+void VoxelBrickGrid::SetDensityBuffers(uint8_t* pFront, uint8_t* pBack)
+{
+	/* Here rather than at file scope because k_uiFineVolume is private, and in
+	   the class because a constexpr member function is not complete there. */
+	static_assert(k_uiFineVolume == LevelVolume(0),
+	              "the density divisor is not the finest level's cell volume");
+
+	/* A count has to survive the round trip through a unorm byte, which it does
+	   only while the cell is small enough that the quantization steps are wider
+	   than one voxel. */
+	static_assert(k_uiFineVolume <= 16,
+	              "a level-0 cell holds more voxels than a unorm byte can count exactly");
+
+	m_pDensity[m_uiFront] = pFront;
+	m_pDensity[m_uiFront ^ 1u] = pBack;
+
+	m_bDensityFull[0] = true;
+	m_bDensityFull[1] = true;
+
+	m_DensityRegions.clear();
+	m_uiLastDensityBrick = UINT32_MAX;
+}
+
 void VoxelBrickGrid::Swap()
 {
 	m_uiFront ^= 1u;
+
+	/* The texture holds one buffer's densities and the swap makes that the
+	   wrong one, whatever either mirror has been kept current with. */
+	m_bDensityFull[m_uiFront] = true;
+	m_DensityRegions.clear();
+	m_uiLastDensityBrick = UINT32_MAX;
+}
+
+void VoxelBrickGrid::RecordDensityRegion(uint32_t uiBuffer, uint32_t uiBrickID)
+{
+	if (uiBuffer != m_uiFront || m_pDensity[uiBuffer] == nullptr || m_bDensityFull[uiBuffer])
+		return;
+
+	if (m_DensityRegions.size() >= k_uiMaxDensityRegions)
+	{
+		m_bDensityFull[uiBuffer] = true;
+		m_DensityRegions.clear();
+		m_uiLastDensityBrick = UINT32_MAX;
+
+		return;
+	}
+
+	/* Fine cells per brick axis: a brick is k_uiBrickSize voxels and a level-0
+	   cell is LevelSize(0) of them. */
+	const uint32_t uiPerAxis = k_uiBrickSize / LevelSize(0);
+
+	const uint32_t uiBrickX = uiBrickID % m_v3GridSize.x;
+
+	/* Extending the last box only works along x, and only while the run has
+	   not wrapped into the next brick row. */
+	if (!m_DensityRegions.empty() && uiBrickID == m_uiLastDensityBrick + 1 && uiBrickX != 0)
+	{
+		ImageRegion& last = m_DensityRegions.back();
+
+		last.m_uiWidth = std::min(last.m_uiWidth + uiPerAxis,
+		                          m_v3LevelGrid[0].x - last.m_uiX);
+
+		m_uiLastDensityBrick = uiBrickID;
+
+		return;
+	}
+
+	const uint32_t uiBrickY = (uiBrickID / m_v3GridSize.x) % m_v3GridSize.y;
+	const uint32_t uiBrickZ = uiBrickID / (m_v3GridSize.x * m_v3GridSize.y);
+
+	const UVector3& v3Fine = m_v3LevelGrid[0];
+
+	ImageRegion region;
+	region.m_uiX = uiBrickX * uiPerAxis;
+	region.m_uiY = uiBrickY * uiPerAxis;
+	region.m_uiZ = uiBrickZ * uiPerAxis;
+
+	if (region.m_uiX >= v3Fine.x || region.m_uiY >= v3Fine.y || region.m_uiZ >= v3Fine.z)
+		return;
+
+	/* Clamped rather than assumed: the finest grid is a ceil-div of a window
+	   that need not be a whole number of bricks, so the last brick of an axis
+	   may own fewer than uiPerAxis cells. */
+	region.m_uiWidth = std::min(uiPerAxis, v3Fine.x - region.m_uiX);
+	region.m_uiHeight = std::min(uiPerAxis, v3Fine.y - region.m_uiY);
+	region.m_uiDepth = std::min(uiPerAxis, v3Fine.z - region.m_uiZ);
+
+	m_DensityRegions.push_back(region);
+	m_uiLastDensityBrick = uiBrickID;
+}
+
+bool VoxelBrickGrid::TakeDensityRegions(std::vector<ImageRegion>& regions)
+{
+	regions.clear();
+	m_uiLastDensityBrick = UINT32_MAX;
+
+	if (m_bDensityFull[m_uiFront])
+	{
+		m_bDensityFull[m_uiFront] = false;
+		m_DensityRegions.clear();
+
+		return true;
+	}
+
+	regions.swap(m_DensityRegions);
+	m_DensityRegions.clear();
+
+	return false;
 }
 
 void VoxelBrickGrid::ZeroCounts()
@@ -215,9 +325,6 @@ void VoxelBrickGrid::Flush()
 {
 	for (uint32_t i = 0; i < 2; ++i)
 	{
-		if (m_pGPU[i] == nullptr)
-			continue;
-
 		for (uint32_t uiLevel = 0; uiLevel < k_uiPyramidLevels; ++uiLevel)
 		{
 			const std::atomic<uint16_t>* pCounts = m_pLevels[uiLevel][i].get();
@@ -225,12 +332,16 @@ void VoxelBrickGrid::Flush()
 			if (pCounts == nullptr)
 				continue;
 
-			uint32_t* pGPU = m_pGPU[i] + m_uiLevelOffset[uiLevel];
-
 			for (uint32_t uiCell = 0; uiCell < m_uiLevelCells[uiLevel]; ++uiCell)
-				pGPU[uiCell] = pCounts[uiCell].load(std::memory_order_relaxed);
+				WriteMirror(i, uiLevel, uiCell, pCounts[uiCell].load(std::memory_order_relaxed));
 		}
 	}
+
+	m_bDensityFull[0] = true;
+	m_bDensityFull[1] = true;
+
+	m_DensityRegions.clear();
+	m_uiLastDensityBrick = UINT32_MAX;
 }
 
 void VoxelBrickGrid::ClearAll()
@@ -241,8 +352,17 @@ void VoxelBrickGrid::ClearAll()
 	for (uint32_t i = 0; i < 2; ++i)
 	{
 		if (m_pGPU[i] != nullptr)
-			memset(m_pGPU[i], 0, GetPyramidElementCount() * sizeof(uint32_t));
+			memset(m_pGPU[i], 0, m_uiBrickCount * sizeof(uint32_t));
+
+		if (m_pDensity[i] != nullptr)
+			memset(m_pDensity[i], 0, m_uiLevelCells[0]);
 	}
+
+	m_bDensityFull[0] = true;
+	m_bDensityFull[1] = true;
+
+	m_DensityRegions.clear();
+	m_uiLastDensityBrick = UINT32_MAX;
 }
 
 void VoxelBrickGrid::BeginRegion(bool bBack, const UVector3& v3Min, const UVector3& v3Size)
@@ -526,6 +646,12 @@ void VoxelBrickGrid::FlushDirty()
 							WriteMirror(uiBuffer, uiLevel, uiCellID, pBricks[uiCellID].load(std::memory_order_relaxed));
 
 						RebuildFineCells(uiBuffer, uiCellID);
+
+						/* After the rebuild, not before: overflowing the
+						   region cap turns the frame into a full upload, and
+						   a full upload of a mirror that is already current
+						   is the cheapest way to be right. */
+						RecordDensityRegion(uiBuffer, uiCellID);
 					}
 					else
 					{

@@ -40,6 +40,7 @@ enum PEResourceFormat
 	E_R8G8B8A8_UNORM,
 	E_R8G8B8A8_UNORM_SRGB,
 	E_R32_FLOAT,
+	E_R8_UNORM,
 	E_D32_FLOAT
 };
 
@@ -95,6 +96,14 @@ enum PEResourceState
 	E_STATE_COPY_DEST,
 	E_STATE_GENERAL_READ,
 	E_STATE_PRESENT
+};
+
+/* A box of an image, in texels. Used to copy sub-regions of a host-visible
+   buffer into a texture without naming a backend type at the call site. */
+struct ImageRegion
+{
+	uint32_t m_uiX = 0, m_uiY = 0, m_uiZ = 0;
+	uint32_t m_uiWidth = 0, m_uiHeight = 0, m_uiDepth = 0;
 };
 
 /* One vertex attribute, in engine terms. Backends turn a PVertexLayout into

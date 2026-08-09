@@ -5,6 +5,8 @@
 #include "Core/Platform/Rendering/Vulkan/VKRenderContext.h"
 #include "Core/Platform/Rendering/Vulkan/VKTranslate.h"
 
+#include <algorithm>
+
 /* View owns a VKResource image plus the VkImageView onto it.
  *
  * The DX12 implementation also wrote a descriptor into a heap slot for every
@@ -63,11 +65,25 @@ void View::Resize(const UVector3& uSize)
 	                          VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
 	                          VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 
-	usage |= bIsDepth ? VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT
-	                  : VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+	if (m_Info.m_bIsAttachment)
+	{
+		usage |= bIsDepth ? VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT
+		                  : VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+	}
 
 	const uint32_t uiDepth = m_Info.m_DimensionType == E_TEXTURE_3D
 		? static_cast<uint32_t>(m_Info.m_Size.z) : 1u;
+
+	/* A mip chain cannot be deeper than the largest axis can be halved. Asking
+	   for more is a create-time error rather than a clamp, and the caller's
+	   level count is a constant that knows nothing about a particular
+	   window. */
+	uint32_t uiMaxExtent = std::max(std::max(static_cast<uint32_t>(m_Info.m_Size.x),
+	                                         static_cast<uint32_t>(m_Info.m_Size.y)), uiDepth);
+	uint32_t uiMips = 1;
+
+	while (uiMips < m_Info.m_uiMipLevels && (uiMaxExtent >>= 1) > 0)
+		++uiMips;
 
 	if (!m_pNativeTexture->CreateImage(
 			pContext->GetDevice(), pContext->GetAllocator(),
@@ -75,7 +91,7 @@ void View::Resize(const UVector3& uSize)
 			VKFormat(m_Info.m_ColorFormat),
 			static_cast<uint32_t>(m_Info.m_Size.x),
 			static_cast<uint32_t>(m_Info.m_Size.y),
-			uiDepth, 1, usage))
+			uiDepth, uiMips, usage))
 	{
 		delete m_pNativeTexture;
 		m_pNativeTexture = nullptr;

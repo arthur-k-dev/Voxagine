@@ -107,10 +107,10 @@ inline bool IsInChunk(int3 v3Position) {
    zero" is read here; the count exists so that destroying one voxel can
    decrement its brick without rescanning the other 511.
 
-   The bricks are PYRAMID_BRICK_LEVEL of the coverage pyramid (7.1b) rather
-   than a buffer of their own, so they no longer start at element zero - the
-   finer level is in front of them. VoxelPyramid.hlsl derives the offset the
-   same way VoxelBrickGrid does. */
+   The bricks are PYRAMID_BRICK_LEVEL of the coverage pyramid (7.1b), and the
+   only level of it that lives in a buffer at all - the rest are mips of the
+   voxelPyramid 3D texture, which is what a cone wants and this walk does not.
+   VoxelPyramid.hlsl derives the grid size the same way VoxelBrickGrid does. */
 #include "VoxelPyramid.hlsl"
 
 inline uint3 GetBrickGridSize() {

@@ -5,8 +5,8 @@
 class Mon_IdleState : public FSMState<Monster>
 {
 private:
-	float m_fWakeUpTimer;
-	bool m_bIsAwake;
+	float m_fWakeUpTimer = 0.f;
+	bool m_bIsAwake = false;
 
 public:
 	void Start(Monster* pOwner) override;

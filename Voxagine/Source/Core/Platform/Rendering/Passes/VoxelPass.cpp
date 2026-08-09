@@ -12,9 +12,11 @@
 #include "Core/Settings.h"
 
 VoxelPass::VoxelPass(
-	PRenderContext* pContext, Shader* pVertex, Shader* pPixel, Sampler* pSampler,
+	PRenderContext* pContext, Shader* pVertex, Shader* pPixel,
+	Sampler* pSampler, Sampler* pPyramidSampler,
 	Mapper* pVoxelMapper, Mapper* pBrickMapper, Buffer* pCameraBuffer, Buffer* pAABBBuffer,
-	View* pParticleTexture, View* pParticleDepthTexture
+	View* pParticleTexture, View* pParticleDepthTexture, View* pSunShadowTexture,
+	View* pPyramidTexture
 ) : PRenderPass(pContext)
 {
 	// Creates a screen render target (for each buffer, m_uiFrameCount)
@@ -34,7 +36,10 @@ VoxelPass::VoxelPass(
 
 	RenderPassData.m_DepthClearValue = 1.f;
 
+	/* s0 point, s1 linear-with-a-black-border for the coverage pyramid. Sampler
+	   registers are assigned in push order, same contract as the rest. */
 	RenderPassData.m_Samplers.push_back(pSampler);
+	RenderPassData.m_Samplers.push_back(pPyramidSampler);
 
 	/* Order is the SPIR-V contract: the mappers take u registers in the order
 	   they are pushed, so the voxel buffer is u0 and the brick counts u1,
@@ -51,6 +56,17 @@ VoxelPass::VoxelPass(
 	   identical between the two. */
 	RenderPassData.m_Textures.push_back(pParticleTexture);
 	RenderPassData.m_Textures.push_back(pParticleDepthTexture);
+
+	/* Sun shadow map at t3, when shadows are enabled. The ShadowLess variant
+	   declares nothing at t3, and pushing a texture a shader never names would
+	   put a descriptor in the layout with no binding to match it. */
+	if (pSunShadowTexture != nullptr)
+		RenderPassData.m_Textures.push_back(pSunShadowTexture);
+
+	/* The coverage pyramid, last before the bindless array - so t4 with the
+	   shadow map in front of it and t3 without, which is what each variant
+	   declares. RENDERING_PLAN.md 7.1b route B. */
+	RenderPassData.m_Textures.push_back(pPyramidTexture);
 
 	RenderPassData.m_uiBindlessResourceCount = 1;
 	RenderPassData.m_BindlessSource = RenderPass::E_BINDLESS_SOURCE_MODELS;

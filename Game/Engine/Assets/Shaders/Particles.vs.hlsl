@@ -1,5 +1,6 @@
 #include "Defines.hlsl"
 #include "CameraData.hlsl" // register(b0)
+#include "Lighting.hlsl"
 
 static const float3 positions[8] =
 {
@@ -133,8 +134,12 @@ VS_out main(uint IDvert : VERT_ID, uint IDinst : INST_ID)
     OUT.Color.g = float(particle.VoxelColor >> 8 & 255) / (255.0 + IDinst % 4);
     OUT.Color.b = float(particle.VoxelColor >> 16 & 255) / (255.0 + IDinst % 4);
 	
-	float fDifference = clamp(dot(normals[normIndices[IDvert]], -lightDirection.xyz), 0.0, 1.0);
-    OUT.Color *= fDifference * (1.0 - AMBIENT_VALUE) + AMBIENT_VALUE;
+	/* The same sun-plus-sky model the world is shaded with. Debris is made of
+	   voxels that were part of that world a moment ago, so lighting it by a
+	   different formula makes an explosion's particles read as a separate
+	   effect pasted over the scene. Unshadowed and unoccluded: a particle is
+	   in flight and there is nothing to cast a ray against. */
+	OUT.Color.xyz = EncodeSceneColor(ShadeSurface(OUT.Color.xyz, normals[normIndices[IDvert]], 1.0, 1.0, 0.0));
 	
     float4 pos = float4(particle.Position + positions[posIndices[IDvert]], 1.0);
 	OUT.Position = mul(mvp, pos);

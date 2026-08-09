@@ -24,6 +24,10 @@
    back out in world units. FarFieldVolume.h holds the same three-space note on
    the C++ side. */
 
+#include "Lighting.hlsl"
+#include "VoxelPyramid.hlsl"
+#include "Fog.hlsl"
+
 struct FarFieldResult
 {
 	float4 Color;
@@ -41,8 +45,12 @@ struct FarFieldResult
    so an unbounded worst case here costs as much as an unbounded one there. */
 static uint numFarFieldStepsTaken = 0;
 
+/* The far field keeps its own VoxelBrickGrid, so it gets the whole coverage
+   pyramid (7.1b) whether or not anything traces it - and with it the same
+   layout, in which the bricks follow the finer level rather than starting at
+   element zero. */
 inline uint3 GetFarFieldBrickGridSize() {
-	return (farFieldSize.xyz + (BRICK_SIZE - 1)) >> BRICK_SHIFT;
+	return PyramidLevelGridSize(farFieldSize.xyz, PYRAMID_BRICK_LEVEL);
 }
 
 inline uint PosToFarFieldID(uint3 v3Cell) {
@@ -57,19 +65,11 @@ inline bool IsInFarField(int3 v3Cell) {
 }
 
 inline bool IsFarFieldBrickInWorld(int3 v3Brick) {
-	int3 v3Grid = int3(GetFarFieldBrickGridSize());
-
-	return (
-		v3Brick.x >= 0 && v3Brick.y >= 0 && v3Brick.z >= 0 &&
-		v3Brick.x < v3Grid.x && v3Brick.y < v3Grid.y && v3Brick.z < v3Grid.z
-	);
+	return IsPyramidCellInWorld(farFieldSize.xyz, PYRAMID_BRICK_LEVEL, v3Brick);
 }
 
 inline bool IsFarFieldBrickOccupied(int3 v3Brick) {
-	uint3 v3Grid = GetFarFieldBrickGridSize();
-	uint uiID = uint(v3Brick.x) + uint(v3Brick.y) * v3Grid.x + uint(v3Brick.z) * v3Grid.x * v3Grid.y;
-
-	return farFieldBrickData[uiID] != 0;
+	return farFieldBrickData[PyramidCellID(farFieldSize.xyz, PYRAMID_BRICK_LEVEL, v3Brick)] != 0;
 }
 
 /* The same two-level walk MarchBricks does, over the cell grid instead of the
@@ -290,13 +290,23 @@ FarFieldResult MarchFarFieldFromWindow(float3 v3LevelOrigin, float3 v3Direction)
 	return result;
 }
 
-/* Ambient plus a single N.L term against the scene light. No shadow ray and no
-   AO - see FARFIELD_AMBIENT. */
-float4 ShadeFarField(FarFieldResult far) {
-	float fDifference = clamp(dot(far.Normal, -lightDirection.xyz), 0.0, 1.0);
-	float fLight = fDifference * (1.0 - FARFIELD_AMBIENT) + FARFIELD_AMBIENT;
+/* Exactly what the window's shaders compute for a surface that is unshadowed
+   and open to the sky, and nothing else - no shadow ray and no AO, because at
+   four voxels per cell there is no detail for either to land on.
 
-	return float4(far.Color.xyz * fLight, 1.0);
+   Sharing ShadeSurface rather than keeping a second formula here is what stops
+   the same hillside changing brightness as it crosses the window's boundary.
+   The first attempt at this phase used its own ambient constant and that seam
+   is how it was found (RENDERING_PLAN.md phase 4). It is also why the endless
+   ground plane goes through here. */
+float4 ShadeFarField(FarFieldResult far) {
+	float3 v3Radiance = ShadeSurface(far.Color.xyz, far.Normal, 1.0, 1.0, 0.0);
+
+	/* Aerial perspective, and this is the half of RENDERING_PLAN.md 6.1 that
+	   matters: far.Distance is already from the camera, everything drawn here
+	   is by definition distant, and the boundary with the window is exactly
+	   where the two shading models disagree. See Fog.hlsl. */
+	return float4(EncodeSceneColor(ApplyAerialPerspective(v3Radiance, far.Distance)), 1.0);
 }
 
 /* The whole background: far-field geometry, then the endless ground plane, then

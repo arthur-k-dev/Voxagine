@@ -572,6 +572,15 @@ void RenderSystem::Render(const GameTimer& fixedTimer)
 	m_VoxelBaker.Bake();
 
 	m_bForcedUpdate = false;
+
+	/* DESTRUCTION_PLAN.md P16: Render runs once per rendered frame and only on
+	   one that actually ran a fixed tick (Application.cpp gates the call on
+	   bFixedStep) - which is exactly the swap this back-buffered mapper needs.
+	   Swapping on a frame with no fixed tick would present the frame-before-
+	   last's particles, a visible jump; not swapping here would let the next
+	   fixed tick's writes race the frame still being drawn from this one. */
+	if (Mapper* pParticleMapper = m_pRenderContext->GetParticleMapper())
+		pParticleMapper->SwapBuffer();
 }
 
 void RenderSystem::OnWorldResumed(World* pWorld)
@@ -773,13 +782,21 @@ void RenderSystem::SetGroundPlane(const std::string& texturePath, bool bForce)
 				color = pTextureData->m_Data[id];
 			}
 
+			/* Tagged rather than passed through - RENDERING_PLAN.md 7.4. The
+			   voxel word's top byte is a tag now, not an opacity, and a ground
+			   texel's 255 sets every reserved bit in it including
+			   VOXEL_EMISSIVE_TAG. That reads as a floor made of light, which is
+			   exactly how this second copy of Chunk::UpdateGroundPlane's loop
+			   was found: fixing that one left the ground still glowing. */
+			const uint32_t uiTagged = (color & 0x00FFFFFFu) | VoxelStateTag(RS_DEFAULT, false);
+
 			ModifyVoxel(
 				x, 0, z,
-				color
+				uiTagged
 			);
 
 			const VoxelCell cell = pVoxelGrid->GetCell(x, 0, z);
-			cell.SetColor(color);
+			cell.SetColor(uiTagged);
 			cell.ClearOwner();
 		}
 	}

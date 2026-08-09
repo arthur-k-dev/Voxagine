@@ -235,7 +235,10 @@ void PhysicsSystem::TickParticleSystems(const GameTimer& fixedTimer)
 	if (m_pGPUParticles == nullptr)
 		return;
 
-	GPUParticle* pGPUParticles = reinterpret_cast<GPUParticle*>(m_pGPUParticles->GetData());
+	/* P16: write the tick's records into the back buffer, not the one the GPU
+	   may still be drawing from. RenderSystem::Render swaps it in once this
+	   frame's fixed ticks are done. */
+	GPUParticle* pGPUParticles = reinterpret_cast<GPUParticle*>(m_pGPUParticles->GetBackBufferData());
 
 	if (pGPUParticles == nullptr)
 		return;
@@ -1505,7 +1508,11 @@ void PhysicsSystem::SimulateParticles(float fDeltaTime)
 	/* Ledger P12: this used to dereference the mapper unconditionally, and the
 	   mapper stays null when PhysicsSystem is constructed without a World -
 	   which is exactly the unit-test path. */
-	GPUParticle* pGPUParticles = reinterpret_cast<GPUParticle*>(m_pGPUParticles->GetData());
+	/* P16: the back buffer, for the same reason as TickParticleSystems above -
+	   this and that call write disjoint ranges of the same tick's records,
+	   and both have to land before RenderSystem::Render's swap makes them
+	   visible together. */
+	GPUParticle* pGPUParticles = reinterpret_cast<GPUParticle*>(m_pGPUParticles->GetBackBufferData());
 
 	if (pGPUParticles == nullptr)
 		return;

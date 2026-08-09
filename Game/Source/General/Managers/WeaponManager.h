@@ -81,7 +81,7 @@ public:
 		// RelicType m_RelicType = RT_NONE;
 		// std::vector<PassiveTypes> m_PassiveTypes = {};
 		// NOTE stacking has to be done elsewhere
-		ActivatedType m_ActivatedType;
+		ActivatedType m_ActivatedType = AT_NONE;
 
 		float m_fTravelTime = 1.f;
 		float m_fDecayTime = 1.4f;

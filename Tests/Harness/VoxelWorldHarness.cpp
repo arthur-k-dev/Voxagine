@@ -35,6 +35,9 @@ VoxelWorldHarness::VoxelWorldHarness(const UVector3& v3Size, const UVector3& v3C
 
 	m_Bricks.Resize(v3Size);
 
+	/* Bricks only. The rest of the coverage pyramid reaches the GPU as a 3D
+	   texture rather than as counts in this buffer (RENDERING_PLAN.md 7.1b
+	   route B), and a headless harness has no texture to stage for. */
 	m_BrickMirrorFront.assign(m_Bricks.GetBrickCount(), 0u);
 	m_BrickMirrorBack.assign(m_Bricks.GetBrickCount(), 0u);
 
@@ -58,7 +61,7 @@ void VoxelWorldHarness::Set(uint32_t uiX, uint32_t uiY, uint32_t uiZ, uint32_t u
 	const uint32_t uiID = VoxelID(uiX, uiY, uiZ);
 
 	m_Words[uiID] = uiColor;
-	m_Bricks.SetVoxel(uiID, (uiColor >> 24) != 0);
+	m_Bricks.SetVoxel(uiID, uiColor);
 }
 
 void VoxelWorldHarness::SetDynamic(uint32_t uiX, uint32_t uiY, uint32_t uiZ, uint32_t uiColor)
@@ -72,7 +75,7 @@ void VoxelWorldHarness::SetDynamic(uint32_t uiX, uint32_t uiY, uint32_t uiZ, uin
 	const uint32_t uiID = VoxelID(uiX, uiY, uiZ);
 
 	m_Words[uiID] = uiColor;
-	m_Bricks.SetVoxel(uiID, (uiColor >> 24) != 0);
+	m_Bricks.SetVoxel(uiID, uiColor);
 }
 
 void VoxelWorldHarness::Clear(uint32_t uiX, uint32_t uiY, uint32_t uiZ)
@@ -149,7 +152,7 @@ uint64_t VoxelWorldHarness::CountOccupied() const
 	return uiCount;
 }
 
-uint32_t VoxelWorldHarness::Validate() const
+uint32_t VoxelWorldHarness::Validate()
 {
 	return m_Bricks.Validate(false, m_Words.data());
 }

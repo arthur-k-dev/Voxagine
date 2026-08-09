@@ -554,8 +554,15 @@ void Chunk::UpdateGroundPlane()
 
 			/* Occupancy comes from the colour's alpha now, and every ground
 			   texture is opaque - the 75.5 M-voxel audit found no voxel that
-			   was active without one. */
-			m_VoxelData[x + z * m_ChunkSize.y * m_ChunkSize.x].Color = color;
+			   was active without one.
+
+			   The alpha is *replaced* by a tag rather than trusted, because the
+			   top byte stopped being an opacity in RENDERING_PLAN.md 7.4: a
+			   ground texel's 255 would otherwise set every reserved bit,
+			   VOXEL_EMISSIVE_TAG included, and the whole floor of the level
+			   would glow. RS_DEFAULT is what the ground is. */
+			m_VoxelData[x + z * m_ChunkSize.y * m_ChunkSize.x].Color =
+				(color & 0x00FFFFFFu) | VoxelStateTag(RS_DEFAULT, false);
 		}
 	}
 

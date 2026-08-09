@@ -15,7 +15,7 @@ public:
 
 	void SetComboIconImage(int currentComboThreshold);
 
-	SpriteRenderer* m_pSpriteRenderer;
+	SpriteRenderer* m_pSpriteRenderer = nullptr;
 
 	std::string combo0Image = "";
 	std::string combo1Image = "";

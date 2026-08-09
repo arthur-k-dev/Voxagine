@@ -213,7 +213,21 @@ void ForEachStampedVoxel(VoxRenderer* pRenderer, const VoxelStampTransform& stam
 	const VColor overrideColor = pRenderer->GetOverrideColor();
 	const bool bHasOverrideColor = overrideColor.inst.Colors.a > 0;
 
-	const RenderState rendererState = pRenderer->GetState();
+	/* The voxel word's tag byte - RENDERING_PLAN.md 7.4, and read that phase's
+	   audit before touching it.
+
+	   This used to be `colour | (rendererState + 1) << 24`, an OR onto a colour
+	   whose alpha the palette had already set to 255. So the tag never appeared
+	   in the buffer at all: **every voxel in the world carried alpha 255**, and
+	   rule 3's "the alpha byte packs rendererState + 1" described an intention
+	   rather than the data. Nothing noticed because no consumer anywhere reads
+	   the value - all of them test `> 0` for occupancy - which is also what made
+	   it safe to fix.
+
+	   Masked rather than ORed now, so the byte holds what it claims to and the
+	   bits above the state are actually free. VOXEL_EMISSIVE_TAG is the first
+	   one claimed. */
+	const uint32_t uiTag = VoxelStateTag(pRenderer->GetState(), pRenderer->IsEmissive());
 
 	Vector3 lastPosition(0.f);
 	UVector3 scaleOffset(0, 0, 0);
@@ -244,8 +258,8 @@ void ForEachStampedVoxel(VoxRenderer* pRenderer, const VoxelStampTransform& stam
 					lastPosition = gridPosition;
 
 					const uint32_t uiColor = bHasOverrideColor
-						? (overrideColor.inst.Color | static_cast<unsigned char>(rendererState + 1) << 24)
-						: (pColors[i] | static_cast<unsigned char>(rendererState + 1) << 24);
+						? ((overrideColor.inst.Color & 0x00FFFFFFu) | uiTag)
+						: ((pColors[i] & 0x00FFFFFFu) | uiTag);
 
 					fn(gridPosition, uiColor);
 				}

@@ -17,7 +17,7 @@ Sampler::Sampler(PRenderContext* pContext, const Info& info)
 	samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
 	samplerInfo.magFilter = VKFilter(m_Info.m_FilterMode);
 	samplerInfo.minFilter = VKFilter(m_Info.m_FilterMode);
-	samplerInfo.mipmapMode = VKMipmapMode(m_Info.m_FilterMode);
+	samplerInfo.mipmapMode = VKMipmapMode(m_Info.m_MipFilterMode);
 	samplerInfo.addressModeU = VKAddressMode(m_Info.m_WrapMode);
 	samplerInfo.addressModeV = VKAddressMode(m_Info.m_WrapMode);
 	samplerInfo.addressModeW = VKAddressMode(m_Info.m_WrapMode);

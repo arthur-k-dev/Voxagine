@@ -314,3 +314,190 @@ void RenderContext::Report()
 	   under _DEBUG. */
 	printf("[vulkan] leak reporting is handled by the validation layers\n");
 }
+
+/* --- Frame capture (LaunchOptions.h, --screenshot) -------------------------
+   Copies a pass's render target into a host-visible buffer and writes it out as
+   a binary PPM. Stalls the GPU twice and allocates the size of the target, so
+   it is a debugging facility only.
+
+   PPM rather than PNG because the engine vendors stb_image but not
+   stb_image_write, and a capture path is not worth a new dependency. Converting
+   is one step outside the process.
+
+   Why it exists: so a rendering change can be looked at without putting a
+   window on the developer's display, and so an intermediate target can be
+   inspected directly - "Sun Shadow" dumps the shadow map itself - instead of
+   writing, compiling and then deleting a debug shader for it. */
+void VKRenderContext::CaptureTarget(const std::string& passName, const std::string& path)
+{
+	auto found = m_pRenderPasses.find(passName);
+
+	if (found == m_pRenderPasses.end() || found->second == nullptr)
+	{
+		fprintf(stderr, "[capture] no pass named '%s'\n", passName.c_str());
+		return;
+	}
+
+	View* pView = found->second->GetTargetView();
+	VKResource* pImage = pView != nullptr ? pView->GetNative() : nullptr;
+
+	if (pImage == nullptr || pImage->GetImage() == VK_NULL_HANDLE)
+	{
+		fprintf(stderr, "[capture] pass '%s' has no target image\n", passName.c_str());
+		return;
+	}
+
+	const VkExtent3D extent = pImage->GetExtent();
+	const VkFormat format = pImage->GetFormat();
+
+	/* Only the two the passes actually produce. Anything else would need its
+	   own unpack below and would be silently wrong without one. */
+	uint32_t uiBytesPerTexel = 0;
+
+	if (format == VK_FORMAT_R8G8B8A8_UNORM || format == VK_FORMAT_B8G8R8A8_UNORM)
+		uiBytesPerTexel = 4;
+	else if (format == VK_FORMAT_R32_SFLOAT)
+		uiBytesPerTexel = 4;
+	else
+	{
+		fprintf(stderr, "[capture] unsupported format %d on pass '%s'\n", (int)format, passName.c_str());
+		return;
+	}
+
+	const VkDeviceSize uiSize =
+		static_cast<VkDeviceSize>(extent.width) * extent.height * uiBytesPerTexel;
+
+	VKResource staging;
+
+	if (!staging.CreateBuffer(&m_Device, &m_Allocator, uiSize,
+	                          VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+	                          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))
+	{
+		fprintf(stderr, "[capture] staging buffer allocation failed\n");
+		return;
+	}
+
+	PCommandEngine* pEngine = m_pCommandEngines["Direct"].get();
+
+	pEngine->WaitForGPU();
+	pEngine->Reset();
+	pEngine->Start();
+
+	/* The target is left in whatever state the pass ended in; take it to
+	   TRANSFER_SRC and put it back, or the next frame's render pass begins
+	   against a layout it does not expect. */
+	const PEResourceState previous = pImage->GetState();
+
+	pEngine->QueueBarrier(pImage, E_STATE_COPY_SOURCE);
+	pEngine->ApplyBarriers();
+
+	VkBufferImageCopy region{};
+	region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	region.imageSubresource.layerCount = 1;
+	region.imageExtent = { extent.width, extent.height, 1 };
+
+	vkCmdCopyImageToBuffer(pEngine->GetCommandBuffer(), pImage->GetImage(),
+	                       VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, staging.GetBuffer(), 1, &region);
+
+	pEngine->QueueBarrier(pImage, previous);
+	pEngine->ApplyBarriers();
+
+	pEngine->Execute();
+	pEngine->WaitForGPU();
+
+	const uint8_t* pData = static_cast<const uint8_t*>(staging.Map());
+
+	if (pData == nullptr)
+	{
+		fprintf(stderr, "[capture] could not map staging buffer\n");
+		staging.Destroy();
+		return;
+	}
+
+	FILE* pFile = fopen(path.c_str(), "wb");
+
+	if (pFile == nullptr)
+	{
+		fprintf(stderr, "[capture] could not open '%s'\n", path.c_str());
+		staging.Unmap();
+		staging.Destroy();
+		return;
+	}
+
+	fprintf(pFile, "P6\n%u %u\n255\n", extent.width, extent.height);
+
+	std::vector<uint8_t> row(static_cast<size_t>(extent.width) * 3);
+
+	/* R32_FLOAT is the sun shadow map: a light-space depth, not a colour. It is
+	   normalised against the largest finite value present so the result is
+	   readable as an image at all - an absolute scale would be nearly black
+	   everywhere, and the misses are 1e9. */
+	float fMaxDepth = 1.0f;
+
+	if (format == VK_FORMAT_R32_SFLOAT)
+	{
+		const float* pFloats = reinterpret_cast<const float*>(pData);
+
+		for (VkDeviceSize i = 0; i < uiSize / 4; ++i)
+		{
+			if (pFloats[i] < 1.0e8f && pFloats[i] > fMaxDepth)
+				fMaxDepth = pFloats[i];
+		}
+	}
+
+	for (uint32_t y = 0; y < extent.height; ++y)
+	{
+		const uint8_t* pSource = pData + static_cast<size_t>(y) * extent.width * uiBytesPerTexel;
+
+		for (uint32_t x = 0; x < extent.width; ++x)
+		{
+			uint8_t r, g, b;
+
+			if (format == VK_FORMAT_R32_SFLOAT)
+			{
+				float fDepth;
+				memcpy(&fDepth, pSource + static_cast<size_t>(x) * 4, sizeof(float));
+
+				/* A miss reads as pure red, so "nothing in this column" is
+				   distinguishable at a glance from "hit at depth zero". */
+				if (fDepth > 1.0e8f)
+				{
+					r = 255; g = 0; b = 0;
+				}
+				else
+				{
+					const uint8_t uiValue = static_cast<uint8_t>(
+						std::min(255.0f, std::max(0.0f, fDepth / fMaxDepth * 255.0f)));
+					r = g = b = uiValue;
+				}
+			}
+			else
+			{
+				const uint8_t* pTexel = pSource + static_cast<size_t>(x) * 4;
+
+				if (format == VK_FORMAT_B8G8R8A8_UNORM)
+				{
+					b = pTexel[0]; g = pTexel[1]; r = pTexel[2];
+				}
+				else
+				{
+					r = pTexel[0]; g = pTexel[1]; b = pTexel[2];
+				}
+			}
+
+			row[static_cast<size_t>(x) * 3 + 0] = r;
+			row[static_cast<size_t>(x) * 3 + 1] = g;
+			row[static_cast<size_t>(x) * 3 + 2] = b;
+		}
+
+		fwrite(row.data(), 1, row.size(), pFile);
+	}
+
+	fclose(pFile);
+
+	staging.Unmap();
+	staging.Destroy();
+
+	fprintf(stderr, "[capture] wrote '%s' (%ux%u, pass '%s')\n",
+	        path.c_str(), extent.width, extent.height, passName.c_str());
+}

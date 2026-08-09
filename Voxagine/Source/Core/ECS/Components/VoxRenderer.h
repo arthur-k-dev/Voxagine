@@ -25,6 +25,36 @@ enum RenderState {
 	RS_SELECTION_LINES,	// Adds grid selection outline to voxels
 };
 
+/* --- The voxel word's tag byte (RENDERING_PLAN.md 7.4) ---------------------
+ * A voxel in the GPU buffer is 0xTTBBGGRR: colour in the low three bytes and
+ * this tag in the top one. **Occupancy is tag != 0** - rule 3 - which is why
+ * the state is stored plus one and why nothing may claim the value zero.
+ *
+ * The audit that 7.4 was told to run before claiming a bit found that the byte
+ * was not a tag at all: it was ORed onto a palette alpha of 255, so every voxel
+ * carried 255 and the state never reached the buffer. It is masked in now. Two
+ * consequences worth knowing:
+ *
+ *   - Nothing reads the state's *value* - VoxelBaker, the marcher, the brick
+ *     grid, the far field and ambient occlusion all test occupancy alone - so
+ *     the grid-lines and selection-lines states have had no rendering effect
+ *     for the life of this branch. Fixing that is not this phase's business.
+ *   - The bits above the state are genuinely free, and this is the first thing
+ *     to take one. Keep VOXEL_STATE_MASK and VOXEL_EMISSIVE_TAG in step with
+ *     Defines.hlsl's copies; they are a SPIR-V/C++ contract exactly as
+ *     BRICK_SHIFT is.
+ */
+#define VOXEL_STATE_MASK 0x3Fu
+#define VOXEL_EMISSIVE_TAG 0x80u
+
+/* Occupancy is tag != 0, so the state is always stored plus one. */
+inline uint32_t VoxelStateTag(RenderState state, bool bEmissive)
+{
+	const uint32_t uiState = (static_cast<uint32_t>(state) + 1u) & VOXEL_STATE_MASK;
+
+	return (uiState | (bEmissive ? VOXEL_EMISSIVE_TAG : 0u)) << 24;
+}
+
 class VoxModel;
 class VoxAnimator;
 struct VoxFrame;
@@ -68,6 +98,10 @@ public:
 
 			const VoxFrame* Frame = nullptr;
 			uint32_t OverrideColor = 0;
+
+			/* The whole tag byte the stamp writes, not just the render state:
+			   Emissive rides in it too (RENDERING_PLAN.md 7.4) and toggling it
+			   has to invalidate the key. */
 			int32_t State = -1;
 
 			bool operator==(const StampKey& other) const
@@ -153,6 +187,19 @@ public:
 	bool DrawBoundsEnabled() const { return m_bDrawBounds; };
 	Box GetBounds() const;
 
+	/* Whether this model's voxels are light sources - RENDERING_PLAN.md 7.4.
+	   An emissive voxel is drawn at its own colour instead of being shaded, and
+	   it lights what is around it through the coverage pyramid. Per renderer
+	   rather than per voxel because a .vox palette entry has nowhere to say so:
+	   MagicaVoxel keeps emission in MATL chunks that VoxModel does not read.
+	   The tag byte has room for a per-palette-index version later.
+
+	   Changing it changes what the stamp writes, so the bake has to re-examine
+	   this renderer - see BakeData::StampKey, which folds it in for exactly that
+	   reason. */
+	bool IsEmissive() const { return m_bEmissive; }
+	void SetEmissive(bool bEmissive) { m_bEmissive = bEmissive; RequestUpdate(); }
+
 	bool IsChunkInstanceLoaded() const { return m_bIsChunkInstanceLoaded; }
 	void SetChunkInstanceLoaded(bool bChunkLoaded) { m_bIsChunkInstanceLoaded = bChunkLoaded; }
 
@@ -171,6 +218,8 @@ private:
 	std::string m_modelFilePath = "";
 
 	uint32_t m_uiRotationLimit = 90;
+
+	bool m_bEmissive = false;
 
 	bool m_bAxisRounded = false;
 	bool m_bDrawBounds = true;

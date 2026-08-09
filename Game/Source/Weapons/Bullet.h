@@ -105,7 +105,7 @@ protected:
 	float m_fMinPerfCatchSpeed = 10.f;
 
 	//The escape variables are used to make sure that if the receiver stood in autocatch range, it won't immidiately pick up the projectile
-	Vector3 m_EscapePosition;
+	Vector3 m_EscapePosition = Vector3(0.f);
 	float m_fEscapeRange = 10.f;
 	bool m_bEscaped = true;
 

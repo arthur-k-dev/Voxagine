@@ -5,7 +5,6 @@ class UmbrellaMonster : public Monster
 {
 private:
 	Vector2 m_fJumpForce;
-	Vector3 m_velocity;
 	Vector2 m_fMaxJumpVelocity;
 
 public:

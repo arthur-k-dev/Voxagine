@@ -76,8 +76,13 @@ void FarFieldVolume::Flush(uint32_t* pGPU, VoxelBrickGrid& bricks)
 
 			for (uint32_t uiX = 0; uiX < m_v3GridSize.x; ++uiX)
 			{
-				if ((m_pColors[uiRowBase + uiX] >> 24) != 0)
-					bricks.AddVoxel(false, uiX, uiY, uiZ);
+				const uint32_t uiColor = m_pColors[uiRowBase + uiX];
+
+				/* The colour is carried for the brick albedo the bounce cones
+				   read; this grid has no coverage texture behind it, so it
+				   lands in the CPU-side colours and stops there. */
+				if ((uiColor >> 24) != 0)
+					bricks.AddVoxel(false, uiX, uiY, uiZ, uiColor);
 			}
 		}
 	}

@@ -14,6 +14,7 @@ inline VkFormat VKFormat(PEResourceFormat format)
 	case E_R8G8B8A8_UNORM:      return VK_FORMAT_R8G8B8A8_UNORM;
 	case E_R8G8B8A8_UNORM_SRGB: return VK_FORMAT_R8G8B8A8_SRGB;
 	case E_R32_FLOAT:           return VK_FORMAT_R32_SFLOAT;
+	case E_R8_UNORM:            return VK_FORMAT_R8_UNORM;
 	case E_D32_FLOAT:           return VK_FORMAT_D32_SFLOAT;
 	case E_UNKNOWN:             break;
 	}

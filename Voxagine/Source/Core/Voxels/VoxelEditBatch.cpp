@@ -84,7 +84,7 @@ bool VoxelEditBatch::Write(uint32_t uiX, uint32_t uiY, uint32_t uiZ, uint32_t ui
 	   the bit cannot drift apart, and nothing here reads the mapping. */
 	const uint32_t uiBrick = m_Target.pBricks->VoxelToBrick(uiVoxelID);
 
-	m_Target.pBricks->SetVoxel(uiVoxelID, (uiColor >> 24) != 0);
+	m_Target.pBricks->SetVoxel(uiVoxelID, uiColor);
 
 	if (uiBrick != UINT32_MAX)
 	{

@@ -63,6 +63,17 @@ public:
 	VkBuffer GetBuffer() const { return m_Buffer; }
 	VkFormat GetFormat() const { return m_Format; }
 	VkExtent3D GetExtent() const { return m_Extent; }
+	uint32_t GetMipLevels() const { return m_uiMipLevels; }
+
+	/* Records a layout the caller transitioned to itself. Only for code that
+	   emits its own per-mip barriers - the mip chain build in VKCommandEngine
+	   is the one such place - because Transition() moves every level at once
+	   and cannot express a chain that is half source and half destination. */
+	void SetTrackedState(PEResourceState state)
+	{
+		m_State = state;
+		m_bLayoutUndefined = false;
+	}
 
 	/* Lazily created and cached. Vulkan needs a VkImageView wherever D3D12
 	   would have taken the resource directly. */
@@ -92,6 +103,7 @@ private:
 	VkBuffer m_Buffer = VK_NULL_HANDLE;
 	VkFormat m_Format = VK_FORMAT_UNDEFINED;
 	VkExtent3D m_Extent = { 0, 0, 0 };
+	uint32_t m_uiMipLevels = 1;
 	VkImageView m_ImageView = VK_NULL_HANDLE;
 	VkBufferView m_BufferView = VK_NULL_HANDLE;
 

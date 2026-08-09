@@ -107,26 +107,22 @@ inline bool IsInChunk(int3 v3Position) {
    zero" is read here; the count exists so that destroying one voxel can
    decrement its brick without rescanning the other 511.
 
-   Linearization is the voxel convention (rule 4) scaled down:
-   x + y*B.x + z*B.x*B.y with B = ceil(worldSize / BRICK_SIZE). The C++ side
-   computes B the same way - VoxelBrickGrid::Resize. */
+   The bricks are PYRAMID_BRICK_LEVEL of the coverage pyramid (7.1b), and the
+   only level of it that lives in a buffer at all - the rest are mips of the
+   voxelPyramid 3D texture, which is what a cone wants and this walk does not.
+   VoxelPyramid.hlsl derives the grid size the same way VoxelBrickGrid does. */
+#include "VoxelPyramid.hlsl"
 
 inline uint3 GetBrickGridSize() {
-	return (worldSize.xyz + (BRICK_SIZE - 1)) >> BRICK_SHIFT;
+	return PyramidLevelGridSize(worldSize.xyz, PYRAMID_BRICK_LEVEL);
 }
 
 inline uint PosToBrickID(int3 v3Brick) {
-	uint3 v3Grid = GetBrickGridSize();
-	return uint(v3Brick.x) + uint(v3Brick.y) * v3Grid.x + uint(v3Brick.z) * v3Grid.x * v3Grid.y;
+	return PyramidCellID(worldSize.xyz, PYRAMID_BRICK_LEVEL, v3Brick);
 }
 
 inline bool IsBrickInWorld(int3 v3Brick) {
-	int3 v3Grid = int3(GetBrickGridSize());
-
-	return (
-		v3Brick.x >= 0 && v3Brick.y >= 0 && v3Brick.z >= 0 &&
-		v3Brick.x < v3Grid.x && v3Brick.y < v3Grid.y && v3Brick.z < v3Grid.z
-	);
+	return IsPyramidCellInWorld(worldSize.xyz, PYRAMID_BRICK_LEVEL, v3Brick);
 }
 
 inline bool IsBrickOccupied(int3 v3Brick) {
@@ -346,8 +342,174 @@ MarchResult MarchBricks(float3 v3Origin, float3 v3Direction, int iMaxBrickSteps)
 	return result;
 }
 
-MarchResult MarchLight(float3 v3Origin, float3 v3Direction, int iMaxBrickSteps) {
-	return MarchBricks(v3Origin, v3Direction, iMaxBrickSteps);
+/* Directional shadow, as a transmittance in [0, 1] rather than a hit result.
+   1 is fully lit, 0 fully shadowed.
+
+   The same two-level walk MarchBricks does, with everything a shading hit
+   needs stripped out - no normal, no UV, no smooth position, and no colour
+   fetched once occupancy is known. All it answers is "does anything stand
+   between this surface and the sun", which is why it is a separate function
+   rather than a call into MarchBricks: that one computes a hit's whole
+   surface frame, and none of it survives the caller's `is it occluded` test.
+
+   There is deliberately no distance fade. The fade existed to disguise a
+   binary answer by brightening shadows away from their occluder, and it was
+   bright enough at range to read as AO being cancelled out near shadow edges
+   (RENDERING_PLAN.md phase 1's deferred item, retuned in phase 2 and now
+   simply gone). A shadowed surface is the ambient term and nothing else. */
+float MarchShadow(float3 v3Origin, float3 v3Direction, int iMaxBrickSteps) {
+	float3 v3InvDirection = 1.0 / v3Direction;
+	float3 v3SignedRayDirection = sign(v3Direction);
+
+	float3 v3BrickOrigin = v3Origin * BRICK_INV_SIZE;
+	int3 v3Brick = int3(floor(v3BrickOrigin));
+
+	float3 v3BrickDistance = (float3(v3Brick) - v3BrickOrigin + 0.5 + v3SignedRayDirection * 0.5) * v3InvDirection;
+
+	/* World-space parameter at which the ray entered v3Brick; 0 for the brick
+	   it starts inside. */
+	float fBrickEntry = 0.0;
+	bool bFirstBrick = true;
+
+	for (int b = 0; b < iMaxBrickSteps; b++) {
+		if (!IsBrickInWorld(v3Brick))
+			break;
+
+		/* Out of budget. Reporting lit is the same answer the primary ray's
+		   miss gives - both are wrong pixels and both are cheap. */
+		if (!HasStepBudget())
+			break;
+
+		if (IsBrickOccupied(v3Brick)) {
+			int3 v3Position;
+
+			if (bFirstBrick) {
+				v3Position = int3(floor(v3Origin));
+
+				/* The ray starts one unit off the surface toward the light, and
+				   for a wall that unit can round back into the voxel being
+				   shaded. Treating an occupied origin voxel as lit is what the
+				   MarchBricks walk this replaces did - it reported a miss - and
+				   it is what keeps a lit wall from shadowing itself. */
+				if (IsInChunk(v3Position) && GetVoxel(float3(v3Position)).a > 0.0)
+					return 1.0;
+			}
+			else {
+				/* Same reconstruction as MarchBricks: the entry point lands
+				   exactly on a brick face, where floor() can name the voxel on
+				   the far side for a negative direction component, so clamp it
+				   into the brick this walk has actually reached. */
+				float3 v3Entry = v3Origin + v3Direction * fBrickEntry;
+
+				v3Position = clamp(
+					int3(floor(v3Entry)),
+					v3Brick << BRICK_SHIFT,
+					(v3Brick << BRICK_SHIFT) + (BRICK_SIZE - 1)
+				);
+			}
+
+			float3 v3Distance = (float3(v3Position) - v3Origin + 0.5 + v3SignedRayDirection * 0.5) * v3InvDirection;
+
+			for (int v = 0; v < BRICK_MAX_VOXEL_STEPS; v++) {
+				/* Leaving the window ends the whole march: it is a box, so a
+				   ray that leaves never re-enters. Nothing outside it can cast
+				   into it either - the endless ground plane is flat. */
+				if (!IsInChunk(v3Position))
+					return 1.0;
+
+				if (GetVoxel(float3(v3Position)).a > 0.0)
+					return 0.0;
+
+				float3 v3Mask = step(v3Distance.xyz, v3Distance.yxy) * step(v3Distance.xyz, v3Distance.zzx);
+				v3Distance += v3Mask * v3SignedRayDirection * v3InvDirection;
+				v3Position += int3(v3Mask * v3SignedRayDirection);
+
+				numStepsTaken++;
+
+				if (any((v3Position >> BRICK_SHIFT) != v3Brick))
+					break;
+
+				if (!HasStepBudget())
+					break;
+			}
+		}
+
+		numStepsTaken++;
+
+		/* Step to the next brick. The crossing parameter has to be read before
+		   the step, since that is where the next brick is entered. */
+		float3 v3BrickMask = step(v3BrickDistance.xyz, v3BrickDistance.yxy) * step(v3BrickDistance.xyz, v3BrickDistance.zzx);
+		fBrickEntry = min(v3BrickDistance.x, min(v3BrickDistance.y, v3BrickDistance.z)) * BRICK_SIZE_F;
+
+		v3BrickDistance += v3BrickMask * v3SignedRayDirection * v3InvDirection;
+		v3Brick += int3(v3BrickMask * v3SignedRayDirection);
+
+		bFirstBrick = false;
+	}
+
+	return 1.0;
+}
+
+/* Fraction of the sun's disc this point can see, sampled by shooting
+   SHADOW_CONE_SAMPLES voxel-exact rays into a cone around the light. The
+   caller averages across the 2x2 quad on top, so a quad resolves
+   SHADOW_CONE_SAMPLES * 4 directions.
+
+   Why a cone of rays rather than blurring a single hard shadow: the penumbra
+   then widens with distance to the occluder on its own, because a cone of
+   fixed angle diverges. A box on the floor still casts a hard line where it
+   touches, and a tower's shadow across the valley is soft. A post-hoc blur
+   cannot do that without knowing the occluder distance, and a distance fade -
+   which is what this engine used to do - fakes it with brightness instead,
+   which is not the same thing and looks it.
+
+   **This is the reference implementation, not the shipping one.** It is
+   ground truth - every sample is an exact occlusion test - and it is priced
+   accordingly: smoothness costs rays linearly, and one ray per pixel is
+   ~9.45 ms at 3840x2160 against a 3 ms budget for all lighting. The sun is a
+   shadow map now (SunShadowLookup.hlsl); this stays so the map can be A/B'd
+   against something known-correct. SUN_SHADOW_REFERENCE switches between them.
+
+   The directions are a golden-angle spiral over the disc - sqrt radius for
+   equal-area coverage, 2.39996 rad between consecutive points - rotated per
+   *pixel* by interleaved gradient noise, so what is left of the quantization
+   breaks up as fine dither rather than as visible steps.
+
+   An earlier version fired one ray per pixel and averaged the four lanes of
+   each 2x2 quad together, which buys four times the directions for free. Two
+   things were wrong with it and the second is why it is gone: four directions
+   is five discrete levels and reads as four separate shadows rather than one
+   soft edge; and averaging across a quad is a 2x2 box filter on the shadow
+   term, which is invisible on a broad penumbra and destroys most of the
+   contrast of a shadow only a pixel or two wide. Thin occluders - railings,
+   fence posts, beams - are exactly the geometry that costs. Sampling stays
+   per-pixel now, and the smoothness comes from sample count instead. */
+float GetSunVisibilityByRays(float3 v3Origin, float2 v2ScreenPosition, int iMaxBrickSteps) {
+	float3 v3Light = -lightDirection.xyz;
+
+	float3 v3Tangent = normalize(GetOrthogonal(v3Light));
+	float3 v3Bitangent = cross(v3Light, v3Tangent);
+
+	/* Interleaved gradient noise, so neighbouring pixels rotate their sample
+	   set differently and the residual banding becomes dither. */
+	float fRotation = frac(52.9829189 * frac(dot(v2ScreenPosition, float2(0.06711056, 0.00583715)))) * 6.2831853;
+
+	float fSum = 0.0;
+
+	for (uint i = 0; i < SHADOW_CONE_SAMPLES; i++) {
+		float fRadius = sqrt((float(i) + 0.5) / float(SHADOW_CONE_SAMPLES));
+		float fAngle = float(i) * 2.39996323 + fRotation;
+
+		float2 v2Offset = float2(cos(fAngle), sin(fAngle)) * fRadius * SHADOW_CONE_SPREAD;
+
+		fSum += MarchShadow(
+			v3Origin,
+			normalize(v3Light + v3Tangent * v2Offset.x + v3Bitangent * v2Offset.y),
+			iMaxBrickSteps
+		);
+	}
+
+	return fSum / float(SHADOW_CONE_SAMPLES);
 }
 
 MarchResult MarchDiffuse(float3 v3Origin, float3 v3Direction, int iMaxBrickSteps) {

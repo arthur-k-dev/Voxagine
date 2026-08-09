@@ -66,6 +66,7 @@ bool VKResource::CreateImage(VKDevice* pDevice, const VKAllocator* pAllocator,
 
 	m_Kind = E_KIND_IMAGE;
 	m_Extent = { uiWidth, uiHeight, uiDepth };
+	m_uiMipLevels = uiMipLevels;
 	m_State = E_STATE_COMMON_RESOURCE;
 	m_bLayoutUndefined = true;
 
@@ -229,7 +230,10 @@ VkImageView VKResource::GetOrCreateImageView(VkImageViewType type)
 	viewInfo.format = m_Format;
 	viewInfo.subresourceRange.aspectMask =
 		m_bIsDepth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
-	viewInfo.subresourceRange.levelCount = 1;
+	/* The whole chain, not just the base level: a Texture3D sampled with an
+	   explicit LOD reads levels the view has to contain. Identical to the old
+	   levelCount of 1 for every single-mip image in the engine. */
+	viewInfo.subresourceRange.levelCount = VK_REMAINING_MIP_LEVELS;
 	viewInfo.subresourceRange.layerCount = 1;
 
 	if (vkCreateImageView(m_pDevice->Get(), &viewInfo, nullptr, &m_ImageView) != VK_SUCCESS)

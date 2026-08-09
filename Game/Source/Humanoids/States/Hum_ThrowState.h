@@ -10,5 +10,5 @@ public:
 	void Start(Player* pOwner) override;
 	void Tick(Player* pOwner, float fDeltaTime) override;
 	void FixedTick(Player* pOwner, const GameTimer& gameTimer) override;
-	float m_fTimer;
+	float m_fTimer = 0.f;
 };

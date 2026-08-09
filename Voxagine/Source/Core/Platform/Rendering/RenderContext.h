@@ -169,6 +169,20 @@ public:
 	// Maximum queued frames on the GPU
 	static const uint32_t m_uiFrameCount = 2;
 
+	/* Side of the square sun shadow map - RENDERING_PLAN.md 7.1a.
+	   Its cost is one brick-DDA march per texel and is *independent of screen
+	   resolution*, which is the whole reason the sun stopped being a per-pixel
+	   ray: at 3840x2160 a single shadow ray per pixel measures ~9.45 ms, and
+	   the entire lighting budget is 3 ms.
+
+	   Sizing: the 768x128x768 window projects to roughly 1065 x 877 world units
+	   perpendicular to the light, so 1024 is close to one texel per voxel and
+	   512 is one per two. A depth map records the nearest blocker per texel, so
+	   a coarser map makes a one-voxel post cast a shadow wider than itself
+	   rather than losing it - erring thick, which is the right direction here
+	   (phase 6.2 could not make thin occluders read at all). */
+	static constexpr uint32_t k_uiSunShadowResolution = 1024;
+
 	virtual ~RenderContext();
 
 	static void Report();
@@ -237,7 +251,7 @@ public:
 			return false;
 
 		m_pVoxelData[uiID] = uiColor;
-		m_BrickGrid.SetVoxel(uiID, (uiColor >> 24) != 0);
+		m_BrickGrid.SetVoxel(uiID, uiColor);
 
 		return true;
 	}
@@ -251,7 +265,7 @@ public:
 		   old occupancy the brick count needs comes from the bitmap, in
 		   ordinary cached memory. See ModifyVoxel above. */
 		m_pVoxelData[uiID] = uiColor;
-		m_BrickGrid.SetVoxel(uiID, (uiColor >> 24) != 0);
+		m_BrickGrid.SetVoxel(uiID, uiColor);
 	}
 
 	uint32_t GetVoxelDataSize() const { return m_pVoxelMapper->GetInfo().m_uiElementCount; }
@@ -278,10 +292,30 @@ public:
 	VoxelBrickGrid& GetBrickGrid() { return m_BrickGrid; }
 	Mapper* GetBrickMapper() const { return m_pBrickMapper; }
 
+	/* Double-buffered per DESTRUCTION_PLAN.md P16: PhysicsSystem writes each
+	   fixed tick's records into the back buffer, and RenderSystem::Render
+	   swaps it in only on a frame that actually ran a fixed tick - otherwise
+	   the CPU write races the frame the GPU is still drawing from. */
+	Mapper* GetParticleMapper() const { return m_pParticleMapper; }
+
 	/* Recomputes the whole brick grid from the voxel buffer and logs anything
 	   that disagrees. On demand only - it reads the entire window back out of
 	   uncached memory. */
 	uint32_t ValidateBrickGrid();
+
+	/* Pushes whatever of the coverage pyramid's finest level the texture does
+	   not yet hold, and rebuilds the rest of its mip chain. Once a frame, on
+	   the engine that records the voxel pass and before it opens - the pass
+	   samples the result. See m_pPyramidView. */
+	void UploadVoxelPyramid(PCommandEngine* pEngine);
+
+	/* Reads the coverage texture back and checks it against the mirror the CPU
+	   maintains, plus every coarser mip against the average of its children.
+	   The failure it exists for is a dirty region that was never uploaded:
+	   ValidateBrickGrid proves the mirror, and nothing else proves that what
+	   the GPU holds is the mirror. Blocking, and it allocates the whole chain
+	   again to read into - a menu item, not a frame check. */
+	uint32_t ValidateVoxelPyramid();
 
 	/* Cross-checks the far field's placement against the resident window, which
 	   holds the same geometry at full resolution. See FarFieldVolume::Validate.
@@ -326,6 +360,17 @@ public:
 
 	/* Present all the gathered data to the screen */
 	virtual bool Present();
+
+	/* Write a named pass's render target to `path` as a binary PPM, for
+	   --screenshot (LaunchOptions.h). Stalls the GPU and allocates a staging
+	   buffer the size of the target, so it is a debugging facility and not
+	   something to call per frame.
+
+	   It exists so that a rendering change can be *looked at* without putting a
+	   window on the developer's display - and so an intermediate target can be
+	   inspected directly rather than through a debug shader that has to be
+	   written, compiled and then removed again. */
+	virtual void CaptureTarget(const std::string& passName, const std::string& path) { (void)passName; (void)path; }
 
 	Platform* GetPlatform() { return m_pPlatform; }
 	UVector2 GetRenderResolution() const { return UVector2(m_v2RenderResolution.x * m_fRenderScale, m_v2RenderResolution.y * m_fRenderScale); }
@@ -415,12 +460,27 @@ protected:
 	
 	ParticlePass* m_pParticlePass = nullptr;
 	uint32_t m_uiParticleCount = 0;
+	Mapper* m_pParticleMapper = nullptr;
 
 	Mapper* m_pVoxelMapper = nullptr;
 	uint32_t* m_pVoxelData = nullptr;
 
 	Mapper* m_pBrickMapper = nullptr;
 	VoxelBrickGrid m_BrickGrid;
+
+	/* The coverage pyramid's GPU form (RENDERING_PLAN.md 7.1b route B): a 3D
+	   R8 texture whose mip chain is the pyramid, so an AO cone step is one
+	   SampleLevel instead of the eight hand-written fetches route A measured
+	   at 4.6x the rest of the cone.
+
+	   The staging mapper is the pyramid's finest level as unorm bytes, written
+	   by VoxelBrickGrid::FlushDirty and copied box by box into mip 0; the rest
+	   of the chain is blitted from it on the GPU. Back-buffered in lockstep
+	   with the voxel and brick mappers, for the same reason they are. */
+	View* m_pPyramidView = nullptr;
+	Mapper* m_pPyramidStaging = nullptr;
+	std::vector<ImageRegion> m_PyramidRegions;
+	float m_fPyramidAuditTimer = 0.f;
 
 	/* Far field. Its own brick grid, over its own cell grid rather than the
 	   window's voxels - the two never interact, and keeping them separate is

@@ -1133,6 +1133,17 @@ void Editor::RenderMainMenuBar()
 				m_pRenderContext->ValidateBrickGrid();
 			}
 
+			/* The other half of that check, and the one the item above cannot
+			   make: the coverage texture the AO cones sample against the CPU
+			   mirror it is uploaded from. A dirty region that never reached
+			   the GPU leaves ambient occlusion describing geometry that is no
+			   longer there, which no amount of looking at the image names.
+			   RENDERING_PLAN.md 7.1b route B. */
+			if (ImGui::MenuItem("Validate Coverage Pyramid", NULL))
+			{
+				m_pRenderContext->ValidateVoxelPyramid();
+			}
+
 			/* The same check plus the one it cannot make on its own: the CPU
 			   voxel against the mapped word. See
 			   RenderSystem::AuditRepresentationSync. Also available on a timer

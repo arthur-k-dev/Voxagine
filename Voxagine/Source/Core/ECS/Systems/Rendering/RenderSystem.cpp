@@ -900,8 +900,42 @@ void RenderSystem::SubmitLooseVoxelProxies(bool bAudit)
 	const Vector3 v3Offset = m_pPhysicsSystem->m_VoxelGrid.GetWorldOffset();
 	const Vector3 v3WindowMax = Vector3(m_v3WorldSize) - Vector3(1.f);
 
-	for (const std::pair<const uint32_t, Box>& cell : m_LooseVoxelCells)
+	/* Retirement. Without this the map only ever grows: a cell is added the
+	   first time debris lands in it and stayed for the life of the session even
+	   after that debris was blown apart again, and its box only ever widened.
+	   Both compound directly with how much has been destroyed, which is the
+	   "more destruction, more lag" this was reported as - every surviving cell
+	   is a proxy submitted every frame, and a proxy is a full march for every
+	   fragment it covers.
+
+	   The test is the brick grid, not the voxel buffer: it already holds an
+	   occupied count per 8^3 block in ordinary memory, so this costs no PCIe
+	   read of VRAM (see CLAUDE.md on the mapper being write-only). A cell whose
+	   bricks are all empty holds nothing and goes; one that still has something
+	   keeps a proxy, tightened to the bricks that are actually occupied.
+
+	   Only cells wholly inside the resident window can be judged - outside it
+	   the voxels are not in the buffer at all, and erasing on that would delete
+	   debris that is merely far away. Budgeted per frame and walked round-robin
+	   so a level's worth of cells costs nothing in any single frame. */
+	VoxelBrickGrid& brickGrid = m_pRenderContext->GetBrickGrid();
+	const UVector3 v3BrickGrid = brickGrid.GetGridSize();
+
+	m_LooseValidateCursor += k_uiLooseValidatePerFrame;
+	if (m_LooseValidateCursor >= m_LooseVoxelCells.size())
+		m_LooseValidateCursor = 0;
+
+	const size_t uiValidateFrom = m_LooseValidateCursor;
+	const size_t uiValidateTo = uiValidateFrom + k_uiLooseValidatePerFrame;
+	size_t uiCellIndex = 0;
+
+	std::vector<uint32_t> retired;
+
+	for (std::pair<const uint32_t, Box>& cell : m_LooseVoxelCells)
 	{
+		const bool bValidate = (uiCellIndex >= uiValidateFrom && uiCellIndex < uiValidateTo);
+		++uiCellIndex;
+
 		/* Level space back to the window's grid space. */
 		Vector3 v3Min = cell.second.Min - v3Offset;
 		Vector3 v3Max = cell.second.Max - v3Offset;
@@ -909,6 +943,27 @@ void RenderSystem::SubmitLooseVoxelProxies(bool bAudit)
 		if (v3Max.x < 0.f || v3Max.y < 0.f || v3Max.z < 0.f ||
 			v3Min.x > v3WindowMax.x || v3Min.y > v3WindowMax.y || v3Min.z > v3WindowMax.z)
 			continue;
+
+		if (bValidate &&
+			v3Min.x >= 0.f && v3Min.y >= 0.f && v3Min.z >= 0.f &&
+			v3Max.x <= v3WindowMax.x && v3Max.y <= v3WindowMax.y && v3Max.z <= v3WindowMax.z)
+		{
+			Vector3 v3TightMin(0.f);
+			Vector3 v3TightMax(0.f);
+
+			if (!FindOccupiedBrickBounds(brickGrid, v3BrickGrid, v3Min, v3Max, v3TightMin, v3TightMax))
+			{
+				retired.push_back(cell.first);
+				continue;
+			}
+
+			/* Back to level space, where the registry lives. */
+			cell.second.Min = v3TightMin + v3Offset;
+			cell.second.Max = v3TightMax + v3Offset;
+
+			v3Min = v3TightMin;
+			v3Max = v3TightMax;
+		}
 
 		/* Same one-voxel slack the renderer proxies carry: a voxel at index v
 		   occupies [v, v + 1), and the ray wants to enter off the geometry. */
@@ -931,6 +986,62 @@ void RenderSystem::SubmitLooseVoxelProxies(bool bAudit)
 			m_AuditProxies.push_back(proxy);
 		}
 	}
+
+	for (uint32_t uiKey : retired)
+		m_LooseVoxelCells.erase(uiKey);
+}
+
+/* Bounds of the occupied bricks inside a window-space box, or false if none of
+   them holds anything. Brick granularity is deliberate: it is what the grid
+   counts, it is 512x fewer lookups than asking per voxel, and a box rounded out
+   to whole bricks still contains every voxel it needs to. */
+bool RenderSystem::FindOccupiedBrickBounds(
+	VoxelBrickGrid& brickGrid, const UVector3& v3BrickGrid,
+	const Vector3& v3Min, const Vector3& v3Max,
+	Vector3& o_v3Min, Vector3& o_v3Max) const
+{
+	const uint32_t uiShift = VoxelBrickGrid::k_uiBrickShift;
+	const uint32_t uiSize = VoxelBrickGrid::k_uiBrickSize;
+
+	const UVector3 v3First(
+		static_cast<uint32_t>(glm::max(v3Min.x, 0.f)) >> uiShift,
+		static_cast<uint32_t>(glm::max(v3Min.y, 0.f)) >> uiShift,
+		static_cast<uint32_t>(glm::max(v3Min.z, 0.f)) >> uiShift);
+
+	const UVector3 v3Last(
+		glm::min(static_cast<uint32_t>(glm::max(v3Max.x, 0.f)) >> uiShift, v3BrickGrid.x - 1),
+		glm::min(static_cast<uint32_t>(glm::max(v3Max.y, 0.f)) >> uiShift, v3BrickGrid.y - 1),
+		glm::min(static_cast<uint32_t>(glm::max(v3Max.z, 0.f)) >> uiShift, v3BrickGrid.z - 1));
+
+	bool bFound = false;
+
+	for (uint32_t z = v3First.z; z <= v3Last.z; ++z)
+	{
+		for (uint32_t y = v3First.y; y <= v3Last.y; ++y)
+		{
+			for (uint32_t x = v3First.x; x <= v3Last.x; ++x)
+			{
+				const uint32_t uiBrick = x + y * v3BrickGrid.x + z * v3BrickGrid.x * v3BrickGrid.y;
+
+				if (brickGrid.GetCount(false, uiBrick) == 0)
+					continue;
+
+				const Vector3 v3BrickMin(
+					static_cast<float>(x << uiShift),
+					static_cast<float>(y << uiShift),
+					static_cast<float>(z << uiShift));
+
+				const Vector3 v3BrickMax = v3BrickMin + Vector3(static_cast<float>(uiSize - 1));
+
+				o_v3Min = bFound ? glm::min(o_v3Min, v3BrickMin) : v3BrickMin;
+				o_v3Max = bFound ? glm::max(o_v3Max, v3BrickMax) : v3BrickMax;
+
+				bFound = true;
+			}
+		}
+	}
+
+	return bFound;
 }
 
 /* Occupied bricks of the resident window that no AABB proxy contains.

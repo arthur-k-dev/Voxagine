@@ -72,6 +72,9 @@ public:
 	   baking itself into the world where it landed is the writer this exists
 	   for: PhysicsSystem, bake-on-impact. */
 	void AddLooseVoxel(const Vector3& v3GridPosition);
+	bool FindOccupiedBrickBounds(VoxelBrickGrid& brickGrid, const UVector3& v3BrickGrid,
+	                             const Vector3& v3Min, const Vector3& v3Max,
+	                             Vector3& o_v3Min, Vector3& o_v3Max) const;
 
 	void Reveal() { m_bFaded = false; };
 	void Fade() { m_bFaded = true; };
@@ -135,6 +138,11 @@ private:
 	static const uint32_t k_uiLooseCellShift = 5;
 
 	std::unordered_map<uint32_t, Box> m_LooseVoxelCells;
+
+	/* Round-robin cursor and per-frame budget for retiring loose cells. The
+	   registry is only bounded because of this - see SubmitLooseVoxelProxies. */
+	static const size_t k_uiLooseValidatePerFrame = 32;
+	size_t m_LooseValidateCursor = 0;
 
 	/* False until Start() has wiped and sized the voxel buffer. See
 	   OnComponentAdded. */

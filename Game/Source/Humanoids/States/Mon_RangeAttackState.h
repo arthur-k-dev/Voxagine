@@ -5,8 +5,8 @@
 class Mon_RangeAttackState : public FSMState<Monster>
 {
 private:
-	float m_fTimer;
-	bool m_bHasShot;
+	float m_fTimer = 0.f;
+	bool m_bHasShot = false;
 
 public:
 	void Start(Monster* pOwner) override;

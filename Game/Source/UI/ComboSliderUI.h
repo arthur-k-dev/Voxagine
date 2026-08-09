@@ -15,7 +15,7 @@ public:
 
 	void AddComponents();
 
-	UISlider* m_pComboSlider;
+	UISlider* m_pComboSlider = nullptr;
 
 	void SetComboSlider(int currentComboStreak, int comboGoal);
 

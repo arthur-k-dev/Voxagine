@@ -16,7 +16,7 @@ private:
 
 	Player* m_pPlayer = nullptr;
 
-	UISlider* m_pDashCooldownSlider;
+	UISlider* m_pDashCooldownSlider = nullptr;
 
 	RTTR_ENABLE(BehaviorScript)
 	RTTR_REGISTRATION_FRIEND

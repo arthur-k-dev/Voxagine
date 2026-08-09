@@ -53,6 +53,12 @@ void OpenLevelTrigger::Start()
 {
 	Entity::Start();
 
+	// Tick reads this as "the player is through the door", so it has to be
+	// false before the first tick of a fresh level, whatever the entity was
+	// reused from.
+	m_bIsTriggered = false;
+	m_fFadeTimer = 0.f;
+
 	m_pAudioSource = GetComponent<AudioSource>();
 	if (!m_pAudioSource)
 		m_pAudioSource = AddComponent<AudioSource>();

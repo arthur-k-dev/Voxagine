@@ -48,7 +48,7 @@ public:
 	bool m_bIsRangeAttacking;
 	std::string m_rangeAttackAnimation;
 	int m_iRangeAttackAnimationFPS = 10;
-	bool m_bIsIdle;
+	bool m_bIsIdle = true;
 
 	bool m_bApplyDefaultValues;
 

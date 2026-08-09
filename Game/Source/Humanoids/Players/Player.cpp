@@ -337,12 +337,30 @@ void Player::Start()
 
 	SetState("Idle");
 
+	uint32_t uiPlayerCount = MainMenuManagerComponent::m_uiPlayerCount;
+	bool bPlayer1Active = MainMenuManagerComponent::m_bPlayer1Active;
+	bool bPlayer2Active = MainMenuManagerComponent::m_bPlayer2Active;
+
+#ifdef EDITOR
+	// Playing a level straight from the editor skips the main menu, so nobody
+	// ever joins and the count stays at zero - which leaves both player
+	// entities live and reads as a two player game. Default that case to
+	// player one alone. Reaching the level through the menu sets a real count,
+	// so the game's own flow is untouched.
+	if (uiPlayerCount == 0)
+	{
+		uiPlayerCount = 1;
+		bPlayer1Active = true;
+		bPlayer2Active = false;
+	}
+#endif
+
 	// Single player mode
-	if (MainMenuManagerComponent::m_uiPlayerCount == 1)
+	if (uiPlayerCount == 1)
 	{
 		if (
-			(m_bIsAltPlayer && MainMenuManagerComponent::m_bPlayer1Active) ||
-			(!m_bIsAltPlayer && MainMenuManagerComponent::m_bPlayer2Active)
+			(m_bIsAltPlayer && bPlayer1Active) ||
+			(!m_bIsAltPlayer && bPlayer2Active)
 		)
 		{
 			m_pMergeWith = GetWorld()->FindEntity(m_bIsAltPlayer ? "Player" : "Player1");

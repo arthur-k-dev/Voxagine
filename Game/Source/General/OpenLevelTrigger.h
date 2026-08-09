@@ -34,7 +34,7 @@ private:
 
 	float m_fBGMVolume = 1.f;
 
-	bool m_bIsTriggered;
+	bool m_bIsTriggered = false;
 	bool m_bStopMusic = false;
 
 	RTTR_ENABLE(Entity)

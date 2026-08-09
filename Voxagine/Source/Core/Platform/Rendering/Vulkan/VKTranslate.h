@@ -154,13 +154,20 @@ inline VKResourceState VKStateOf(PEResourceState state)
 		         VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT,
 		         VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT };
 
+	/* ALL_TRANSFER rather than COPY, and for the reason VKSwapchain::
+	   TransitionImage already records against CLEAR: a copy-only scope does not
+	   cover a blit. The present path transitions its source to COPY_SOURCE and
+	   then reads it with vkCmdBlitImage, which runs at the BLIT stage, so the
+	   barrier ordered nothing - sync validation reports "vkCmdBlitImage reads
+	   VkImage ... previously written during an image layout transition".
+	   ALL_TRANSFER is a superset of copy, blit, clear and resolve. */
 	case E_STATE_COPY_SOURCE:
 		return { VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_2_TRANSFER_READ_BIT,
-		         VK_PIPELINE_STAGE_2_COPY_BIT };
+		         VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT };
 
 	case E_STATE_COPY_DEST:
 		return { VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_ACCESS_2_TRANSFER_WRITE_BIT,
-		         VK_PIPELINE_STAGE_2_COPY_BIT };
+		         VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT };
 
 	case E_STATE_GENERAL_READ:
 		return { VK_IMAGE_LAYOUT_GENERAL, VK_ACCESS_2_MEMORY_READ_BIT,

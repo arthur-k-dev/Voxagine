@@ -26,6 +26,8 @@
  *   level   <towers|slab>        which generator to build
  *   ticks   <n>                  fixed ticks to run
  *   budget  <visits> <convert>   integrity visits and island voxels per tick
+ *   particles <n>                debris pool capacity
+ *   spawn   <tick> <n>           spawn n debris at once, for the sim sweep
  *   explode <tick> <x> <y> <z> <radius>
  */
 
@@ -34,12 +36,15 @@
 #include <cstdio>
 #include <cstdlib>
 #include <deque>
+#include <unordered_set>
 #include <fstream>
 #include <sstream>
 #include <string>
 #include <vector>
 
 #include "Core/ECS/Systems/Physics/IntegrityChecker.h"
+#include "Core/Particles/ParticleCore.h"
+#include "Core/Particles/ParticleSimulation.h"
 #include "Core/Utils/DeterministicRandom.h"
 #include "Core/Voxels/SphericalDestruction.h"
 #include "Core/Voxels/VoxelEditBatch.h"
@@ -77,7 +82,17 @@ namespace
 		uint32_t uiVisitBudget = IntegrityChecker::VISIT_BUDGET_PER_TICK;
 		uint32_t uiConvertBudget = 16384;
 
+		/* Debris capacity. Also the phase 6 gate's independent variable: sweep
+		   it with `particles <n>` and watch the sim row. */
+		uint32_t uiParticleBudget = 112500;
+
 		std::vector<Explosion> explosions;
+
+		/* (tick, count) pairs. A direct injection of debris, for measuring the
+		   simulation at a chosen particle count rather than at whatever an
+		   explosion happens to produce - which is what phase 6's gate needs
+		   (rule 11: sweep the axis the optimization claims to attack). */
+		std::vector<std::pair<uint32_t, uint32_t>> spawns;
 	};
 
 	/* Total and peak, the same two numbers FrameProfiler keeps and for the same
@@ -234,6 +249,15 @@ namespace
 				stream >> script.uiTicks;
 			else if (command == "budget")
 				stream >> script.uiVisitBudget >> script.uiConvertBudget;
+			else if (command == "particles")
+				stream >> script.uiParticleBudget;
+			else if (command == "spawn")
+			{
+				uint32_t uiTick = 0;
+				uint32_t uiCount = 0;
+				stream >> uiTick >> uiCount;
+				script.spawns.emplace_back(uiTick, uiCount);
+			}
 			else if (command == "explode")
 			{
 				Explosion explosion;
@@ -295,26 +319,84 @@ namespace
 	 * loop out into SphericalDestruction::Apply with the gameplay-shaped parts
 	 * as callbacks, so this now measures and hashes the shipping algorithm.
 	 */
-	uint32_t Explode(VoxelWorldHarness& world, VoxelEditBatch& batch, const Explosion& explosion,
-	                 DeterministicRandom& random)
+	uint32_t Explode(VoxelWorldHarness& world, VoxelEditBatch& batch, ParticleCore& debris,
+	                 const Explosion& explosion, DeterministicRandom& random)
 	{
 		uint32_t uiSpawnCounter = 0;
 
 		const SphericalDestruction::Result result = SphericalDestruction::Apply(
 			batch, world.Grid(), explosion.v3Center, explosion.fRadius,
 			[](uint16_t) { return true; },
-			[&random, &uiSpawnCounter](const Vector3&, uint32_t)
+			[&](const Vector3& v3Position, uint32_t uiColor)
 			{
 				/* One particle per four destroyed voxels, matching the engine.
-				   There is no pool here, but the draw is made anyway so the RNG
-				   stream depends only on the geometry. */
-				if ((uiSpawnCounter % 4) == 0)
-					(void)random.Range(20.f, 60.f);
-
+				   The counter advances per destroyed voxel whether or not the
+				   pool had room, so density stays even. */
+				const bool bSpawn = (uiSpawnCounter % 4) == 0;
 				++uiSpawnCounter;
+
+				if (!bSpawn)
+					return;
+
+				Vector3 v3Away = v3Position - explosion.v3Center;
+				const float fLengthSquared = glm::length2(v3Away);
+
+				v3Away = fLengthSquared > 0.f
+					? v3Away / std::sqrt(fLengthSquared)
+					: Vector3(0.f, 1.f, 0.f);
+
+				ParticleSpawn spawn;
+				spawn.v3Position = v3Position;
+				spawn.v3Velocity = v3Away * random.Range(20.f, 60.f);
+				spawn.uiColor = uiColor;
+				spawn.bBakeOnImpact = true;
+
+				debris.Spawn(spawn);
 			});
 
 		return result.uiDestroyed;
+	}
+
+	/* The engine's own per-particle step, driven here. Returns how many
+	   particles were still alive afterwards. */
+	uint32_t SimulateDebris(VoxelWorldHarness& world, ParticleCore& debris, float fDeltaTime,
+	                        uint64_t& io_uiBaked)
+	{
+		VoxelEditBatch batch(world.MakeEditTarget());
+
+		const ParticleSimulation::Settings settings;
+		const UVector3 v3WindowSize = world.Size();
+		const Vector3 v3WorldOffset = world.Grid().GetWorldOffset();
+
+		uint32_t uiIndex = 0;
+
+		while (uiIndex < debris.GetCount())
+		{
+			const ParticleSimulation::Outcome outcome = ParticleSimulation::Step(
+				debris, uiIndex, fDeltaTime, world.Bricks(), v3WindowSize, v3WorldOffset, settings);
+
+			if (outcome.bBake)
+			{
+				batch.Set(
+					Vector3(static_cast<float>(outcome.iBakeX),
+					        static_cast<float>(outcome.iBakeY),
+					        static_cast<float>(outcome.iBakeZ)),
+					debris.Color[uiIndex],
+					VoxelOwnerVolume::k_uiNoOwnerSlot);
+
+				++io_uiBaked;
+			}
+
+			if (outcome.bRetire)
+			{
+				debris.Retire(uiIndex);
+				continue;
+			}
+
+			++uiIndex;
+		}
+
+		return debris.GetCount();
 	}
 }
 
@@ -341,6 +423,7 @@ int main(int argc, char* argv[])
 	Phase explodePhase("explosion burst");
 	Phase integrityPhase("integrity flood fill");
 	Phase convertPhase("island conversion");
+	Phase particlePhase("particle simulation");
 
 	VoxelWorldHarness world(script.v3Size, script.v3ChunkSize);
 
@@ -353,6 +436,22 @@ int main(int argc, char* argv[])
 	const uint64_t uiBuiltVoxels = world.CountOccupied();
 
 	DeterministicRandom random(script.uiSeed);
+
+	ParticleCore debris;
+	debris.Create(script.uiParticleBudget);
+
+	uint64_t uiBaked = 0;
+	uint32_t uiPeakAlive = 0;
+
+	/* Sim cost against the number alive, for the phase 6 gate. One row per
+	   tick that simulated anything, bucketed by count. */
+	struct SimSample
+	{
+		uint32_t uiAlive = 0;
+		double fMilliseconds = 0.0;
+	};
+
+	std::vector<SimSample> simSamples;
 
 	IntegrityChecker checker;
 	checker.SetVoxelGrid(&world.Grid());
@@ -385,7 +484,7 @@ int main(int argc, char* argv[])
 			VoxelEditBatch batch(world.MakeEditTarget());
 			const Explosion& explosion = script.explosions[uiNextExplosion];
 
-			uiDestroyed += Explode(world, batch, explosion, random);
+			uiDestroyed += Explode(world, batch, debris, explosion, random);
 			SphericalDestruction::CollectSeeds(world.Grid(), explosion.v3Center, explosion.fRadius, seeds);
 
 			explodePhase.Add(watch.Milliseconds());
@@ -395,6 +494,49 @@ int main(int argc, char* argv[])
 
 		if (!seeds.empty())
 			checker.EnqueueBulk(seeds);
+
+		/* Direct injections, high above the level so they fall a long way and
+		   the count stays where it was put for many ticks. */
+		for (const std::pair<uint32_t, uint32_t>& spawn : script.spawns)
+		{
+			if (spawn.first != uiTick)
+				continue;
+
+			for (uint32_t i = 0; i < spawn.second; ++i)
+			{
+				ParticleSpawn particle;
+				particle.v3Position = Vector3(
+					random.Range(1.f, static_cast<float>(script.v3Size.x) - 2.f),
+					random.Range(static_cast<float>(script.v3Size.y) * 0.6f,
+					             static_cast<float>(script.v3Size.y) - 2.f),
+					random.Range(1.f, static_cast<float>(script.v3Size.z) - 2.f));
+				particle.v3Velocity = Vector3(
+					random.Range(-4.f, 4.f), random.Range(-2.f, 2.f), random.Range(-4.f, 4.f));
+				particle.uiColor = 0xFFC0C0C0u;
+				particle.bBakeOnImpact = false;
+
+				debris.Spawn(particle);
+			}
+		}
+
+		/* The fixed step the engine runs at. */
+		if (debris.GetCount() > 0)
+		{
+			const uint32_t uiBefore = debris.GetCount();
+
+			const Stopwatch watch;
+			const uint32_t uiAlive = SimulateDebris(world, debris, 1.f / 60.f, uiBaked);
+			const double fMilliseconds = watch.Milliseconds();
+
+			particlePhase.Add(fMilliseconds);
+
+			SimSample sample;
+			sample.uiAlive = uiBefore;
+			sample.fMilliseconds = fMilliseconds;
+			simSamples.push_back(sample);
+
+			uiPeakAlive = std::max(uiPeakAlive, uiAlive);
+		}
 
 		{
 			const Stopwatch watch;
@@ -461,18 +603,102 @@ int main(int argc, char* argv[])
 	explodePhase.Report();
 	integrityPhase.Report();
 	convertPhase.Report();
+	particlePhase.Report();
 
 	std::printf("\n[gauntlet] integrity cost by quarter of the run (the #27 curve; flat is the goal)\n  ");
 
 	for (uint32_t uiSegment = 0; uiSegment < uiSegments; ++uiSegment)
 		std::printf("%9.2f ms", segmentIntegrityMs[uiSegment]);
 
-	std::printf("\n\n[gauntlet] %llu voxels built, %llu destroyed by explosions, %llu converted from %llu islands, %llu left\n",
+	std::printf("\n[gauntlet] debris: %u pool, %u peak alive, %llu baked back into the world\n",
+	            script.uiParticleBudget, uiPeakAlive, static_cast<unsigned long long>(uiBaked));
+
+	if (!simSamples.empty())
+	{
+		/* Cost per particle per tick, which is the number phase 6's gate is
+		   about: if it stays flat as the count grows, the CPU sim scales and
+		   the gate stays shut. Reported over the busiest ticks, because a tick
+		   with eleven particles in it measures loop overhead rather than the
+		   per-particle cost. */
+		std::sort(simSamples.begin(), simSamples.end(),
+			[](const SimSample& a, const SimSample& b) { return a.uiAlive > b.uiAlive; });
+
+		const size_t uiTop = std::min<size_t>(simSamples.size(), 32);
+
+		double fTotalMs = 0.0;
+		uint64_t uiTotalParticles = 0;
+
+		for (size_t i = 0; i < uiTop; ++i)
+		{
+			fTotalMs += simSamples[i].fMilliseconds;
+			uiTotalParticles += simSamples[i].uiAlive;
+		}
+
+		std::printf("[gauntlet] sim: busiest tick %u alive in %.3f ms; over the busiest %zu ticks "
+		            "%.1f ns per particle per tick\n",
+		            simSamples[0].uiAlive, simSamples[0].fMilliseconds, uiTop,
+		            uiTotalParticles > 0 ? (fTotalMs * 1000000.0) / static_cast<double>(uiTotalParticles) : 0.0);
+	}
+
+	std::printf("\n[gauntlet] %llu voxels built, %llu destroyed by explosions, %llu converted from %llu islands, %llu left\n",
 	            static_cast<unsigned long long>(uiBuiltVoxels),
 	            static_cast<unsigned long long>(uiDestroyed),
 	            static_cast<unsigned long long>(uiConverted),
 	            static_cast<unsigned long long>(uiIslandsFound),
 	            static_cast<unsigned long long>(world.CountOccupied()));
+
+	/* The connectivity oracle, over the whole window. Anything the exhaustive
+	   walk calls ungrounded that the run did not convert is an island the
+	   memoised checker failed to find - which is phase 4's one real risk, and
+	   the failure reads as "a thing that should have fallen did not" rather
+	   than as a crash. */
+	{
+		const Stopwatch oracleWatch;
+
+		std::unordered_set<uint64_t> classified;
+		std::vector<uint64_t> island;
+
+		uint64_t uiMissed = 0;
+		uint64_t uiMissedComponents = 0;
+
+		for (uint32_t uiZ = 0; uiZ < script.v3Size.z; ++uiZ)
+		for (uint32_t uiY = 1; uiY < script.v3Size.y; ++uiY)
+		for (uint32_t uiX = 0; uiX < script.v3Size.x; ++uiX)
+		{
+			if (!world.Grid().GetCell(uiX, uiY, uiZ).IsActive())
+				continue;
+
+			const uint64_t uiHash = IntegrityChecker::PositionToHash(uiX, uiY, uiZ);
+
+			if (classified.count(uiHash) != 0)
+				continue;
+
+			if (!checker.ClassifyExhaustive(
+				Vector3(static_cast<float>(uiX), static_cast<float>(uiY), static_cast<float>(uiZ)), island))
+				continue;
+
+			classified.insert(island.begin(), island.end());
+
+			uiMissed += island.size();
+			++uiMissedComponents;
+		}
+
+		const IntegrityChecker::Stats& stats = checker.GetStats();
+
+		std::printf("\n[gauntlet] checker: %llu seeds offered, %llu deduplicated, %llu answered from the memo, "
+		            "%llu visits, %llu memo hits mid-walk, %llu islands emitted\n",
+		            static_cast<unsigned long long>(stats.uiSeedsOffered),
+		            static_cast<unsigned long long>(stats.uiSeedsDeduplicated),
+		            static_cast<unsigned long long>(stats.uiSeedsSkippedByMemo),
+		            static_cast<unsigned long long>(stats.uiVisits),
+		            static_cast<unsigned long long>(stats.uiMemoHits),
+		            static_cast<unsigned long long>(stats.uiIslandsEmitted));
+
+		std::printf("[gauntlet] oracle: %llu voxels in %llu ungrounded components still standing (%.0f ms)\n",
+		            static_cast<unsigned long long>(uiMissed),
+		            static_cast<unsigned long long>(uiMissedComponents),
+		            oracleWatch.Milliseconds());
+	}
 
 	const uint32_t uiDisagreements = world.Validate();
 

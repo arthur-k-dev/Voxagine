@@ -64,11 +64,17 @@ public:
 
 	void SetRenderSystem(RenderSystem* pRenderSystem) { m_pRenderSystem = pRenderSystem; }
 
-	/* DESTRUCTION_PLAN.md phase 0. Walks the pool's free list and its alive
-	   list and checks that between them they account for every particle exactly
-	   once. Reported alongside the representation-sync audit; see the
-	   definition. */
+	/* DESTRUCTION_PLAN.md phase 0. Checks that the particle pool's sparse table
+	   and its dense arrays agree in both directions. Reported alongside the
+	   representation-sync audit; see the definition. */
 	void AuditParticlePool() const;
+
+	/* DESTRUCTION_PLAN.md phase 4's acceptance instrument, triggered by
+	   VOXAGINE_INTEGRITY_AUDIT=<seconds>. Re-derives every voxel's
+	   grounded/island classification with the exhaustive pre-phase-4 flood
+	   fill and reports anything the memoised checker would answer differently.
+	   See the definition. */
+	void AuditIntegrity();
 
 	uint32_t m_uiActiveParticleCount = 0;
 

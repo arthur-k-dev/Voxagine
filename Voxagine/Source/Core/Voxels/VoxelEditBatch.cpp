@@ -105,6 +105,12 @@ bool VoxelEditBatch::Write(uint32_t uiX, uint32_t uiY, uint32_t uiZ, uint32_t ui
 			static_cast<float>(uiZ)));
 	}
 
+	/* Anything that classified this voxel's neighbourhood - the integrity
+	   checker's memo - is now describing a world that no longer exists. It
+	   polls this rather than being told, so a new write path cannot forget to
+	   invalidate. */
+	m_Target.pGrid->BumpWriteGeneration();
+
 	++m_uiWrites;
 
 	return true;

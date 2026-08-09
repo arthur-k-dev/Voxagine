@@ -244,6 +244,27 @@ void RenderSystem::PostTick(float fDeltaTime)
 	if (s_bCoverageAudit)
 		AuditProxyCoverage(fDeltaTime);
 
+	/* VOXAGINE_INTEGRITY_AUDIT=<seconds>: the connectivity oracle. Separate
+	   from the sync audit because they cost very differently - this one walks
+	   cached CPU voxels, that one reads the window back over PCIe - and a
+	   destruction session wants this one often and that one rarely. */
+	{
+		static const double s_fInterval =
+			std::getenv("VOXAGINE_INTEGRITY_AUDIT") ? atof(std::getenv("VOXAGINE_INTEGRITY_AUDIT")) : 0.0;
+		static double s_fElapsed = 0.0;
+
+		if (s_fInterval > 0.0 && m_pPhysicsSystem != nullptr)
+		{
+			s_fElapsed += fDeltaTime;
+
+			if (s_fElapsed >= s_fInterval)
+			{
+				s_fElapsed = 0.0;
+				m_pPhysicsSystem->AuditIntegrity();
+			}
+		}
+	}
+
 	/* VOXAGINE_SYNC_AUDIT=<seconds>: repeated rather than one-shot, because the
 	   disagreement it looks for is produced by a *write path* and so does not
 	   exist at rest - see DESTRUCTION_PLAN.md's verification reference.

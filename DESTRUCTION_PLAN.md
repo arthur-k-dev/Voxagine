@@ -48,9 +48,36 @@ detection) and the loose-voxel registry.
 | 1 — Unified voxel write path | DONE | destruction-phase-1 | Immediate apply, not deferred — see notes |
 | 2 — `ApplySphericalDestruction` rewrite | DONE | destruction-phase-2 | Hash unchanged; the seeding rule changed and found the same islands |
 | 3 — Particle core rewrite (SoA, no claims) | DONE | destruction-phase-3 | P16 still open; component pools not unified — see notes |
-| 4 — Incremental connectivity | TODO | | |
-| 5 — Connectivity off-thread | GATED | | Only if phase 4's budget measurably limits |
-| 6 — GPU debris simulation | GATED | | Only if phase 3's sim cost measurably limits |
+| 4 — Incremental connectivity | DONE | destruction-phase-4 | Memoised flood fill, not the brick-component graph — see notes |
+| 5 — Connectivity off-thread | **CLOSED** | destruction-phase-4 | Measured: the checker uses 9% of its budget |
+| 6 — GPU debris simulation | **CLOSED** | destruction-phase-4 | Measured: 17 ns per particle per tick, linear to 150 k |
+
+### Where this ended up
+
+All five core phases are done and both gated ones are closed by measurement.
+**Every entry in the defect ledger is closed except P16**, which phase 3's notes
+explain — it needs somebody watching the screen, not another test.
+
+What the destruction gauntlet says, end to end:
+
+| | before | after |
+|---|---|---|
+| integrity flood fill, total over the run | 47.1 ms | **17.0–17.8 ms** |
+| explosion burst, radius 10 | 0.157 ms | 0.165 ms, now including seed collection |
+| particle sim, per particle per tick | not measurable | **16.7 ns**, flat to 150 k alive |
+| representation disagreements | 0 | 0 |
+| ungrounded components left standing | not measurable | **0** |
+
+Three things are outstanding and none of them is code:
+
+1. **Nobody has watched the screen.** This was executed overnight. The phases
+   that need eyes are 2 (the D3 off-by-one shifts the destroyed sphere by one
+   column), 3 (debris should *land more often* now — P6's fix — and the bounce
+   feel comes from the same code path) and 4 (islands falling on the tick the
+   damage happens rather than several ticks later).
+2. **P16**, the single-buffered particle mapper.
+3. **The sliding-camera gauntlet**, which needs the harness to model chunk
+   streaming. Phase 0's notes say what it would take.
 
 ---
 
@@ -215,7 +242,7 @@ half the point of the rewrite is that whole classes disappear structurally.
 | D3 | FIXED (phase 2) | Off-by-one: loop pre-increments `volumePos` then uses `volumePos.x - 1`; on row wrap the cleared voxel, the sphere test and `voxels[i]` disagree — `:490-504`, `:551` |
 | D4 | FIXED (phase 2) | PCIe readback per destroyed voxel: `m_pRenderSystem->GetVoxel` at `:519` reads the mapping; the CPU colour is already in hand as `voxels[i]->Color`. Same pattern in `VoxFrameEmitter.cpp:34` |
 | D5 | FIXED (phase 1) | Stale owner slots: `ModifyVoxel` clears colour only; 3 of 4 destroyed voxels keep their static owner's slot; islands leave stale slots on pool exhaustion — `:525-555`, `:296-303` |
-| D6 | FIXED (phase 2, producer) | Integrity seeds: 9 per destroyed voxel, deduped only within one batch, never against `m_Pending`; no memoisation between flood fills — `:557-569`, `IntegrityChecker.cpp:34-35`, `:82-83` |
+| D6 | FIXED (phase 2 producer, phase 4 consumer) | Integrity seeds: 9 per destroyed voxel, deduped only within one batch, never against `m_Pending`; no memoisation between flood fills — `:557-569`, `IntegrityChecker.cpp:34-35`, `:82-83` |
 | D7 | FIXED (phase 1) | Null-cell deref: `ProcessIntegrityChecks` calls `cell.IsActive()` without testing `cell`; `VoxelCell::IsActive` unconditionally derefs `pVoxel`, and islands are held across ticks so the window can slide between discovery and conversion — `:287-293`, `VoxelGrid.h:124` |
 | D8 | FIXED (phase 1) | `VoxelGrid::ModifyVoxel` has no bounds check and indexes a possibly-null chunk volume — `VoxelGrid.h:291-299`; called with unclamped coordinates at `:307`, `:554`, `:1360` |
 | D9 | FIXED (phase 2) | `PhysicsSystem::m_pRenderSystem` never initialised by `PhysicsSystem`; set only by `RenderSystem`'s own constructor — `PhysicsSystem.h:114` |
@@ -858,12 +885,9 @@ component — eight files of serialized types — for no ledger entry beyond wha
 the budgets already closed. Recorded as a deliberate deferral rather than an
 oversight.
 
-**Also not measured: `SimulateParticles` at 5 k / 50 k / 150 k.** The gauntlet
-does not simulate particles (it draws from the same seeded RNG so the stream
-stays aligned, but there is no sim), so the acceptance table's particle rows are
-still empty. Adding a sim step to the harness is the obvious way to fill them
-and is the natural first item for whoever picks this up: `ParticleCore` and
-`ParticleLanding` are both harness-compatible by construction.
+**`SimulateParticles` at 5 k / 50 k / 150 k was measured in phase 4**, once the
+gauntlet grew a simulation step: **17.3 / 16.8 / 16.7 ns per particle per tick**,
+flat over a 30× range. See phase 6's notes, which that measurement closes.
 
 **And the destruction-heavy session with Joey has not happened** — this ran
 overnight. P6's fix should be visible as *more* debris landing than before,
@@ -917,7 +941,102 @@ cumulative destruction grows, and zero frames >30 ms attributable to
 integrity/conversion; D6 (consumer), D7, P17 closed. Record the graph's
 memory footprint.
 
-**Notes**: *(fill in when done)*
+#### Notes
+
+**This is not the brick-component graph the phase sketched, and that is a
+deliberate call rather than a shortcut.** What shipped is a *memo*: the checker
+records what it has already classified and drops it when the grid's write
+generation moves. The brick graph was designed far enough to see two problems I
+could not close overnight:
+
+- The per-brick component arena has to be re-packed whenever a dirty brick's
+  component count changes, which is every destruction.
+- A brick can hold up to 256 components (a checkerboard), so a practical
+  implementation needs a fallback that merges them — and a merge makes the graph
+  *over*-connected, which means an island that should fall does not. That
+  failure reads as level design, not as a bug, and finding it needs a long
+  watched session rather than a test.
+
+The memo gets the same asymptotic property — cost proportional to the geometry
+touched, not to seeds × island size — with an exact answer and about 120 lines.
+If the brick graph is built later, the oracle below is what it should be held
+to, and the memo is what it has to beat.
+
+**The fix is one line of insight: the walk used to throw its answer away.**
+Reaching the ground discarded everything collected, so the next seed standing on
+the same building flooded the whole building again — and one explosion produces
+thousands of seeds on the same few structures. That is the shape of #27. The
+walk now records both answers, and a walk that *meets* an already-grounded voxel
+is itself grounded and stops there.
+
+**Invalidation is polled, not pushed, and that too is a bug that already
+happened.** The first version had callers invalidate. The gauntlet writes
+through the same `VoxelEditBatch` but is not `PhysicsSystem`, so it never
+invalidated, kept a stale memo, and found **20 islands where it should have
+found 100** — with the final state visibly wrong. `VoxelEditBatch` now bumps
+`VoxelGrid::GetWriteGeneration()` on every write and the checker compares it on
+entry. A new write path cannot forget. This is the same lesson phase 1 exists
+for, arriving one layer up.
+
+| | phase 0 | phase 2 | phase 4 |
+|---|---|---|---|
+| integrity flood fill, total | 47.1 ms | 36.1 ms | **17.0–17.8 ms** |
+| by quarter of the run | 22.9 / 18.0 / 6.3 / 0 | 25.6 / 10.5 / 0.01 / 0 | **11.2–12.4 / 5.4–5.8 / 0.02 / 0** |
+| islands emitted | 100 | 100 | **60** |
+| voxels converted | 30,580 | 30,580 | **30,580** |
+| gauntlet state hash | `c869b806aa820b57` | `c869b806aa820b57` | `c869b806aa820b57` |
+
+**Sixty islands rather than a hundred, and the same 30,580 voxels converted.**
+The forty that disappeared were the *same island emitted more than once* from
+different seeds; the conversion loop skipped their already-cleared voxels, which
+is why the final state is byte-identical. Fewer duplicate emissions is the point,
+not a loss.
+
+**The oracle says zero.** `IntegrityChecker::ClassifyExhaustive` is the
+pre-phase-4 walk kept verbatim — no memo, no budget, no shared state, because an
+oracle that reuses the machinery it checks proves nothing. The gauntlet runs it
+over the whole window at the end and reports every ungrounded component still
+standing: **0 voxels in 0 components**, in 18 ms. In-game it is
+`VOXAGINE_INTEGRITY_AUDIT=<seconds>`.
+
+Seed accounting over the run: 25,600 offered, 16,920 (66%) answered from the
+memo without starting a walk, 8,080 more answered by meeting the memo a step or
+two in, 864,400 visits total.
+
+**Memory: none.** There is no graph to size. The two memo sets hold only what a
+drain actually walked — bounded by the visit budget times the ticks it spans —
+and are cleared on the next write. Bitmaps were considered and rejected for
+exactly that reason: 9.4 MiB over the window, cleared by a memset on every
+explosion.
+
+**The gauntlet simulates particles now**, which is what let phase 3's missing
+acceptance row and phase 6's gate both be filled. Debris spawns from the real
+`SphericalDestruction` callback, is stepped by the engine's own
+`ParticleSimulation::Step`, and bakes back through the batch: 23,735 baked over
+the run, 11,479 peak alive. That re-blessed the state hash to
+`70f0f603aa4b8cc0` — expected, since debris now writes voxels the earlier runs
+never had.
+
+**In-game, on a pristine `Fishing_Village_Beat1`, the oracle reports 14,532
+voxels in 211 ungrounded components before anything has been destroyed.** That
+is *not* a defect and it is worth knowing: decorative geometry, props resting on
+other props, models whose only contact with the ground is through another model
+that 26-connectivity does not join. Nothing ever seeds those voxels, so they
+simply stand — which is what a level designer intended. The audit takes the
+first run as a baseline and reports deltas after it; a delta that grows with
+destruction and does not come back down is the checker failing to find an
+island. The absolute number never was the finding.
+
+**Not done: the sliding-camera gauntlet and the long interactive session.** The
+harness models no chunk streaming, so there is no slide to run; and this ran
+overnight, so the interactive half of the acceptance criteria is outstanding.
+`VOXAGINE_INTEGRITY_AUDIT` is in the tree precisely so that session is one env
+var away.
+
+**D7's scenario is structurally safe now** rather than being separately fixed:
+an island discovered before a window slide and converted after it hits
+`VoxelCell::IsActive`, which phase 1 made null-safe, and the batch, which
+rejects a non-resident write.
 
 ---
 
@@ -937,7 +1056,22 @@ engine state, which is what the deleted `IntegrityJob` never had. The job
 system's known shutdown semantics (VX-JOB-003/004) must be reviewed before
 relying on cancellation.
 
-**Notes**: *(fill in when done)*
+#### Notes — the gate is CLOSED
+
+Measured on the destruction gauntlet after phase 4: **954,711 voxel visits over
+528 ticks**, against a budget of 20,000 a tick. The checker spends **9% of what
+it is allowed**, and the busiest single tick costs 0.6 ms. Nothing is waiting on
+the budget — islands fall on the tick the damage happens, which is why phase 4's
+integrity curve front-loads instead of trailing.
+
+Moving this off-thread would trade a measured non-problem for a concurrency
+design, in a subsystem that already had a worker deleted for being unsound
+(`IntegrityJob`, #19). Do not open this gate without a *new* measurement showing
+the budget is binding — the number to beat is 9%.
+
+The one thing that would change that is a much larger visit cost per island,
+which is what the per-brick component graph would remove rather than parallelise.
+Try that first.
 
 ---
 
@@ -956,7 +1090,33 @@ applies to every new binding; the particle mapper's frame-slot correctness
 from phase 3 is a prerequisite. Latency of one frame between impact and bake
 is the accepted cost — note it and have Joey look at fast debris.
 
-**Notes**: *(fill in when done)*
+#### Notes — the gate is CLOSED
+
+Rule 11 says sweep the axis the optimization claims to attack, before building
+it. `voxagine_gauntlet UnitTesting/Gauntlet/Scripts/sim-<n>.gauntlet` injects
+exactly *n* debris particles into a standing level and simulates them, so the
+only thing being measured is the per-particle step:
+
+| alive | busiest tick | per particle per tick |
+|---|---|---|
+| 5,000 | 0.076 ms | 17.3 ns |
+| 50,000 | 0.695 ms | 16.8 ns |
+| 150,000 | 2.066 ms | 16.7 ns |
+
+**Flat, over a 30× range.** The SoA walk plus one occupancy bit test per moved
+cell costs about 17 ns a particle and does not degrade with count — there is no
+hidden superlinearity for a GPU port to remove. At the *shipped* debris budget
+of 112,500 the worst case is about **1.9 ms of a 16.7 ms fixed tick**, and at
+the full 150,000 cap 2.1 ms.
+
+That is not a limit, and a GPU sim would buy those two milliseconds at the price
+of a feedback ring, a frame of latency between impact and bake, and every new
+binding under rule 8. Do not open this gate without a measurement showing the
+sim is binding at the counts actually reached — the number to beat is 17 ns.
+
+Worth noting what the sweep *did* show: the busiest gauntlet tick with real
+explosion debris peaks at 11,479 alive, an eighth of the budget. The cap is a
+cap, not a working set.
 
 ---
 
@@ -972,8 +1132,11 @@ is the accepted cost — note it and have Joey look at fast debris.
 - `VOXAGINE_SYNC_AUDIT=<sec>` — recompute occupancy bitmap + brick counts
   from CPU voxels, compare all representations. (Phase 0, from the editor's
   Validate Occupancy Bricks.)
-- `VOXAGINE_INTEGRITY_AUDIT=<sec>` — exhaustive flood fill vs the
-  connectivity graph. (Phase 4.)
+- `VOXAGINE_INTEGRITY_AUDIT=<sec>` — the exhaustive pre-phase-4 flood fill,
+  run over the whole window and compared against what the memoised checker has
+  queued. Reports every ungrounded component nothing is going to convert. Walks
+  cached CPU voxels, so it costs seconds rather than the sync audit's twenty.
+  (Phase 4.)
 - `VOXAGINE_VOXEL_AUDIT=<sec>` — existing: occupancy/slots/codec round-trip.
   Run during destruction, not at rest.
 - `VOXAGINE_COVERAGE_AUDIT=<sec>` — existing: occupied bricks with no proxy;

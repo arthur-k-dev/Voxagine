@@ -216,6 +216,18 @@ public:
 	   change is visible in the hash instead of silently shortening it. */
 	uint64_t Hash() const;
 
+	/* Bumped by every voxel write that goes through VoxelEditBatch.
+	 *
+	 * The integrity checker memoises what it has classified, and everything it
+	 * believes stops being true the moment a voxel changes. Having each write
+	 * site remember to invalidate is exactly the per-call-site obligation phase
+	 * 1 spent its whole existence removing - and it failed immediately when
+	 * tried: the gauntlet, which writes through the batch but is not
+	 * PhysicsSystem, silently kept a stale memo and found 20 islands where it
+	 * should have found 100. A counter the checker polls cannot be forgotten. */
+	uint64_t GetWriteGeneration() const { return m_uiWriteGeneration; }
+	void BumpWriteGeneration() { ++m_uiWriteGeneration; }
+
 	void GetDimensions(uint32_t& uiX, uint32_t& uiY, uint32_t& uiZ) const;
 	UVector3 GetDimensions() const;
 	uint64_t GetNumVoxels() const { return m_uiNumVoxels; }
@@ -236,6 +248,8 @@ private:
 	uint64_t m_uiNumVoxels;
 	float m_fInvVoxelSize;
 	Vector3 m_InvChunkSize;
+
+	uint64_t m_uiWriteGeneration = 1;
 
 	Vector3 m_worldOffset;
 	UVector3 m_chunkSize;

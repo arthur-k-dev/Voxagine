@@ -24,6 +24,7 @@
 #include "Core/Platform/Platform.h"
 #include "Core/Platform/Rendering/FrameProfiler.h"
 #include "Core/Particles/ParticleLanding.h"
+#include "Core/Particles/ParticleSimulation.h"
 #include "Core/Voxels/SphericalDestruction.h"
 #include "Core/Platform/Rendering/Passes/ParticlePass.h"
 #include "External/optick/optick.h"
@@ -370,6 +371,11 @@ void PhysicsSystem::ProcessIntegrityChecks()
 			m_uiIslandCursor = 0;
 		}
 	}
+
+	/* Conversion cleared voxels, so anything the checker had classified about
+	   the geometry around them is no longer true. */
+	if (uiConvertBudget < k_uiIntegrityConvertPerTick)
+		m_IntegrityChecker.Invalidate();
 }
 
 
@@ -383,6 +389,140 @@ void PhysicsSystem::AuditParticlePool() const
 	        result.uiBrokenMappings ? " - the slot table and the dense arrays disagree" : "",
 	        result.uiDuplicateSlots ? " - a slot is claimed twice" : "",
 	        result.IsSound() ? "" : " - UNSOUND");
+}
+
+/* The connectivity oracle. DESTRUCTION_PLAN.md phase 4.
+ *
+ * Phase 4 made the checker remember what it has already classified, which is
+ * what stops an explosion's thousands of seeds each re-flooding the same
+ * building. A memo is exactly the kind of optimization that can be subtly wrong
+ * for a long time before anyone notices - the failure is "a thing that should
+ * have fallen did not", which reads as level design rather than as a bug.
+ *
+ * So the pre-phase-4 walk is kept, verbatim and unbudgeted, as
+ * IntegrityChecker::ClassifyExhaustive, and this runs it over the window and
+ * compares.
+ *
+ * **The absolute number is not the finding; the delta is.** A pristine
+ * Fishing_Village_Beat1 reports 14,532 voxels in 211 ungrounded components
+ * before anything has been destroyed - decorative geometry, props resting on
+ * other props, models whose only contact with the ground is through another
+ * model the checker's 26-connectivity does not join. None of that is a defect:
+ * nothing ever seeds those voxels, so they simply stand, which is what a level
+ * designer intended. The first run is therefore taken as the baseline and every
+ * run after it reports against it. A delta that grows with destruction and does
+ * not come back down is the checker failing to find an island.
+ *
+ * It walks the whole resident window with an exhaustive flood fill per
+ * component, so it costs seconds - 18.7 of them on a 2.1 M-voxel window. On
+ * demand only.
+ */
+void PhysicsSystem::AuditIntegrity()
+{
+	const UVector3 v3Dimensions = m_VoxelGrid.GetDimensions();
+
+	if (v3Dimensions.x == 0 || v3Dimensions.y == 0 || v3Dimensions.z == 0)
+	{
+		fprintf(stderr, "[integrity-audit] skipped: no voxel window yet\n");
+		return;
+	}
+
+	/* Voxels already known to belong to an island the checker has found and is
+	   waiting to convert. Those are correctly classified by construction. */
+	std::unordered_set<uint64_t> pending;
+
+	for (const std::vector<uint64_t>& island : m_PendingIslands)
+		pending.insert(island.begin(), island.end());
+
+	std::unordered_set<uint64_t> classified;
+	std::vector<uint64_t> island;
+
+	uint64_t uiOccupied = 0;
+	uint64_t uiUngrounded = 0;
+	uint64_t uiMissed = 0;
+	uint64_t uiIslands = 0;
+
+	const std::chrono::high_resolution_clock::time_point start =
+		std::chrono::high_resolution_clock::now();
+
+	for (uint32_t uiZ = 0; uiZ < v3Dimensions.z; ++uiZ)
+	for (uint32_t uiY = 1; uiY < v3Dimensions.y; ++uiY)
+	for (uint32_t uiX = 0; uiX < v3Dimensions.x; ++uiX)
+	{
+		const Voxel* pVoxel = m_VoxelGrid.GetVoxel(uiX, uiY, uiZ);
+
+		if (pVoxel == nullptr || !pVoxel->IsActive())
+			continue;
+
+		++uiOccupied;
+
+		const uint64_t uiHash = IntegrityChecker::PositionToHash(uiX, uiY, uiZ);
+
+		if (classified.count(uiHash) != 0)
+			continue;
+
+		if (!m_IntegrityChecker.ClassifyExhaustive(
+			Vector3(static_cast<float>(uiX), static_cast<float>(uiY), static_cast<float>(uiZ)), island))
+		{
+			/* Grounded. Nothing to compare - the checker never claims
+			   something is an island without having walked it. */
+			continue;
+		}
+
+		++uiIslands;
+		uiUngrounded += island.size();
+
+		classified.insert(island.begin(), island.end());
+
+		/* An ungrounded component that the checker has not queued for
+		   conversion is one it will never find, because nothing will seed it
+		   again. That is the failure this audit exists for. */
+		if (pending.count(uiHash) == 0)
+			uiMissed += island.size();
+	}
+
+	const std::chrono::duration<double, std::milli> span =
+		std::chrono::high_resolution_clock::now() - start;
+
+	const IntegrityChecker::Stats& stats = m_IntegrityChecker.GetStats();
+
+	/* Set on the first run and never again - see the function comment on why
+	   the absolute count is not the interesting number. */
+	static bool s_bHaveBaseline = false;
+	static uint64_t s_uiBaselineMissed = 0;
+	static uint64_t s_uiBaselineComponents = 0;
+
+	if (!s_bHaveBaseline)
+	{
+		s_bHaveBaseline = true;
+		s_uiBaselineMissed = uiMissed;
+		s_uiBaselineComponents = uiIslands;
+
+		fprintf(stderr, "[integrity-audit] baseline: %llu occupied, %llu voxels in %llu ungrounded components "
+		                "standing before anything was destroyed; %.0f ms. Later runs report against this.\n",
+		        (unsigned long long)uiOccupied, (unsigned long long)uiUngrounded,
+		        (unsigned long long)uiIslands, span.count());
+	}
+	else
+	{
+		const int64_t iDeltaMissed = static_cast<int64_t>(uiMissed) - static_cast<int64_t>(s_uiBaselineMissed);
+		const int64_t iDeltaComponents = static_cast<int64_t>(uiIslands) - static_cast<int64_t>(s_uiBaselineComponents);
+
+		fprintf(stderr, "[integrity-audit] %llu occupied; %llu voxels in %llu ungrounded components not queued "
+		                "for conversion (%+lld voxels, %+lld components against the baseline); %.0f ms\n",
+		        (unsigned long long)uiOccupied, (unsigned long long)uiMissed,
+		        (unsigned long long)uiIslands,
+		        (long long)iDeltaMissed, (long long)iDeltaComponents, span.count());
+	}
+
+	fprintf(stderr, "[integrity-audit] checker since last reset: %llu seeds offered, %llu deduplicated, "
+	                "%llu answered from the memo, %llu visits, %llu memo hits mid-walk, %llu islands emitted\n",
+	        (unsigned long long)stats.uiSeedsOffered,
+	        (unsigned long long)stats.uiSeedsDeduplicated,
+	        (unsigned long long)stats.uiSeedsSkippedByMemo,
+	        (unsigned long long)stats.uiVisits,
+	        (unsigned long long)stats.uiMemoHits,
+	        (unsigned long long)stats.uiIslandsEmitted);
 }
 
 bool PhysicsSystem::RayCast(Vector3 start, Vector3 dir, HitResult& hitResult, float fLength /*= FLT_MAX*/, uint32_t uiLayer /*= CollisionLayer::CL_ALL*/)
@@ -619,6 +759,11 @@ void PhysicsSystem::ApplySphericalDestruction(const Vector3& position, float fRa
 	   the clear - see SphericalDestruction::CollectSeeds. The old code pushed
 	   nine per destroyed voxel during the loop, most of them naming voxels the
 	   same loop destroyed moments later. */
+	/* The memo describes a world this burst has just changed, so it goes first.
+	   Ordering matters: invalidating *after* enqueuing would leave the new
+	   seeds answerable from stale classifications. */
+	m_IntegrityChecker.Invalidate();
+
 	std::vector<uint64_t> integrityChecks;
 	SphericalDestruction::CollectSeeds(m_VoxelGrid, v3GridCenter, fRadius, integrityChecks);
 
@@ -1306,105 +1451,32 @@ void PhysicsSystem::SimulateParticles(float fDeltaTime)
 	const UVector3 v3WindowSize = m_VoxelGrid.GetDimensions();
 	const Vector3 v3WorldOffset = m_VoxelGrid.GetWorldOffset();
 
+	ParticleSimulation::Settings settings;
+	settings.v3Gravity = PARTICLE_GRAVITY;
+	settings.fDestroyThreshold = PARTICLE_DESTROY_THRESHOLD;
+	settings.fBounceMultiplier = PARTICLE_BOUNCE_MULIPLIER;
+
 	uint32_t uiIndex = 0;
 
 	while (uiIndex < m_Debris.GetCount())
 	{
-		/* Timer first, and it is live now: the old pool set Live.Timer to the
-		   "no timer" sentinel and nothing else, so the whole path was dead
-		   (ledger M3). Debris still uses the sentinel; the component emitters
-		   are what need it. */
-		if (m_Debris.Timer[uiIndex] > 0.f)
-		{
-			m_Debris.Timer[uiIndex] -= fDeltaTime;
+		const ParticleSimulation::Outcome outcome = ParticleSimulation::Step(
+			m_Debris, uiIndex, fDeltaTime, bricks, v3WindowSize, v3WorldOffset, settings);
 
-			if (m_Debris.Timer[uiIndex] <= 0.f)
-			{
-				m_Debris.Retire(uiIndex);
-				continue;
-			}
+		if (outcome.bBake)
+		{
+			batch.Set(
+				Vector3(static_cast<float>(outcome.iBakeX),
+				        static_cast<float>(outcome.iBakeY),
+				        static_cast<float>(outcome.iBakeZ)),
+				m_Debris.Color[uiIndex],
+				VoxelOwnerVolume::k_uiNoOwnerSlot);
 		}
 
-		/* Grid position is *derived*, never stored. The old pool cached one per
-		   particle, and a window slide changes what a grid coordinate means -
-		   so a slide shorter than the 100-unit teleport clamp left every
-		   particle in flight releasing and claiming the wrong cells (P9).
-		   Position is level space, so this is a subtract and a floor. */
-		const Vector3 v3PrevGrid = glm::floor(m_Debris.Position[uiIndex] - v3WorldOffset);
-
-		m_Debris.Velocity[uiIndex] += PARTICLE_GRAVITY * fDeltaTime;
-		m_Debris.Position[uiIndex] += m_Debris.Velocity[uiIndex] * fDeltaTime;
-
-		Vector3 v3NewGrid = glm::floor(m_Debris.Position[uiIndex] - v3WorldOffset);
-
-		/* Clamped so a very fast particle does not skip the ground and fall out
-		   of the world before it can bake. */
-		if (v3NewGrid.y < 0.f)
-			v3NewGrid.y = 0.f;
-
-		bool bRetire = false;
-
-		if (v3PrevGrid != v3NewGrid)
+		if (outcome.bRetire)
 		{
-			const int32_t iX = static_cast<int32_t>(v3NewGrid.x);
-			const int32_t iY = static_cast<int32_t>(v3NewGrid.y);
-			const int32_t iZ = static_cast<int32_t>(v3NewGrid.z);
-
-			if (!ParticleLanding::IsInside(v3WindowSize, iX, iY, iZ))
-			{
-				/* Out of the window entirely. Nothing to bake into. */
-				bRetire = true;
-			}
-			else if (ParticleLanding::IsOccupied(bricks, v3WindowSize, iX, iY, iZ))
-			{
-				/* One bit test in cached memory, where the old code ran one to
-				   three full chunk-index resolutions through GetCell - and one
-				   of those was only ever asked so the particle could check its
-				   own claim, which no longer exists. */
-				const float fSpeed = glm::length(m_Debris.Velocity[uiIndex]);
-				const Vector3 v3Normal = glm::normalize(v3PrevGrid - v3NewGrid);
-
-				if (fSpeed < PARTICLE_DESTROY_THRESHOLD || v3Normal == Vector3(0.f, 1.f, 0.f))
-				{
-					if (m_Debris.BakeOnImpact[uiIndex])
-					{
-						int32_t iBakeX = 0;
-						int32_t iBakeY = 0;
-						int32_t iBakeZ = 0;
-
-						/* One resolution, one position, used for the colour,
-						   the occupancy, the brick count, the owner and the
-						   loose-voxel registration - because the batch does all
-						   five from it. The old bake computed two positions and
-						   used them inconsistently (P5), and skipped the bake
-						   entirely whenever its claim had been taken over,
-						   which is debris that silently vanished (P6). */
-						if (ParticleLanding::Resolve(bricks, v3WindowSize, iX, iY, iZ,
-						                             iBakeX, iBakeY, iBakeZ))
-						{
-							batch.Set(
-								Vector3(static_cast<float>(iBakeX),
-								        static_cast<float>(iBakeY),
-								        static_cast<float>(iBakeZ)),
-								m_Debris.Color[uiIndex],
-								VoxelOwnerVolume::k_uiNoOwnerSlot);
-						}
-					}
-
-					bRetire = true;
-				}
-				else
-				{
-					const float fContactVel = glm::dot(m_Debris.Velocity[uiIndex], v3Normal);
-
-					if (fContactVel < 0.f)
-						m_Debris.Velocity[uiIndex] += -v3Normal * fContactVel * PARTICLE_BOUNCE_MULIPLIER;
-				}
-			}
-		}
-
-		if (bRetire)
-		{
+			/* Retire swaps the last particle into this index, so the loop must
+			   not advance. */
 			m_Debris.Retire(uiIndex);
 			continue;
 		}

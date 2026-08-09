@@ -11,7 +11,6 @@ void VoxFrameEmitter::Emit(float fDeltatime, ParticlePool& particleData, uint32_
 
 	if (m_pRenderer->m_BakeData.Positions)
 	{
-		RenderSystem* pRenderSystem = m_pSystem->GetWorld()->GetRenderSystem();
 		const VoxelGrid* pGrid = m_pSystem->GetWorld()->GetVoxelGrid();
 		uint32_t* bakePositionData = m_pRenderer->m_BakeData.Positions;
 		uint32_t arrSize = m_pRenderer->m_BakeData.Size;
@@ -30,8 +29,19 @@ void VoxFrameEmitter::Emit(float fDeltatime, ParticlePool& particleData, uint32_
 
 			if (uiStartId + i < uiEndId)
 			{
-				particleData.Position[uiStartId + i] = (Vector3)pGrid->GetVoxelPosition(bakePositionData[i]) + pGrid->GetWorldOffset();
-				particleData.Color[uiStartId + i] = pRenderSystem->GetVoxel(bakePositionData[i]);
+				const UVector3 v3Grid = pGrid->GetVoxelPosition(bakePositionData[i]);
+
+				particleData.Position[uiStartId + i] = (Vector3)v3Grid + pGrid->GetWorldOffset();
+
+				/* From the CPU voxel, not from RenderSystem::GetVoxel. That
+				   reads the mapping, which is ReBAR host-visible memory, so it
+				   is an uncached PCIe read of VRAM per particle (rule 1) - and
+				   an emitter can spawn a model's worth of them in one frame.
+				   The chunk holds the same colour in ordinary cached memory.
+				   Ledger D4; the destruction path had the identical defect. */
+				const Voxel* pVoxel = pGrid->GetVoxel(v3Grid.x, v3Grid.y, v3Grid.z);
+
+				particleData.Color[uiStartId + i] = pVoxel ? pVoxel->Color : 0u;
 				particleData.GridPosition[uiStartId + i] = particleData.Position[uiStartId + i];
 			}
 		}

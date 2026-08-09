@@ -7,11 +7,19 @@
 
 uint64_t IntegrityChecker::PositionToHash(const Vector3& v3Position)
 {
-	uint64_t uiHash = 0;
-	uiHash |= (uint64_t)(uint16_t)v3Position.z;
-	uiHash |= (uint64_t)(uint16_t)v3Position.y << 16;
-	uiHash |= (uint64_t)(uint16_t)v3Position.x << 32;
-	return uiHash;
+	if (!std::isfinite(v3Position.x) || !std::isfinite(v3Position.y) || !std::isfinite(v3Position.z))
+		return k_uiInvalidHash;
+
+	if (v3Position.x < 0.f || v3Position.y < 0.f || v3Position.z < 0.f)
+		return k_uiInvalidHash;
+
+	if (v3Position.x > 65535.f || v3Position.y > 65535.f || v3Position.z > 65535.f)
+		return k_uiInvalidHash;
+
+	return PositionToHash(
+		static_cast<uint32_t>(v3Position.x),
+		static_cast<uint32_t>(v3Position.y),
+		static_cast<uint32_t>(v3Position.z));
 }
 
 Vector3 IntegrityChecker::HashToPosition(uint64_t uiHash)
@@ -30,9 +38,18 @@ void IntegrityChecker::EnqueueBulk(std::vector<uint64_t>& checks)
 
 	/* The job deduplicated on the worker as it dequeued; there is no worker to
 	   defer it to now, and doing it here keeps duplicates out of the queue
-	   rather than out of the walk. */
+	   rather than out of the walk.
+
+	   Sorting puts k_uiInvalidHash at the end, so dropping the rejects is a
+	   single truncation rather than a pass. A seed only reaches that value by
+	   naming a position outside the representable range, which the callers no
+	   longer produce - but silently walking whatever 0xFFFF,0xFFFF,0xFFFF
+	   happens to be is exactly the D11 defect. */
 	std::sort(checks.begin(), checks.end());
 	checks.erase(std::unique(checks.begin(), checks.end()), checks.end());
+
+	while (!checks.empty() && checks.back() == k_uiInvalidHash)
+		checks.pop_back();
 
 	m_Pending.insert(m_Pending.end(), checks.begin(), checks.end());
 }

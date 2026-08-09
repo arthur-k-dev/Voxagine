@@ -41,6 +41,7 @@
 
 #include "Core/ECS/Systems/Physics/IntegrityChecker.h"
 #include "Core/Utils/DeterministicRandom.h"
+#include "Core/Voxels/SphericalDestruction.h"
 #include "Core/Voxels/VoxelEditBatch.h"
 #include "Harness/VoxelWorldHarness.h"
 
@@ -287,75 +288,33 @@ namespace
 		}
 	}
 
-	/* The reference explosion: clear every occupied voxel inside the sphere and
-	   seed the integrity checker above each one, which is what
-	   PhysicsSystem::ApplySphericalDestruction does today (nine seeds per
-	   destroyed voxel, deduped only inside one batch - D6).
+	/* Drives the engine's own explosion, not a copy of it.
 	 *
-	 * Kept close to today's shape on purpose. Phase 2 replaces this with a call
-	 * into the extracted engine function and the gauntlet then measures the real
-	 * thing; until then it is the baseline's stand-in and its cost is the
-	 * write path's, not the sphere loop's.
+	 * The phase 0 gauntlet had a reference implementation here because the real
+	 * one was a method on PhysicsSystem and needed a World. Phase 2 pulled the
+	 * loop out into SphericalDestruction::Apply with the gameplay-shaped parts
+	 * as callbacks, so this now measures and hashes the shipping algorithm.
 	 */
 	uint32_t Explode(VoxelWorldHarness& world, VoxelEditBatch& batch, const Explosion& explosion,
-	                 DeterministicRandom& random, std::vector<uint64_t>& o_seeds)
+	                 DeterministicRandom& random)
 	{
-		const int32_t iRadius = static_cast<int32_t>(explosion.fRadius);
-		const float fRadiusSquared = explosion.fRadius * explosion.fRadius;
+		uint32_t uiSpawnCounter = 0;
 
-		const int32_t iCenterX = static_cast<int32_t>(explosion.v3Center.x);
-		const int32_t iCenterY = static_cast<int32_t>(explosion.v3Center.y);
-		const int32_t iCenterZ = static_cast<int32_t>(explosion.v3Center.z);
-
-		uint32_t uiDestroyed = 0;
-		uint32_t uiSpawned = 0;
-
-		for (int32_t iZ = iCenterZ - iRadius; iZ <= iCenterZ + iRadius; ++iZ)
-		for (int32_t iY = iCenterY - iRadius; iY <= iCenterY + iRadius; ++iY)
-		for (int32_t iX = iCenterX - iRadius; iX <= iCenterX + iRadius; ++iX)
-		{
-			if (iX < 0 || iY < 1 || iZ < 0)
-				continue;
-
-			const float fDX = static_cast<float>(iX - iCenterX);
-			const float fDY = static_cast<float>(iY - iCenterY);
-			const float fDZ = static_cast<float>(iZ - iCenterZ);
-
-			if (fDX * fDX + fDY * fDY + fDZ * fDZ > fRadiusSquared)
-				continue;
-
-			const VoxelCell cell = world.Grid().GetCell(
-				static_cast<uint32_t>(iX), static_cast<uint32_t>(iY), static_cast<uint32_t>(iZ));
-
-			if (!cell || !cell.IsActive())
-				continue;
-
-			/* One particle per four destroyed voxels, matching the engine. The
-			   draw is made whether or not a pool accepts it, so the RNG stream
-			   depends only on the geometry. */
-			if ((uiSpawned % 4) == 0)
-				(void)random.Range(20.f, 60.f);
-
-			++uiSpawned;
-
-			batch.Clear(Vector3(
-				static_cast<float>(iX), static_cast<float>(iY), static_cast<float>(iZ)));
-
-			++uiDestroyed;
-
-			for (int32_t iSeedZ = -1; iSeedZ <= 1; ++iSeedZ)
+		const SphericalDestruction::Result result = SphericalDestruction::Apply(
+			batch, world.Grid(), explosion.v3Center, explosion.fRadius,
+			[](uint16_t) { return true; },
+			[&random, &uiSpawnCounter](const Vector3&, uint32_t)
 			{
-				for (int32_t iSeedX = -1; iSeedX <= 1; ++iSeedX)
-				{
-					o_seeds.push_back(IntegrityChecker::PositionToHash(Vector3(
-						static_cast<float>(iX + iSeedX),
-						static_cast<float>(iY + 1),
-						static_cast<float>(iZ + iSeedZ))));
-				}
-			}
-		}
+				/* One particle per four destroyed voxels, matching the engine.
+				   There is no pool here, but the draw is made anyway so the RNG
+				   stream depends only on the geometry. */
+				if ((uiSpawnCounter % 4) == 0)
+					(void)random.Range(20.f, 60.f);
 
-		return uiDestroyed;
+				++uiSpawnCounter;
+			});
+
+		return result.uiDestroyed;
 	}
 }
 
@@ -424,7 +383,10 @@ int main(int argc, char* argv[])
 			const Stopwatch watch;
 
 			VoxelEditBatch batch(world.MakeEditTarget());
-			uiDestroyed += Explode(world, batch, script.explosions[uiNextExplosion], random, seeds);
+			const Explosion& explosion = script.explosions[uiNextExplosion];
+
+			uiDestroyed += Explode(world, batch, explosion, random);
+			SphericalDestruction::CollectSeeds(world.Grid(), explosion.v3Center, explosion.fRadius, seeds);
 
 			explodePhase.Add(watch.Milliseconds());
 

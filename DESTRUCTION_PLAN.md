@@ -46,7 +46,7 @@ detection) and the loose-voxel registry.
 |---|---|---|---|
 | 0 — Harness, baseline, CI | DONE | destruction-phase-0 | Gauntlet is a CPU harness, not the running game — see notes |
 | 1 — Unified voxel write path | DONE | destruction-phase-1 | Immediate apply, not deferred — see notes |
-| 2 — `ApplySphericalDestruction` rewrite | TODO | | |
+| 2 — `ApplySphericalDestruction` rewrite | DONE | destruction-phase-2 | Hash unchanged; the seeding rule changed and found the same islands |
 | 3 — Particle core rewrite (SoA, no claims) | TODO | | |
 | 4 — Incremental connectivity | TODO | | |
 | 5 — Connectivity off-thread | GATED | | Only if phase 4's budget measurably limits |
@@ -210,17 +210,17 @@ half the point of the rewrite is that whole classes disappear structurally.
 
 | # | Status | Defect |
 |---|---|---|
-| D1 | OPEN | Leak on early return: both `new[]` arrays allocated before `if (!isValid) return;` — `PhysicsSystem.cpp:472-478` vs `:576-577` (VX-PHY-001) |
-| D2 | OPEN | Radius unvalidated: NaN/negative → UB on the unsigned cast; `diameter³` overflows `uint32_t` past 1625 — `:467-471` |
-| D3 | OPEN | Off-by-one: loop pre-increments `volumePos` then uses `volumePos.x - 1`; on row wrap the cleared voxel, the sphere test and `voxels[i]` disagree — `:490-504`, `:551` |
-| D4 | OPEN | PCIe readback per destroyed voxel: `m_pRenderSystem->GetVoxel` at `:519` reads the mapping; the CPU colour is already in hand as `voxels[i]->Color`. Same pattern in `VoxFrameEmitter.cpp:34` |
+| D1 | FIXED (phase 2) | Leak on early return: both `new[]` arrays allocated before `if (!isValid) return;` — `PhysicsSystem.cpp:472-478` vs `:576-577` (VX-PHY-001) |
+| D2 | FIXED (phase 2) | Radius unvalidated: NaN/negative → UB on the unsigned cast; `diameter³` overflows `uint32_t` past 1625 — `:467-471` |
+| D3 | FIXED (phase 2) | Off-by-one: loop pre-increments `volumePos` then uses `volumePos.x - 1`; on row wrap the cleared voxel, the sphere test and `voxels[i]` disagree — `:490-504`, `:551` |
+| D4 | FIXED (phase 2) | PCIe readback per destroyed voxel: `m_pRenderSystem->GetVoxel` at `:519` reads the mapping; the CPU colour is already in hand as `voxels[i]->Color`. Same pattern in `VoxFrameEmitter.cpp:34` |
 | D5 | FIXED (phase 1) | Stale owner slots: `ModifyVoxel` clears colour only; 3 of 4 destroyed voxels keep their static owner's slot; islands leave stale slots on pool exhaustion — `:525-555`, `:296-303` |
-| D6 | OPEN | Integrity seeds: 9 per destroyed voxel, deduped only within one batch, never against `m_Pending`; no memoisation between flood fills — `:557-569`, `IntegrityChecker.cpp:34-35`, `:82-83` |
+| D6 | FIXED (phase 2, producer) | Integrity seeds: 9 per destroyed voxel, deduped only within one batch, never against `m_Pending`; no memoisation between flood fills — `:557-569`, `IntegrityChecker.cpp:34-35`, `:82-83` |
 | D7 | FIXED (phase 1) | Null-cell deref: `ProcessIntegrityChecks` calls `cell.IsActive()` without testing `cell`; `VoxelCell::IsActive` unconditionally derefs `pVoxel`, and islands are held across ticks so the window can slide between discovery and conversion — `:287-293`, `VoxelGrid.h:124` |
 | D8 | FIXED (phase 1) | `VoxelGrid::ModifyVoxel` has no bounds check and indexes a possibly-null chunk volume — `VoxelGrid.h:291-299`; called with unclamped coordinates at `:307`, `:554`, `:1360` |
-| D9 | OPEN | `PhysicsSystem::m_pRenderSystem` never initialised by `PhysicsSystem`; set only by `RenderSystem`'s own constructor — `PhysicsSystem.h:114` |
+| D9 | FIXED (phase 2) | `PhysicsSystem::m_pRenderSystem` never initialised by `PhysicsSystem`; set only by `RenderSystem`'s own constructor — `PhysicsSystem.h:114` |
 | D10 | FIXED (phase 1) | `VoxelGrid::GetChunk` is two near-duplicate 3-deep loops with different owner-slot handling; the fast path computes a clamp it does not apply to the write index — `VoxelGrid.cpp:150-242` |
-| D11 | OPEN | Two open-coded copies of the position hash; both truncate `float → uint16_t`, so negative coordinates wrap — `IntegrityChecker.cpp:8-15`, `PhysicsSystem.cpp:563-566` |
+| D11 | FIXED (phase 2) | Two open-coded copies of the position hash; both truncate `float → uint16_t`, so negative coordinates wrap — `IntegrityChecker.cpp:8-15`, `PhysicsSystem.cpp:563-566` |
 
 ### Particle path
 
@@ -637,7 +637,81 @@ one-session A/B confirming destroyed shapes are identical except the D3
 off-by-one column, which must be visually verified with Joey; gauntlet hash
 re-blessed with a note. Ledger: D1–D4, D6 (producer), D9, D11 closed.
 
-**Notes**: *(fill in when done)*
+#### Notes
+
+**The loop is now `SphericalDestruction::Apply` in `Core/Voxels/`, not a method
+on `PhysicsSystem`.** Everything gameplay-shaped — "is this entity
+destructible", "spawn debris here with this colour" — is a callback, so the
+algorithm needs no `World`, no entities and no particle pool. Templated on the
+callbacks rather than behind an interface, because a burst clears tens of
+thousands of voxels and an interface would be two virtual calls per voxel.
+
+That is what let **the gauntlet stop carrying a copy of the algorithm**. Phase 0
+had to reimplement the sphere loop to have anything to measure; it now drives
+the shipping code, and so do the unit tests.
+
+**The gauntlet hash did not change: `c869b806aa820b57`.** That is a stronger
+result than it looks. Phase 0's gauntlet loop was written *correctly* — plain
+z/y/x, no running position — so this says the rewritten engine loop destroys
+exactly the same set of voxels as an independently written correct one, over
+130,500 destroyed voxels. And the *seeding rule changed completely* yet still
+finds the same 100 islands and converts the same 30,580 voxels.
+
+| | phase 0 | phase 1 | phase 2 |
+|---|---|---|---|
+| explosion burst (r = 10) | 0.157 ms | 0.170 ms | **0.165 ms**, now including seed collection |
+| integrity flood fill, total | 47.1 ms | 46.5 ms | **36.1 ms** |
+| integrity by quarter | 22.9 / 18.0 / 6.3 / 0 | 22.5 / 17.8 / 6.2 / 0 | **25.6 / 10.5 / 0.01 / 0** |
+| islands / converted | 100 / 30,580 | 100 / 30,580 | 100 / 30,580 |
+
+The curve moving *earlier* is the seeding change: better seeds find islands on
+the tick the damage happens instead of several ticks later, so the same work
+front-loads. Total integrity cost is down 22%.
+
+**D6's producer half is solved by asking the question after the clear, not
+during it.** The old rule pushed nine hashes for every destroyed voxel — the
+3×3 in x/z one layer up — which is tens of thousands per explosion,
+deduplicated only within the one batch, and almost all of them naming voxels
+the same loop destroyed moments later. `CollectSeeds` runs afterwards and seeds
+**occupied voxels with an empty face neighbour** in the sphere's box grown by
+two. That is the surface of what is left, so it scales with area rather than
+volume, and it is a strict superset of the old set: an old seed was an occupied
+voxel sitting directly on a destroyed one, i.e. one with an empty neighbour
+below. It is also more correct — the old rule only looked *up*, so a wall cut
+sideways was never seeded.
+
+**The particle spawn counter advances per destroyed voxel, not per successful
+spawn.** The old code incremented only when a particle was actually taken from
+the pool, so once the pool was full the "one in four" rule resumed from wherever
+it left off and debris clumped wherever the pool happened to refill.
+
+**A voxel exactly at the explosion centre used to produce a NaN velocity.**
+`glm::normalize` of a zero vector is NaN, the old code called it unconditionally,
+and a NaN velocity becomes a NaN position, a non-finite proxy AABB and a frame
+the marcher never finishes. It falls back to straight up now. This is a
+plausible contributor to the Xid 109 timeouts in `CLAUDE.md` — not a proven one,
+and the note there about a build with the other two NaN sources fixed still
+hanging still stands.
+
+**Radius cap is 64** (`SphericalDestruction::k_fMaxRadius`), logged once when
+it fires. The loop is over the bounding box, so cost is (2r+1)³: 64 is 2.1 M
+voxel tests and already far larger than anything the game fires. The old code
+had no bound at all and `diameter³` silently overflowed `uint32_t` above 1625.
+
+**Not done: the visual A/B with Joey.** The acceptance criteria ask for a
+session confirming destroyed shapes are identical except the D3 off-by-one
+column. This ran overnight with nobody watching, so it is **outstanding** —
+what stands in for it is `SphericalDestruction.ClearsExactlyTheSphere`, which
+asserts the cleared set against an independently computed sphere over every
+voxel of the window, and the unchanged gauntlet hash. The thing neither of
+those can see is whether the one-column shift is noticeable in play; it should
+not be, since it makes the sphere symmetric where it was lopsided.
+
+**`m_pRenderSystem` (D9) is null-initialised and both users check it**, with a
+one-shot warning rather than a crash. The plan asked for an assert on the
+wiring; a warning is better here because the wiring is legitimately absent in a
+world with no `RenderSystem` — which is the unit-test path, and phase 3 needs
+that path to keep working.
 
 ---
 

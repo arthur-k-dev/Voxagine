@@ -23,6 +23,7 @@
 
 #include "Core/Platform/Platform.h"
 #include "Core/Platform/Rendering/FrameProfiler.h"
+#include "Core/Voxels/SphericalDestruction.h"
 #include "Core/Platform/Rendering/Passes/ParticlePass.h"
 #include "External/optick/optick.h"
 
@@ -487,134 +488,121 @@ void PhysicsSystem::ApplySphericalDestruction(const Vector3& position, float fRa
 {
 	ScopedFrameTimer timer("CPU PhysicsSystem::ApplySphericalDestruction");
 
-	Vector3 clampedGridPos = m_VoxelGrid.WorldToGrid(position);
-	clampedGridPos.x = round(clampedGridPos.x);
-	clampedGridPos.y = round(clampedGridPos.y);
-	clampedGridPos.z = round(clampedGridPos.z);
+	/* Ledger D9. Nothing in PhysicsSystem ever set this - RenderSystem's
+	   constructor is the only wiring - so a world without a RenderSystem
+	   dereferenced a garbage pointer here. It is null-initialised now and the
+	   two paths that need it say so instead of crashing. */
+	if (m_pRenderSystem == nullptr)
+	{
+		static bool s_bWarned = false;
 
-	fRadius = round(fRadius);
-	uint32_t diameter = (uint32_t)fRadius * 2;
+		if (!s_bWarned)
+		{
+			s_bWarned = true;
+			fprintf(stderr, "[physics] destruction requested with no RenderSystem attached; ignored\n");
+		}
 
-	std::vector<uint64_t> integrityChecks;
-	uint32_t numVoxels = diameter * diameter * diameter;
-	Voxel** voxels = new Voxel*[numVoxels];
-	uint16_t* ownerSlots = new uint16_t[numVoxels];
+		return;
+	}
 
-	float fDiameter = static_cast<float>(diameter);
-	bool isValid = m_VoxelGrid.GetChunk(voxels, clampedGridPos - Vector3(fRadius), Vector3(fDiameter), true, ownerSlots);
-
-	if (!isValid) return;
-
-	Vector3 volumePos = clampedGridPos - Vector3(fRadius);
-	volumePos.x = round(volumePos.x);
-	volumePos.y = round(volumePos.y);
-	volumePos.z = round(volumePos.z);
-
-	Entity* pCachedEntity = nullptr;
+	const Vector3 v3GridCenter = m_VoxelGrid.WorldToGrid(position, true);
 
 	VoxelEditBatch batch(m_pRenderSystem->MakeEditTarget());
 
-	uint32_t particlesSpawned = 0;
-	for (uint32_t i = 0; i < numVoxels; ++i)
-	{
-		++volumePos.x;
-		if (volumePos.x >= clampedGridPos.x + fRadius)
-		{
-			volumePos.x = clampedGridPos.x - fRadius;
-			++volumePos.y;
-		}
-		if (volumePos.y >= clampedGridPos.y + fRadius)
-		{
-			volumePos.y = clampedGridPos.y - fRadius;
-			++volumePos.z;
-		}
+	/* One-element cache, as before: a burst walks a sphere and consecutive
+	   voxels overwhelmingly belong to the same model. */
+	uint16_t uiCachedSlot = VoxelOwnerVolume::k_uiNoOwnerSlot;
+	bool bCachedDestructible = true;
+	bool bCacheValid = false;
 
-		if (!voxels[i] || !voxels[i]->IsActive() || volumePos.y < 1) continue;
+	uint32_t uiSpawnCounter = 0;
 
-		Vector3 diff = volumePos - clampedGridPos;
-		if (glm::length(diff) <= fRadius)
+	const SphericalDestruction::Result result = SphericalDestruction::Apply(
+		batch, m_VoxelGrid, v3GridCenter, fRadius,
+		[&](uint16_t uiOwnerSlot)
 		{
+			if (bCacheValid && uiOwnerSlot == uiCachedSlot)
+				return bCachedDestructible;
+
 			/* A particle claim resolves to 0, so FindEntity gets nothing and
 			   the voxel counts as destructible - which is what it did when the
 			   field held a raw Particle* and FindEntity failed to match it. */
-			const uint64_t uiOwnerID = m_VoxelGrid.ResolveOwnerSlot(ownerSlots[i]);
+			const uint64_t uiOwnerID = m_VoxelGrid.ResolveOwnerSlot(uiOwnerSlot);
+			const Entity* pOwner = m_pWorld->FindEntity(uiOwnerID);
 
-			if (pCachedEntity == nullptr || uiOwnerID != pCachedEntity->GetId())
-			{
-				pCachedEntity = m_pWorld->FindEntity(uiOwnerID);
-			}
+			uiCachedSlot = uiOwnerSlot;
+			bCachedDestructible = (pOwner == nullptr || pOwner->IsDestructible());
+			bCacheValid = true;
 
-			if (pCachedEntity == nullptr || pCachedEntity->IsDestructible())
-			{
-				uint32_t color = m_pRenderSystem->GetVoxel(
-					static_cast<int32_t>(volumePos.x - 1),
-					static_cast<int32_t>(volumePos.y),
-					static_cast<int32_t>(volumePos.z)
-				);
+			return bCachedDestructible;
+		},
+		[&](const Vector3& v3Position, uint32_t uiColor)
+		{
+			/* One particle per four destroyed voxels, as before. The counter
+			   advances for every destroyed voxel whether or not the pool had
+			   room, so the debris stays evenly spread through the sphere
+			   rather than clumping wherever the pool happened to refill. */
+			const bool bSpawn = (uiSpawnCounter % 4) == 0;
+			++uiSpawnCounter;
 
-				Particle* pSpawned = nullptr;
+			if (!bSpawn)
+				return;
 
-				if (particlesSpawned % 4 == 0)
-				{
-					pSpawned = m_ParticlePool.SpawnParticle();
+			Particle* pParticle = m_ParticlePool.SpawnParticle();
 
-					if (pSpawned)
-					{
-						pSpawned->Live.GridPosition = volumePos;
-						pSpawned->Live.Position = m_VoxelGrid.GridToWorld(volumePos);
-						pSpawned->Live.BakeOnImpact = bBakeParticle;
+			if (pParticle == nullptr)
+				return;
 
-						diff = glm::normalize(diff);
-						pSpawned->Live.Velocity = diff * m_ParticleRandom.Range(fForceMin, fForceMax);
-						pSpawned->Live.VoxelColor = color;
-					}
-				}
-				++particlesSpawned;
+			pParticle->Live.GridPosition = v3Position;
+			pParticle->Live.Position = m_VoxelGrid.GridToWorld(v3Position);
+			pParticle->Live.BakeOnImpact = bBakeParticle;
+			pParticle->Live.VoxelColor = uiColor;
 
-				/* volumePos is pre-incremented at the top of the loop, so the
-				   cell this clears is the one at volumePos.x - 1 - the same one
-				   voxels[i] points at. That off-by-one is ledger D3 and the
-				   whole loop is rewritten in phase 2; it is reproduced exactly
-				   here so this change is only about the write. */
-				batch.Clear(Vector3(volumePos.x - 1.f, volumePos.y, volumePos.z));
+			Vector3 v3Away = v3Position - v3GridCenter;
 
-				/* The claim goes on *after* the clear now, and the order is
-				   load-bearing. A clear clears the owner (ledger D5), which is
-				   the point of it - but a particle claiming the cell it just
-				   left is the one owner a destroyed voxel is supposed to keep,
-				   and writing it first would have the clear wipe it. The old
-				   code could do it in either order because its clear only
-				   touched the colour, which is exactly the defect. */
-				if (pSpawned)
-				{
-					m_VoxelGrid.SetParticleOwner(
-						static_cast<uint32_t>(volumePos.x - 1),
-						static_cast<uint32_t>(volumePos.y),
-						static_cast<uint32_t>(volumePos.z),
-						(uintptr_t)pSpawned);
-				}
+			/* A voxel exactly at the centre normalises a zero vector, which is
+			   NaN - and a NaN velocity becomes a NaN position, a non-finite
+			   proxy AABB and a frame the marcher never finishes. */
+			const float fLengthSquared = glm::length2(v3Away);
 
-				for (float x = -1.0f; x <= 1.0f; ++x)
-				{
-					for (float z = -1.0f; z <= 1.0f; ++z)
-					{
-						Vector3 vec = volumePos + Vector3(x, 1, z);
+			v3Away = fLengthSquared > 0.f
+				? v3Away / std::sqrt(fLengthSquared)
+				: Vector3(0.f, 1.f, 0.f);
 
-						uint64_t hash = 0;
-						hash |= (uint64_t)(uint16_t)vec.z;
-						hash |= (uint64_t)(uint16_t)vec.y << 16;
-						hash |= (uint64_t)(uint16_t)vec.x << 32;
-						integrityChecks.push_back(hash);
-					}
-				}
-			}
+			pParticle->Live.Velocity = v3Away * m_ParticleRandom.Range(fForceMin, fForceMax);
+
+			/* After the clear, which clears the owner - see the same note in
+			   ProcessIntegrityChecks. */
+			m_VoxelGrid.SetParticleOwner(
+				static_cast<uint32_t>(v3Position.x),
+				static_cast<uint32_t>(v3Position.y),
+				static_cast<uint32_t>(v3Position.z),
+				(uintptr_t)pParticle);
+		});
+
+	if (result.bRadiusClamped)
+	{
+		static bool s_bWarned = false;
+
+		if (!s_bWarned)
+		{
+			s_bWarned = true;
+			fprintf(stderr, "[physics] destruction radius %.1f clamped to %.1f\n",
+			        fRadius, SphericalDestruction::k_fMaxRadius);
 		}
 	}
 
-	m_IntegrityChecker.EnqueueBulk(integrityChecks);
+	if (result.uiDestroyed == 0)
+		return;
 
-	delete[] voxels;
-	delete[] ownerSlots;
+	/* Seeds come from what is *left* standing around the hole, gathered after
+	   the clear - see SphericalDestruction::CollectSeeds. The old code pushed
+	   nine per destroyed voxel during the loop, most of them naming voxels the
+	   same loop destroyed moments later. */
+	std::vector<uint64_t> integrityChecks;
+	SphericalDestruction::CollectSeeds(m_VoxelGrid, v3GridCenter, fRadius, integrityChecks);
+
+	m_IntegrityChecker.EnqueueBulk(integrityChecks);
 }
 
 bool PhysicsSystem::OverlapSphere(std::vector<BoxCollider*>& colliders, Vector3 center, float fRadius, uint32_t uiLayer /*= -1*/, bool queryTriggers /*= false*/) const

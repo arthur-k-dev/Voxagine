@@ -55,6 +55,24 @@ public:
 	   meaning anything. */
 	void Reset();
 
+	/* The one position hash. There used to be two open-coded copies of this -
+	   here and in ApplySphericalDestruction - and both truncated float to
+	   uint16_t, so a negative coordinate wrapped to somewhere near 65535 and
+	   named a voxel on the far side of the world instead of being rejected
+	   (ledger D11).
+
+	   The unsigned overload is the real one and cannot be given a negative.
+	   The Vector3 overload checks, and returns k_uiInvalidHash for anything
+	   negative, non-finite or past 16 bits; EnqueueBulk drops those. */
+	static constexpr uint64_t k_uiInvalidHash = UINT64_MAX;
+
+	static uint64_t PositionToHash(uint32_t uiX, uint32_t uiY, uint32_t uiZ)
+	{
+		return (static_cast<uint64_t>(uiX & 0xFFFFu) << 32) |
+		       (static_cast<uint64_t>(uiY & 0xFFFFu) << 16) |
+		        static_cast<uint64_t>(uiZ & 0xFFFFu);
+	}
+
 	static uint64_t PositionToHash(const Vector3& v3Position);
 	static Vector3 HashToPosition(uint64_t uiHash);
 

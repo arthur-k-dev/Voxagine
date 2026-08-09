@@ -13,9 +13,9 @@
  * Same reasoning as SphericalDestruction (DESTRUCTION_PLAN.md phase 2): the
  * only thing here that needs a World is the *write* at the end, so that is a
  * callback and everything else runs against a VoxelBrickGrid and a window size.
- * The gauntlet drives this rather than a copy of it, which is what lets the
+ * The perf suite drives this rather than a copy of it, which is what lets the
  * particle sim be measured deterministically at a chosen particle count -
- * phase 6's gate is exactly that measurement.
+ * phase 6's gate is exactly that measurement. See Tests/Particles/ParticlesPerf.cpp.
  */
 namespace ParticleSimulation
 {

@@ -143,6 +143,13 @@ plus the new seeding.
 
 ### The headless selftest, and the three floating-debris defects it found
 
+> **Superseded by `Tests/README.md`.** The three test binaries described in this
+> plan — the gtest suite, `voxagine_gauntlet` and `voxagine_selftest` — are one
+> binary now, `voxagine_tests`, with `checks`/`scenarios`/`perf` modes, and the
+> types below were renamed: `SelftestWorld` → `DestructionRun`,
+> `SelftestScenario` → `Scenario`, `SelftestInvariant` → `Invariant`. The
+> reasoning in this section still holds; the names do not.
+
 `voxagine_selftest` is a **scenario suite**, not a bigger gauntlet. The gauntlet
 is one long scripted run measured for cost; this builds worlds with a chosen
 *topology* and asserts the invariants the destruction system owes, on every one,

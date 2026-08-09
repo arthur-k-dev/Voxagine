@@ -76,22 +76,12 @@ target_compile_options(voxagine_warnings INTERFACE
     $<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang>:-Wall;-Wextra;-Wno-unused-parameter>
 )
 
+# Tests are one target, built by VOXAGINE_BUILD_TESTS further down. There used
+# to be two standalone executables here as well - a worker-count test and a
+# DateTime test, each with its own main - which ran without the engine and so
+# without VOXAGINE_BUILD_TESTS. Both are checks in the one suite now; a second
+# way to write a test is a way that gets forgotten.
 include(CTest)
-if(BUILD_TESTING)
-    add_executable(voxagine_job_manager_config_test
-        UnitTesting/UnitTests/Source/Core/Threading/JobManagerConfigTest.cpp
-    )
-    target_include_directories(voxagine_job_manager_config_test PRIVATE ${VOXAGINE_SOURCE_DIR})
-    target_link_libraries(voxagine_job_manager_config_test PRIVATE voxagine_warnings)
-    add_test(NAME job_manager_worker_count COMMAND voxagine_job_manager_config_test)
-
-    add_executable(voxagine_date_time_test
-        UnitTesting/UnitTests/Source/Core/Utils/DateTimeTest.cpp
-    )
-    target_include_directories(voxagine_date_time_test PRIVATE ${VOXAGINE_SOURCE_DIR})
-    target_link_libraries(voxagine_date_time_test PRIVATE voxagine_warnings)
-    add_test(NAME date_time_utc_conversion COMMAND voxagine_date_time_test)
-endif()
 
 # ---------------------------------------------------------------------------
 # Vulkan backend
@@ -294,67 +284,51 @@ if(VOXAGINE_BUILD_ENGINE)
 endif()
 
 # ---------------------------------------------------------------------------
-# Unit tests and the destruction gauntlet
+# Tests
 #
-# Both link the engine library and both run with no GPU and no display, which
-# is what lets CI cover them - see UnitTesting/UnitTests/Source/Harness/
-# VoxelWorldHarness.h for why the voxel write path is reachable that way.
+# One target, three modes: `checks`, `scenarios` and `perf`. See Tests/README.md
+# for what each is for and how to add a case to it.
 #
-# Not linked WHOLE_ARCHIVE, unlike BitBuster: these do not read Settings.vgs and
-# do not need the reflection-only translation units dragged in. If a test ever
-# does need RTTR registrations, it needs the same treatment and the comment on
-# BitBuster explains why.
+# It links the engine library and runs with no GPU and no display, which is what
+# lets CI cover it - see Tests/Harness/VoxelWorldHarness.h for why the voxel
+# write path is reachable without either.
+#
+# Not linked WHOLE_ARCHIVE, unlike BitBuster: the tests do not read Settings.vgs
+# and do not need the reflection-only translation units dragged in. If a test
+# ever does need RTTR registrations, it needs the same treatment and the comment
+# on BitBuster explains why.
+#
+# No GTest dependency any more. The assertion macros in Tests/Framework/Check.h
+# are a few dozen lines and cover what the suite used, and one registry that can
+# hold checks, scenarios, invariants and benchmarks is worth more here than a
+# third-party one that can only hold the first.
 # ---------------------------------------------------------------------------
 if(VOXAGINE_BUILD_TESTS)
     if(NOT VOXAGINE_BUILD_ENGINE)
         message(FATAL_ERROR "VOXAGINE_BUILD_TESTS needs VOXAGINE_BUILD_ENGINE=ON")
     endif()
 
-    find_package(GTest REQUIRED)
-
     include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/TestSources.cmake)
 
     add_executable(voxagine_tests ${VOXAGINE_TEST_SOURCES})
 
     target_include_directories(voxagine_tests PRIVATE ${VOXAGINE_TEST_DIR})
-    target_link_libraries(voxagine_tests PRIVATE
-        voxagine GTest::gtest GTest::gtest_main voxagine_warnings)
+    target_link_libraries(voxagine_tests PRIVATE voxagine voxagine_warnings)
 
-    add_test(NAME voxagine_unit_tests COMMAND voxagine_tests)
+    # Assertions about one unit at a time. Seconds.
+    add_test(NAME checks COMMAND voxagine_tests checks)
 
-    add_executable(voxagine_gauntlet
-        ${CMAKE_CURRENT_SOURCE_DIR}/UnitTesting/Gauntlet/Gauntlet.cpp
-        ${VOXAGINE_TEST_DIR}/Harness/VoxelWorldHarness.cpp
-    )
+    # Every scenario against every invariant, twice each for determinism. Under
+    # a minute in Release and several times that in Debug, which is the price of
+    # running the real pipeline over real worlds rather than a mock of it.
+    add_test(NAME scenarios COMMAND voxagine_tests scenarios)
 
-    target_include_directories(voxagine_gauntlet PRIVATE ${VOXAGINE_TEST_DIR})
-    target_link_libraries(voxagine_gauntlet PRIVATE voxagine voxagine_warnings)
-
-    # Runs the built-in script and fails on any representation disagreement.
-    # The state hash is printed rather than asserted here: it is a property of
-    # the build, and CI matrixes two of them.
-    add_test(NAME voxagine_gauntlet COMMAND voxagine_gauntlet)
-
-    # The scenario suite. Distinct from the gauntlet, which is one long scripted
-    # run measured for cost: this asserts the destruction system's invariants
-    # over several deliberately-shaped worlds plus a batch of randomised ones,
-    # and exits non-zero on the first that fails. See UnitTesting/Selftest.
-    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/SelftestSources.cmake)
-
-    add_executable(voxagine_selftest ${VOXAGINE_SELFTEST_SOURCES})
-
-    # Scenarios and invariants register themselves from static initialisers, so
-    # these have to be compiled straight into the executable rather than reached
-    # through a static archive - a linker pulls an object out of an archive only
-    # when something references a symbol in it, and nothing references these.
-    # Same shape as Core/Settings.cpp; see the WHOLE_ARCHIVE note on BitBuster.
-    target_include_directories(voxagine_selftest PRIVATE
-        ${VOXAGINE_TEST_DIR}
-        ${CMAKE_CURRENT_SOURCE_DIR}/UnitTesting
-        ${CMAKE_CURRENT_SOURCE_DIR}/UnitTesting/Selftest)
-    target_link_libraries(voxagine_selftest PRIVATE voxagine voxagine_warnings)
-
-    add_test(NAME voxagine_selftest COMMAND voxagine_selftest)
+    # The benchmarks, gated on their machine-independent work counters. Timings
+    # are printed but cannot fail the run: the baseline file holds only the
+    # exact counts, precisely so this test means the same thing on a CI runner
+    # as it does on a workstation. Framework/Benchmark.h has the reasoning.
+    add_test(NAME perf COMMAND voxagine_tests perf
+        --baseline ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Baselines/perf.txt)
 endif()
 
 # ---------------------------------------------------------------------------

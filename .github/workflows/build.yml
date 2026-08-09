@@ -22,8 +22,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ninja-build libvulkan-dev vulkan-validationlayers \
                                   libwayland-dev libxkbcommon-dev libx11-dev \
-                                  libxrandr-dev libxi-dev libxcursor-dev \
-                                  libgtest-dev libgmock-dev
+                                  libxrandr-dev libxi-dev libxcursor-dev
 
       # Ubuntu does not package SDL3 yet, so build the release tag we target.
       - name: Build SDL3
@@ -60,11 +59,17 @@ jobs:
       - name: Build
         run: cmake --build Build/ci
 
-      # No GPU and no display, which the unit tests and the gauntlet are built
-      # not to need - see UnitTesting/UnitTests/Source/Harness/VoxelWorldHarness.h.
-      # The gauntlet fails the job on any representation disagreement and prints
-      # its state hash, so a run that changes the hash is visible in the log of
-      # both configurations.
+      # No GPU and no display, which the whole suite is built not to need - see
+      # Tests/Harness/VoxelWorldHarness.h. Three ctest entries, all from one
+      # binary: `checks`, `scenarios` (every scenario against every invariant,
+      # each run twice for determinism) and `perf`.
+      #
+      # `perf` is a real gate here, not just a report. It compares against
+      # Tests/Baselines/perf.txt, which holds only the *work* counters - voxels
+      # destroyed, cells the flood fill visited, seeds filtered, islands emitted
+      # - and those are exact and machine-independent, identical in Debug and
+      # Release. Timings are printed and never enforced, because a millisecond
+      # figure from a shared runner means nothing. See Tests/README.md.
       - name: Test
         working-directory: Build/ci
         run: ctest --output-on-failure

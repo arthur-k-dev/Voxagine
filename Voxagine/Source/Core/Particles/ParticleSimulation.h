@@ -2,6 +2,7 @@
 
 #include <cstdint>
 
+#include "Core/ECS/Systems/Physics/VoxelGrid.h"
 #include "Core/Math.h"
 #include "Core/Particles/ParticleCore.h"
 #include "Core/Particles/ParticleLanding.h"
@@ -36,6 +37,14 @@ namespace ParticleSimulation
 		int32_t iBakeX = 0;
 		int32_t iBakeY = 0;
 		int32_t iBakeZ = 0;
+
+		/* The occupied cell it hit, which is what the bake position was
+		   resolved *from*. The caller needs it to ask whether the support is
+		   about to disappear - see the pending-island test in
+		   PhysicsSystem::SimulateParticles. */
+		int32_t iImpactX = 0;
+		int32_t iImpactY = 0;
+		int32_t iImpactZ = 0;
 	};
 
 	/* Advances the particle at a dense index and says what should happen to it.
@@ -44,7 +53,7 @@ namespace ParticleSimulation
 	 * things that differ between the engine and a harness.
 	 */
 	inline Outcome Step(ParticleCore& core, uint32_t uiIndex, float fDeltaTime,
-	                    const VoxelBrickGrid& bricks, const UVector3& v3WindowSize,
+	                    VoxelGrid& grid, const VoxelBrickGrid& bricks, const UVector3& v3WindowSize,
 	                    const Vector3& v3WorldOffset, const Settings& settings)
 	{
 		Outcome outcome;
@@ -93,11 +102,29 @@ namespace ParticleSimulation
 			return outcome;
 		}
 
-		/* One bit test in cached memory, where the old code ran one to three
-		   full chunk-index resolutions through GetCell - and one of those was
-		   only ever asked so the particle could check its own claim, which no
-		   longer exists. */
+		/* Two tests, and the order is the whole design.
+		 *
+		 * The bitmap is the broadphase: one bit in cached memory, run for every
+		 * particle that changed cell, where the old code ran one to three full
+		 * chunk-index resolutions through GetCell.
+		 *
+		 * But the bitmap describes the *mapping*, which includes dynamic
+		 * renderers - a character's voxels are there and in the physics grid
+		 * they are not (VoxelBaker::Occupy takes the grid branch only when the
+		 * owner IsStatic()). Collide on the bitmap alone and debris settles on
+		 * top of a moving character, then hangs in the air when it walks off,
+		 * with nothing to seed it because the checker cannot see the support
+		 * either. The selftest found exactly that, two voxels sitting on the
+		 * dynamic body's crown.
+		 *
+		 * So solidity is confirmed against the grid, which only costs a
+		 * chunk-index resolution on an actual impact rather than on every move.
+		 * The pre-phase-3 code used the grid for both and paid it every move. */
 		if (!ParticleLanding::IsOccupied(bricks, v3WindowSize, iX, iY, iZ))
+			return outcome;
+
+		if (!grid.GetCell(static_cast<uint32_t>(iX), static_cast<uint32_t>(iY),
+		                  static_cast<uint32_t>(iZ)).IsActive())
 			return outcome;
 
 		const float fSpeed = glm::length(core.Velocity[uiIndex]);
@@ -114,6 +141,9 @@ namespace ParticleSimulation
 		}
 
 		outcome.bRetire = true;
+		outcome.iImpactX = iX;
+		outcome.iImpactY = iY;
+		outcome.iImpactZ = iZ;
 
 		if (!core.BakeOnImpact[uiIndex])
 			return outcome;

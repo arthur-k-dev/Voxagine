@@ -66,6 +66,43 @@ namespace SphericalDestruction
 		bool bRejected = false;
 	};
 
+	/* The neighbours of one destroyed voxel, as candidate seeds.
+	 *
+	 * D6's producer half, and the scope here is the whole point. The original
+	 * code pushed nine seeds for *every* destroyed voxel - the 3x3 in x/z one
+	 * layer up - which is tens of thousands of hashes per explosion,
+	 * deduplicated only within one batch, and almost all of them naming voxels
+	 * the same loop destroyed moments later.
+	 *
+	 * The first attempt at fixing that swept the sphere's whole bounding box
+	 * afterwards and seeded every occupied voxel with an empty face neighbour.
+	 * That is cheaper and more thorough, and it was **wrong**: it re-asks the
+	 * integrity question about geometry this burst never touched. A bullet
+	 * clipping one voxel of rubble beside a building seeded the building's
+	 * entire surface - and a building that was never ground-connected in the
+	 * first place (a pristine level has 14,532 such voxels) then converted to
+	 * debris in one go. Joey saw exactly that: a non-destructible building
+	 * collapsing while a bullet bounced off it.
+	 *
+	 * Support can only have changed for a voxel that lost a neighbour. So the
+	 * candidates are the neighbours of what was actually removed, gathered
+	 * during the clear, and nothing else.
+	 *
+	 * All 26 of them, not the 6 faces. IntegrityChecker walks 26-connectivity,
+	 * so a voxel held up through a *diagonal* link loses its support when that
+	 * link is destroyed - and a face-only seed set never asks about it. Six was
+	 * the first attempt and the gauntlet's oracle caught it immediately: six
+	 * voxels in four components left standing that the exhaustive walk called
+	 * ungrounded. The seed set has to use the same connectivity as the walk it
+	 * feeds.
+	 */
+	inline void PushNeighbourCandidates(int32_t iX, int32_t iY, int32_t iZ, std::vector<uint64_t>& o_seeds);
+
+	/* Keeps the candidates that are still standing, and drops the rest. Run
+	   after the whole sphere is cleared, because most candidates are voxels the
+	   same burst went on to destroy. */
+	inline void FilterSeeds(const VoxelGrid& grid, std::vector<uint64_t>& seeds);
+
 	/* Clears every occupied voxel inside the sphere that `canDestroy` allows.
 	 *
 	 * `canDestroy(uiOwnerSlot)` is called once per occupied candidate voxel.
@@ -80,7 +117,8 @@ namespace SphericalDestruction
 	template <typename TCanDestroy, typename TOnDestroyed>
 	Result Apply(VoxelEditBatch& batch, VoxelGrid& grid,
 	             const Vector3& v3GridCenter, float fRadius,
-	             TCanDestroy&& canDestroy, TOnDestroyed&& onDestroyed)
+	             TCanDestroy&& canDestroy, TOnDestroyed&& onDestroyed,
+	             std::vector<uint64_t>* pSeeds = nullptr)
 	{
 		Result result;
 
@@ -163,6 +201,13 @@ namespace SphericalDestruction
 					batch.Clear(v3Position);
 					++result.uiDestroyed;
 
+					/* Candidate seeds: the six face neighbours of a voxel this
+					   burst actually removed. Filtered to the ones still
+					   standing once the whole sphere is cleared - see
+					   FilterSeeds. */
+					if (pSeeds != nullptr)
+						PushNeighbourCandidates(iX, iY, iZ, *pSeeds);
+
 					onDestroyed(v3Position, uiColor);
 				}
 			}
@@ -171,96 +216,59 @@ namespace SphericalDestruction
 		return result;
 	}
 
-	/* Voxels that survived around the hole and might now be unsupported.
-	 *
-	 * This is D6's producer half. The old code pushed nine seeds for *every*
-	 * destroyed voxel - the 3x3 in x/z one layer up - which is tens of
-	 * thousands of hashes per explosion, deduplicated only within the one
-	 * batch, and almost all of them naming voxels that were themselves
-	 * destroyed a moment later in the same loop.
-	 *
-	 * Run after the clear instead, and the question has an exact answer: an
-	 * occupied voxel near the hole whose support could have changed is one with
-	 * an empty face neighbour. That is the surface of what is left, which is
-	 * proportional to area rather than to volume, and it is a strict superset
-	 * of the old seed set - the old seeds were occupied voxels sitting directly
-	 * on a destroyed one, i.e. with an empty neighbour below.
-	 *
-	 * The window is the sphere's box grown by two, because a voxel one step
-	 * outside the sphere can have a neighbour inside it.
-	 */
-	inline void CollectSeeds(const VoxelGrid& grid, const Vector3& v3GridCenter, float fRadius,
-	                         std::vector<uint64_t>& o_seeds);
 }
 
 /* Defined out of line only because it needs IntegrityChecker's hash, and that
    header has no business being pulled into everything that destroys a voxel. */
 #include "Core/ECS/Systems/Physics/IntegrityChecker.h"
 
-inline void SphericalDestruction::CollectSeeds(
-	const VoxelGrid& grid, const Vector3& v3GridCenter, float fRadius, std::vector<uint64_t>& o_seeds)
+inline void SphericalDestruction::PushNeighbourCandidates(
+	int32_t iX, int32_t iY, int32_t iZ, std::vector<uint64_t>& o_seeds)
 {
-	if (!std::isfinite(fRadius) || fRadius < 1.f)
-		return;
-
-	if (fRadius > k_fMaxRadius)
-		fRadius = k_fMaxRadius;
-
-	const UVector3 v3Dimensions = grid.GetDimensions();
-
-	if (v3Dimensions.x == 0 || v3Dimensions.y == 0 || v3Dimensions.z == 0)
-		return;
-
-	const int32_t iRadius = static_cast<int32_t>(fRadius) + 2;
-
-	const int32_t iCenterX = static_cast<int32_t>(std::floor(v3GridCenter.x));
-	const int32_t iCenterY = static_cast<int32_t>(std::floor(v3GridCenter.y));
-	const int32_t iCenterZ = static_cast<int32_t>(std::floor(v3GridCenter.z));
-
-	const int32_t iMinX = std::max(iCenterX - iRadius, 0);
-	const int32_t iMinY = std::max(iCenterY - iRadius, static_cast<int32_t>(k_uiMinDestructibleY) + 1);
-	const int32_t iMinZ = std::max(iCenterZ - iRadius, 0);
-
-	const int32_t iMaxX = std::min(iCenterX + iRadius, static_cast<int32_t>(v3Dimensions.x) - 1);
-	const int32_t iMaxY = std::min(iCenterY + iRadius, static_cast<int32_t>(v3Dimensions.y) - 1);
-	const int32_t iMaxZ = std::min(iCenterZ + iRadius, static_cast<int32_t>(v3Dimensions.z) - 1);
-
-	static const int32_t k_iFaceNeighbours[6][3] =
+	for (int32_t iDY = -1; iDY <= 1; ++iDY)
 	{
-		{ -1, 0, 0 }, { 1, 0, 0 },
-		{ 0, -1, 0 }, { 0, 1, 0 },
-		{ 0, 0, -1 }, { 0, 0, 1 },
-	};
+		for (int32_t iDZ = -1; iDZ <= 1; ++iDZ)
+		{
+			for (int32_t iDX = -1; iDX <= 1; ++iDX)
+			{
+				if (iDX == 0 && iDY == 0 && iDZ == 0)
+					continue;
 
-	for (int32_t iZ = iMinZ; iZ <= iMaxZ; ++iZ)
-	for (int32_t iY = iMinY; iY <= iMaxY; ++iY)
-	for (int32_t iX = iMinX; iX <= iMaxX; ++iX)
+				const int32_t iNX = iX + iDX;
+				const int32_t iNY = iY + iDY;
+				const int32_t iNZ = iZ + iDZ;
+
+				/* The ground layer supports everything and never falls, so
+				   seeding it would only cost a walk that terminates
+				   immediately. */
+				if (iNX < 0 || iNY < static_cast<int32_t>(k_uiMinDestructibleY) || iNZ < 0)
+					continue;
+
+				o_seeds.push_back(IntegrityChecker::PositionToHash(
+					static_cast<uint32_t>(iNX), static_cast<uint32_t>(iNY), static_cast<uint32_t>(iNZ)));
+			}
+		}
+	}
+}
+
+inline void SphericalDestruction::FilterSeeds(const VoxelGrid& grid, std::vector<uint64_t>& seeds)
+{
+	size_t uiKept = 0;
+
+	for (size_t i = 0; i < seeds.size(); ++i)
 	{
+		const Vector3 v3Position = IntegrityChecker::HashToPosition(seeds[i]);
+
 		const Voxel* pVoxel = grid.GetVoxel(
-			static_cast<uint32_t>(iX), static_cast<uint32_t>(iY), static_cast<uint32_t>(iZ));
+			static_cast<uint32_t>(v3Position.x),
+			static_cast<uint32_t>(v3Position.y),
+			static_cast<uint32_t>(v3Position.z));
 
 		if (pVoxel == nullptr || !pVoxel->IsActive())
 			continue;
 
-		for (const int32_t (&offset)[3] : k_iFaceNeighbours)
-		{
-			const int32_t iNX = iX + offset[0];
-			const int32_t iNY = iY + offset[1];
-			const int32_t iNZ = iZ + offset[2];
-
-			if (iNX < 0 || iNY < 0 || iNZ < 0)
-				continue;
-
-			const Voxel* pNeighbour = grid.GetVoxel(
-				static_cast<uint32_t>(iNX), static_cast<uint32_t>(iNY), static_cast<uint32_t>(iNZ));
-
-			if (pNeighbour != nullptr && pNeighbour->IsActive())
-				continue;
-
-			o_seeds.push_back(IntegrityChecker::PositionToHash(
-				static_cast<uint32_t>(iX), static_cast<uint32_t>(iY), static_cast<uint32_t>(iZ)));
-
-			break;
-		}
+		seeds[uiKept++] = seeds[i];
 	}
+
+	seeds.resize(uiKept);
 }

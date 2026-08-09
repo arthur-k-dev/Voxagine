@@ -61,6 +61,20 @@ void VoxelWorldHarness::Set(uint32_t uiX, uint32_t uiY, uint32_t uiZ, uint32_t u
 	m_Bricks.SetVoxel(uiID, (uiColor >> 24) != 0);
 }
 
+void VoxelWorldHarness::SetDynamic(uint32_t uiX, uint32_t uiY, uint32_t uiZ, uint32_t uiColor)
+{
+	if (uiX >= m_v3Size.x || uiY >= m_v3Size.y || uiZ >= m_v3Size.z)
+		return;
+
+	/* Deliberately not touching the grid: this is VoxelBaker::Occupy's
+	   non-static path, where the voxel exists in the mapping and nowhere else.
+	   See the header. */
+	const uint32_t uiID = VoxelID(uiX, uiY, uiZ);
+
+	m_Words[uiID] = uiColor;
+	m_Bricks.SetVoxel(uiID, (uiColor >> 24) != 0);
+}
+
 void VoxelWorldHarness::Clear(uint32_t uiX, uint32_t uiY, uint32_t uiZ)
 {
 	Set(uiX, uiY, uiZ, 0, VoxelOwnerVolume::k_uiNoOwnerSlot);

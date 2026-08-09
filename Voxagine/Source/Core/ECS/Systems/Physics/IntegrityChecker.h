@@ -76,6 +76,19 @@ public:
 	static uint64_t PositionToHash(const Vector3& v3Position);
 	static Vector3 HashToPosition(uint64_t uiHash);
 
+	/* Is this voxel part of the walk currently in progress?
+	 *
+	 * A walk is resumable - it spends a visit budget and carries its collected
+	 * set across ticks - so a voxel can be *already enumerated* into an island
+	 * that has not been reported yet. Debris that bakes onto such a voxel in
+	 * the meantime is not in the island, so conversion clears its support and
+	 * leaves it floating, and nothing will ever seed it.
+	 *
+	 * Found by the selftest, not by reasoning: two to five voxels per scenario,
+	 * stable across settle time, always inside a tower that had been cut. The
+	 * bake path asks this as well as the pending-island set. */
+	bool IsClassifying(uint64_t uiHash) const { return m_CheckedVoxels.count(uiHash) != 0; }
+
 	/* Everything the memo below believes stops being true the moment a voxel
 	   changes, and the checker notices that for itself: it compares the grid's
 	   write generation on every entry point and drops the memo when it has

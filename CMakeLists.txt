@@ -334,6 +334,27 @@ if(VOXAGINE_BUILD_TESTS)
     # The state hash is printed rather than asserted here: it is a property of
     # the build, and CI matrixes two of them.
     add_test(NAME voxagine_gauntlet COMMAND voxagine_gauntlet)
+
+    # The scenario suite. Distinct from the gauntlet, which is one long scripted
+    # run measured for cost: this asserts the destruction system's invariants
+    # over several deliberately-shaped worlds plus a batch of randomised ones,
+    # and exits non-zero on the first that fails. See UnitTesting/Selftest.
+    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/SelftestSources.cmake)
+
+    add_executable(voxagine_selftest ${VOXAGINE_SELFTEST_SOURCES})
+
+    # Scenarios and invariants register themselves from static initialisers, so
+    # these have to be compiled straight into the executable rather than reached
+    # through a static archive - a linker pulls an object out of an archive only
+    # when something references a symbol in it, and nothing references these.
+    # Same shape as Core/Settings.cpp; see the WHOLE_ARCHIVE note on BitBuster.
+    target_include_directories(voxagine_selftest PRIVATE
+        ${VOXAGINE_TEST_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/UnitTesting
+        ${CMAKE_CURRENT_SOURCE_DIR}/UnitTesting/Selftest)
+    target_link_libraries(voxagine_selftest PRIVATE voxagine voxagine_warnings)
+
+    add_test(NAME voxagine_selftest COMMAND voxagine_selftest)
 endif()
 
 # ---------------------------------------------------------------------------

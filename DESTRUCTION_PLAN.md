@@ -79,6 +79,135 @@ Three things are outstanding and none of them is code:
 3. **The sliding-camera gauntlet**, which needs the harness to model chunk
    streaming. Phase 0's notes say what it would take.
 
+### Four defects the first play session found
+
+Everything below was introduced by this rewrite and is fixed on
+`destruction-fixes`. Three of the four share a root: **a change that is right in
+the abstract can be wrong because of something the tree does elsewhere**, and in
+all three cases the "elsewhere" is documented in `CLAUDE.md` and I did not go
+and check it.
+
+**1. Dying characters came apart into black particles.** D4 said take the
+colour from the CPU voxel rather than from the mapping, because reading the
+mapping is an uncached PCIe read of VRAM. True — and `VoxelBaker::Occupy`
+writes the CPU voxel **only for a static renderer**. A dynamic one's voxels
+exist in the mapped buffer and nowhere else, which `CLAUDE.md` says in as many
+words. Every humanoid is dynamic and `ParticleCorpse` emits through
+`VoxFrameEmitter`, so every corpse read colour 0. Fixed by choosing the source
+from `IsStatic()` once per emit rather than by rule: the static bulk stays off
+the mapping, a dying character pays a few thousand reads once. D4's point was
+never "never read the mapping" — it was "not per voxel on a path that runs
+millions of times".
+
+**2. A non-destructible building collapsed while a bullet bounced off it.**
+Two independent faults, both needed:
+
+- Phase 2 replaced "nine seeds above each destroyed voxel" with "sweep the
+  sphere's box and seed every occupied voxel with an empty face neighbour".
+  Cheaper and more thorough, and **wrong**: it re-asks the integrity question
+  about geometry the burst never touched. Support can only change for a voxel
+  that *lost a neighbour*, so the candidates are now gathered during the clear
+  as the neighbours of what was actually removed, and filtered to those still
+  standing afterwards. `Bullet::OnVoxelCollision` fires a burst on every voxel
+  it touches including while retracting, so this was firing constantly.
+- **Island conversion never checked destructibility**, and never had. That was
+  latent for as long as seeding only reached geometry a burst had just cut. It
+  stopped being latent the moment the seed set widened: a structure that was
+  never ground-connected in the first place — a pristine level has **14,532
+  such voxels in 211 components**, which the phase 4 audit had already reported
+  and I read as harmless — would be found and converted whole. It checks now,
+  with the same one-element owner cache the destruction path uses.
+
+**3. A falling island lost its shape.** P17 called one-particle-per-voxel for
+islands against one-per-four for explosions an inconsistency. It is not: an
+explosion scatters debris, so its density is cosmetic, but an island *falls as
+a shape* and the particles are that shape. Worse, the thinning ran in sorted
+hash order — x, then y, then z — so it thinned along one axis and left stripes,
+which is exactly the "gaps between voxels, some particles merging" that was
+reported. Reverted to one per voxel; P17 is reopened as **not a defect**.
+
+**4. The seed set has to use the checker's connectivity.** Found by the
+gauntlet's own oracle while fixing (2): scoping seeds to the six *face*
+neighbours left six voxels in four components standing that the exhaustive walk
+called ungrounded. `IntegrityChecker` walks 26-connectivity, so a voxel held up
+through a diagonal link loses its support without ever being seeded. All 26 now.
+Island conversion seeds its cleared voxels' neighbours too, on the same rule —
+a structure resting on a falling island has lost its support just as surely.
+
+After all four: gauntlet oracle back to **0 voxels in 0 components**, state hash
+`70f0f603aa4b8cc0` — byte-identical to before the seeding was narrowed, so on a
+fully ground-connected level the narrower rule reaches the same answer. Integrity
+16.3 ms (from 17.0). Island conversion 1.0 → 10.8 ms total, 0.18 ms per
+converting tick and 0.42 ms peak, which is the cost of four times the debris
+plus the new seeding.
+
+### The headless selftest, and the three floating-debris defects it found
+
+`voxagine_selftest` is a **scenario suite**, not a bigger gauntlet. The gauntlet
+is one long scripted run measured for cost; this builds worlds with a chosen
+*topology* and asserts the invariants the destruction system owes, on every one,
+plus 24 randomised worlds nobody chose the shape of.
+
+It is structured so that adding a case is adding one file:
+
+| | |
+|---|---|
+| `SelftestWorld` | the pipeline, driven once. Scenarios never reimplement bursts, debris, integrity or conversion — a selftest whose driver differs from the engine's tests the driver. |
+| `SelftestScenario` | a world and a script. Self-registering; the runner never learns their names. |
+| `SelftestInvariant` | one thing that must be true of every run. Also self-registering, so a new check applies to every existing scenario and a new scenario is checked by every existing invariant. |
+
+Invariants: **representation** (rule 3 across all four), **protection** (an
+indestructible owner's voxels are never cleared, by any path), **pool**,
+**oracle**, **determinism**.
+
+Scenarios: `towers`, `protected`, `floating` (ungrounded by design, untouched —
+must not collapse), `diagonal` (support through a diagonal link only), `stacked`,
+`dynamic` (mapping-only voxels), `edges`, and `random/1..24`.
+
+**Every one of the four play-session defects was a scenario that did not exist**,
+not an assertion that was too weak. Two of them were not even *expressible*: the
+harness had no way to write a dynamic renderer's voxel until
+`VoxelWorldHarness::SetDynamic`.
+
+#### What it found immediately
+
+Three distinct causes of **floating debris**, which is what Joey reported. All
+three are a particle coming to rest on something that then stops existing, with
+nothing left to seed it — a burst seeds its neighbours, but island conversion
+deliberately seeds nothing.
+
+1. **Settling on a pending island.** The support is cleared within a few ticks.
+   A particle now refuses to settle on a voxel in an island that has been found
+   and not yet converted, and keeps falling instead — which is what it would
+   do.
+2. **Settling on a voxel inside an in-progress walk.** A walk is *resumable*: it
+   carries its collected set across ticks, so a voxel can already be enumerated
+   into an island that has not been reported yet. Debris landing in that window
+   is invisible to both the island and any future seed.
+   `IntegrityChecker::IsClassifying` closes it.
+3. **Settling on a dynamic renderer — a phase 3 regression.** Phase 3 moved
+   collision from the physics grid to the occupancy bitmap for the speed. The
+   bitmap describes the *mapping*, which includes dynamic renderers; the physics
+   grid does not. So debris began landing on characters and hanging in the air
+   when they walked off, and the checker could not see the support either.
+   Solidity is confirmed against the grid **on impact only** — the bitmap stays
+   the broadphase, so the fast path is untouched and the cost is one
+   chunk-index resolution per collision instead of per move.
+
+#### And one attempted fix it rejected
+
+The first response to (1) was to *seed every baked voxel*. That made
+`floating` collapse three whole shelves: debris landed near ungrounded-by-design
+decoration, the seed walked into it, and the checker converted it. Exactly the
+over-reach that collapsed a building in play, arrived at from a different
+direction. Reverted in favour of not creating the floating voxel at all.
+
+The oracle invariant took three attempts for the same reason. "Nothing
+ungrounded may stand" is wrong — levels are full of it. "No more ungrounded
+*voxels* than at the start" is wrong too — debris settling on a permanent shelf
+adds voxels to a component that was always there. The question that
+discriminates is whether a **new component** appeared.
+
 ---
 
 ## The rules
@@ -242,7 +371,7 @@ half the point of the rewrite is that whole classes disappear structurally.
 | D3 | FIXED (phase 2) | Off-by-one: loop pre-increments `volumePos` then uses `volumePos.x - 1`; on row wrap the cleared voxel, the sphere test and `voxels[i]` disagree — `:490-504`, `:551` |
 | D4 | FIXED (phase 2) | PCIe readback per destroyed voxel: `m_pRenderSystem->GetVoxel` at `:519` reads the mapping; the CPU colour is already in hand as `voxels[i]->Color`. Same pattern in `VoxFrameEmitter.cpp:34` |
 | D5 | FIXED (phase 1) | Stale owner slots: `ModifyVoxel` clears colour only; 3 of 4 destroyed voxels keep their static owner's slot; islands leave stale slots on pool exhaustion — `:525-555`, `:296-303` |
-| D6 | FIXED (phase 2 producer, phase 4 consumer) | Integrity seeds: 9 per destroyed voxel, deduped only within one batch, never against `m_Pending`; no memoisation between flood fills — `:557-569`, `IntegrityChecker.cpp:34-35`, `:82-83` |
+| D6 | FIXED (phase 2 producer, rescoped in fixes; phase 4 consumer) | Integrity seeds: 9 per destroyed voxel, deduped only within one batch, never against `m_Pending`; no memoisation between flood fills — `:557-569`, `IntegrityChecker.cpp:34-35`, `:82-83` |
 | D7 | FIXED (phase 1) | Null-cell deref: `ProcessIntegrityChecks` calls `cell.IsActive()` without testing `cell`; `VoxelCell::IsActive` unconditionally derefs `pVoxel`, and islands are held across ticks so the window can slide between discovery and conversion — `:287-293`, `VoxelGrid.h:124` |
 | D8 | FIXED (phase 1) | `VoxelGrid::ModifyVoxel` has no bounds check and indexes a possibly-null chunk volume — `VoxelGrid.h:291-299`; called with unclamped coordinates at `:307`, `:554`, `:1360` |
 | D9 | FIXED (phase 2) | `PhysicsSystem::m_pRenderSystem` never initialised by `PhysicsSystem`; set only by `RenderSystem`'s own constructor — `PhysicsSystem.h:114` |
@@ -269,7 +398,7 @@ half the point of the rewrite is that whole classes disappear structurally.
 | P14 | FIXED (phase 3) | The cap is shared and component systems consume it first — a busy emitter starves debris simulation entirely — `:227-229` |
 | P15 | FIXED (phase 3) | Destroyed particles still increment the count → instance count exceeds live count — `:1252` |
 | P16 | **STILL OPEN** — see phase 3 notes | Particle mapper is single-buffered and written every fixed tick with no fence against the in-flight frame (voxel/brick mappers are double-buffered; this one is not) — `RenderContext.cpp:910-915` |
-| P17 | FIXED (phase 3) | Islands spawn **one particle per voxel** (explosions: one per four) — cost and visual-density inconsistency — `:296` vs `:525` |
+| P17 | **NOT A DEFECT** — reverted, see "Four defects" | Islands spawn **one particle per voxel** (explosions: one per four) — cost and visual-density inconsistency — `:296` vs `:525` |
 
 ### Loose-voxel registry
 

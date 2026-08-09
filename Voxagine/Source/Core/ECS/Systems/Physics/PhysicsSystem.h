@@ -136,9 +136,16 @@ private:
 	std::deque<std::vector<uint64_t>> m_PendingIslands;
 	size_t m_uiIslandCursor = 0;
 
-	/* Advances per converted voxel, not per successful spawn, so island debris
-	   stays evenly spread instead of clumping wherever a full pool refilled. */
-	uint32_t m_uiIslandSpawnCounter = 0;
+	/* Every voxel of every island that has been found but not yet converted.
+	 *
+	 * Debris that settles on a doomed voxel is left floating the moment that
+	 * voxel is cleared, and nothing will ever seed it: a burst seeds its
+	 * neighbours, but conversion deliberately seeds nothing (see
+	 * ProcessIntegrityChecks on why it cannot need to). Rather than repair that
+	 * afterwards, a particle simply does not settle on something that is
+	 * already falling - which is also what it would do. One hash lookup per
+	 * impact, against a set that only exists while islands are pending. */
+	std::unordered_set<uint64_t> m_PendingIslandVoxels;
 
 	static constexpr uint32_t k_uiIntegrityConvertPerTick = 16384;
 

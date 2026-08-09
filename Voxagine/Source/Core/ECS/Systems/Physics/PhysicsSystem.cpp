@@ -184,8 +184,8 @@ void PhysicsSystem::OnWorldPaused(World* pWorld)
 	   existing (ledger P10). */
 	m_IntegrityChecker.Reset();
 	m_PendingIslands.clear();
+	m_PendingIslandVoxels.clear();
 	m_uiIslandCursor = 0;
-	m_uiIslandSpawnCounter = 0;
 	m_Debris.Clear();
 	m_uiActiveParticleCount = 0;
 }
@@ -291,7 +291,10 @@ void PhysicsSystem::ProcessIntegrityChecks()
 	}
 
 	for (std::vector<uint64_t>& checkedVoxels : results)
+	{
+		m_PendingIslandVoxels.insert(checkedVoxels.begin(), checkedVoxels.end());
 		m_PendingIslands.push_back(std::move(checkedVoxels));
+	}
 
 	if (m_PendingIslands.empty())
 		return;
@@ -302,6 +305,33 @@ void PhysicsSystem::ProcessIntegrityChecks()
 	   it cleared. A cleared-but-owned voxel lies to VoxelBaker::Clear's "is
 	   somebody else's voxel here" test for the rest of the world's life. */
 	VoxelEditBatch batch(m_pRenderSystem->MakeEditTarget());
+
+	/* Same one-element cache the destruction path uses, for the same reason:
+	   an island is overwhelmingly one model's voxels in a row. */
+	uint16_t uiCachedSlot = VoxelOwnerVolume::k_uiNoOwnerSlot;
+	bool bCachedDestructible = true;
+	bool bCacheValid = false;
+
+	/* Conversion deliberately seeds nothing, and the argument is worth keeping
+	   because the opposite looks obviously right.
+	 *
+	 * "A converted voxel disappeared, so whatever rested on it has lost
+	 * support" - true of a *burst*, false of an island. An island is a maximal
+	 * 26-connected component: the walk collects everything reachable, and
+	 * EndCheck only reports when the stack is exhausted, so a component is
+	 * always complete. Anything adjacent to an island is therefore *in* it and
+	 * falls with it. Nothing can rest on an island without being part of it.
+	 *
+	 * Seeding it anyway cost 6.99 ms of the gauntlet's 10.83 ms conversion
+	 * total - 65% of it - and the oracle never once attributed a find to it.
+	 * That is rule 11 in miniature: it was insurance against a case the data
+	 * structure makes impossible.
+	 *
+	 * The one narrow hole: a debris voxel that bakes onto an island in the
+	 * frames between classification and conversion is not part of the
+	 * component, and loses its support without being seeded. It is one floating
+	 * voxel, it is what the pre-rewrite code did too, and it is not worth seven
+	 * milliseconds. */
 
 	/* Below the early return, so the accumulator holds only ticks that actually
 	   converted something - an average over the ticks that did nothing says
@@ -346,20 +376,51 @@ void PhysicsSystem::ProcessIntegrityChecks()
 			//If the voxel is not active we don't make it into a particle
 			if (!cell.IsActive()) continue;
 
-			/* One particle per four voxels, matching the explosion. Islands
-			   used to spawn one per *voxel*, which is four times the debris and
-			   four times the cost for a visual difference nobody asked for
-			   (ledger P17). The counter advances per converted voxel whether or
-			   not the pool had room, so density stays even. */
-			if ((m_uiIslandSpawnCounter++ % 4) == 0)
-			{
-				ParticleSpawn spawn;
-				spawn.v3Position = m_VoxelGrid.GridToWorld(vec);
-				spawn.uiColor = cell.GetColor();
-				spawn.bBakeOnImpact = true;
+			/* An island does not get to ignore destructibility.
+			 *
+			 * Conversion never checked it, which was latent for as long as
+			 * seeding only ever reached geometry a burst had just cut. It
+			 * stopped being latent the moment phase 2 widened the seed set:
+			 * a structure that was never ground-connected in the first place -
+			 * a pristine level has 14,532 such voxels - would be found and
+			 * converted whole, destructible or not. Joey saw a non-destructible
+			 * building collapse while a bullet bounced off it.
+			 *
+			 * Phase 2's seeding is scoped properly now, which stops the
+			 * *discovery*. This stops the conversion, and it is the half that
+			 * has to hold even when discovery is correct: an indestructible
+			 * thing that genuinely loses its support is meant to stay put. */
+			const uint16_t uiSlot = cell.GetSlot();
 
-				m_Debris.Spawn(spawn);
+			if (!bCacheValid || uiSlot != uiCachedSlot)
+			{
+				const uint64_t uiOwnerID = m_VoxelGrid.ResolveOwnerSlot(uiSlot);
+				const Entity* pOwner = m_pWorld->FindEntity(uiOwnerID);
+
+				uiCachedSlot = uiSlot;
+				bCachedDestructible = (pOwner == nullptr || pOwner->IsDestructible());
+				bCacheValid = true;
 			}
+
+			if (!bCachedDestructible) continue;
+
+			/* One particle per voxel, and that is not an inconsistency with the
+			   explosion's one-per-four (ledger P17 read it as one).
+			 *
+			 * An explosion scatters debris, so its density is cosmetic. An
+			 * island *falls as a shape* - a roof, a balcony, a chunk of wall -
+			 * and the particles are that shape. Thinning them to one in four
+			 * took three quarters of it away: the sampling runs in sorted hash
+			 * order, which is x then y then z, so it thins along one axis and
+			 * leaves stripes. Joey reported it as gaps between voxels and the
+			 * shape not being preserved during the fall, which is exactly what
+			 * it was. */
+			ParticleSpawn spawn;
+			spawn.v3Position = m_VoxelGrid.GridToWorld(vec);
+			spawn.uiColor = cell.GetColor();
+			spawn.bBakeOnImpact = true;
+
+			m_Debris.Spawn(spawn);
 
 			batch.Clear(vec);
 			}
@@ -685,6 +746,7 @@ void PhysicsSystem::ApplySphericalDestruction(const Vector3& position, float fRa
 	bool bCacheValid = false;
 
 	uint32_t uiSpawnCounter = 0;
+	std::vector<uint64_t> integrityChecks;
 
 	const SphericalDestruction::Result result = SphericalDestruction::Apply(
 		batch, m_VoxelGrid, v3GridCenter, fRadius,
@@ -738,7 +800,8 @@ void PhysicsSystem::ApplySphericalDestruction(const Vector3& position, float fRa
 			   see DESTRUCTION_PLAN.md phase 3 on why every consumer of it had a
 			   cheaper answer or was satisfied by "particles own nothing". */
 			m_Debris.Spawn(spawn);
-		});
+		},
+		&integrityChecks);
 
 	if (result.bRadiusClamped)
 	{
@@ -764,8 +827,10 @@ void PhysicsSystem::ApplySphericalDestruction(const Vector3& position, float fRa
 	   seeds answerable from stale classifications. */
 	m_IntegrityChecker.Invalidate();
 
-	std::vector<uint64_t> integrityChecks;
-	SphericalDestruction::CollectSeeds(m_VoxelGrid, v3GridCenter, fRadius, integrityChecks);
+	/* The candidates were gathered as neighbours of voxels this burst removed;
+	   most of them were then removed by the same burst. What is left standing
+	   is what could have lost support. */
+	SphericalDestruction::FilterSeeds(m_VoxelGrid, integrityChecks);
 
 	m_IntegrityChecker.EnqueueBulk(integrityChecks);
 }
@@ -1461,7 +1526,36 @@ void PhysicsSystem::SimulateParticles(float fDeltaTime)
 	while (uiIndex < m_Debris.GetCount())
 	{
 		const ParticleSimulation::Outcome outcome = ParticleSimulation::Step(
-			m_Debris, uiIndex, fDeltaTime, bricks, v3WindowSize, v3WorldOffset, settings);
+			m_Debris, uiIndex, fDeltaTime, m_VoxelGrid, bricks, v3WindowSize, v3WorldOffset, settings);
+
+		if (outcome.bRetire)
+		{
+			/* Not onto something that is already falling, or that is about to
+			   be told it is falling.
+			 *
+			 * The support would be cleared within a few ticks and the debris
+			 * left in mid-air, and nothing would ever seed it - a burst seeds
+			 * its neighbours, but island conversion deliberately seeds nothing
+			 * (see ProcessIntegrityChecks on why it cannot need to). Keeping
+			 * the particle alive lets it settle once the island has gone, which
+			 * is what it would do anyway.
+			 *
+			 * Two sets, because a walk is resumable: a voxel can be already
+			 * enumerated into an island that has not been reported yet, and
+			 * debris landing on it in that window is invisible to both the
+			 * island and any future seed. */
+			const uint64_t uiSupport = IntegrityChecker::PositionToHash(
+				static_cast<uint32_t>(outcome.iImpactX),
+				static_cast<uint32_t>(outcome.iImpactY),
+				static_cast<uint32_t>(outcome.iImpactZ));
+
+			if (m_PendingIslandVoxels.count(uiSupport) != 0 ||
+				m_IntegrityChecker.IsClassifying(uiSupport))
+			{
+				++uiIndex;
+				continue;
+			}
+		}
 
 		if (outcome.bBake)
 		{

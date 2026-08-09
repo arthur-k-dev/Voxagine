@@ -71,6 +71,19 @@ public:
 	void Set(uint32_t uiX, uint32_t uiY, uint32_t uiZ, uint32_t uiColor, uint16_t uiOwnerSlot);
 	void Clear(uint32_t uiX, uint32_t uiY, uint32_t uiZ);
 
+	/* What a *dynamic* VoxRenderer leaves behind, which is not the same thing at
+	   all: the mapped word, the occupancy bit and the brick count, and **no CPU
+	   voxel and no owner**. VoxelBaker::Occupy takes the physics-grid branch
+	   only when the renderer's owner IsStatic().
+	 *
+	 * This exists because that asymmetry shipped a bug nothing could have
+	 * caught: taking a voxel's colour from the CPU voxel is right for static
+	 * geometry and gives zero for every dynamic renderer, so every humanoid
+	 * corpse came apart into black particles. The harness could not represent a
+	 * dynamic voxel, so no test could have failed. Anything that reads a colour
+	 * out of the world should be exercised against both. */
+	void SetDynamic(uint32_t uiX, uint32_t uiY, uint32_t uiZ, uint32_t uiColor);
+
 	/* A ground layer at y = 0 plus a solid box, which is the shape every
 	   destruction test wants: something to blow a hole in and something for the
 	   connectivity check to call grounded. */

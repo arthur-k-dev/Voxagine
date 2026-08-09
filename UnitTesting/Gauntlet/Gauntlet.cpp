@@ -320,7 +320,8 @@ namespace
 	 * as callbacks, so this now measures and hashes the shipping algorithm.
 	 */
 	uint32_t Explode(VoxelWorldHarness& world, VoxelEditBatch& batch, ParticleCore& debris,
-	                 const Explosion& explosion, DeterministicRandom& random)
+	                 const Explosion& explosion, DeterministicRandom& random,
+	                 std::vector<uint64_t>& o_seeds)
 	{
 		uint32_t uiSpawnCounter = 0;
 
@@ -352,7 +353,13 @@ namespace
 				spawn.bBakeOnImpact = true;
 
 				debris.Spawn(spawn);
-			});
+			},
+			&o_seeds);
+
+		/* The candidates were neighbours of voxels this burst removed; most of
+		   them were removed by the same burst. What is left standing is what
+		   could have lost support. */
+		SphericalDestruction::FilterSeeds(world.Grid(), o_seeds);
 
 		return result.uiDestroyed;
 	}
@@ -360,7 +367,9 @@ namespace
 	/* The engine's own per-particle step, driven here. Returns how many
 	   particles were still alive afterwards. */
 	uint32_t SimulateDebris(VoxelWorldHarness& world, ParticleCore& debris, float fDeltaTime,
-	                        uint64_t& io_uiBaked)
+	                        uint64_t& io_uiBaked,
+	                        const std::unordered_set<uint64_t>& pendingIslandVoxels,
+	                        const IntegrityChecker& checker)
 	{
 		VoxelEditBatch batch(world.MakeEditTarget());
 
@@ -373,7 +382,22 @@ namespace
 		while (uiIndex < debris.GetCount())
 		{
 			const ParticleSimulation::Outcome outcome = ParticleSimulation::Step(
-				debris, uiIndex, fDeltaTime, world.Bricks(), v3WindowSize, v3WorldOffset, settings);
+				debris, uiIndex, fDeltaTime, world.Grid(), world.Bricks(), v3WindowSize, v3WorldOffset, settings);
+
+			/* Not onto something that is already falling - the engine's rule. */
+			if (outcome.bRetire)
+			{
+				const uint64_t uiSupport = IntegrityChecker::PositionToHash(
+					static_cast<uint32_t>(outcome.iImpactX),
+					static_cast<uint32_t>(outcome.iImpactY),
+					static_cast<uint32_t>(outcome.iImpactZ));
+
+				if (pendingIslandVoxels.count(uiSupport) != 0 || checker.IsClassifying(uiSupport))
+				{
+					++uiIndex;
+					continue;
+				}
+			}
 
 			if (outcome.bBake)
 			{
@@ -457,6 +481,7 @@ int main(int argc, char* argv[])
 	checker.SetVoxelGrid(&world.Grid());
 
 	std::deque<std::vector<uint64_t>> pendingIslands;
+	std::unordered_set<uint64_t> pendingIslandVoxels;
 	size_t uiIslandCursor = 0;
 
 	size_t uiNextExplosion = 0;
@@ -484,8 +509,7 @@ int main(int argc, char* argv[])
 			VoxelEditBatch batch(world.MakeEditTarget());
 			const Explosion& explosion = script.explosions[uiNextExplosion];
 
-			uiDestroyed += Explode(world, batch, debris, explosion, random);
-			SphericalDestruction::CollectSeeds(world.Grid(), explosion.v3Center, explosion.fRadius, seeds);
+			uiDestroyed += Explode(world, batch, debris, explosion, random, seeds);
 
 			explodePhase.Add(watch.Milliseconds());
 
@@ -525,7 +549,7 @@ int main(int argc, char* argv[])
 			const uint32_t uiBefore = debris.GetCount();
 
 			const Stopwatch watch;
-			const uint32_t uiAlive = SimulateDebris(world, debris, 1.f / 60.f, uiBaked);
+			const uint32_t uiAlive = SimulateDebris(world, debris, 1.f / 60.f, uiBaked, pendingIslandVoxels, checker);
 			const double fMilliseconds = watch.Milliseconds();
 
 			particlePhase.Add(fMilliseconds);
@@ -552,7 +576,10 @@ int main(int argc, char* argv[])
 			uiIslandsFound += islands.size();
 
 			for (std::vector<uint64_t>& island : islands)
+			{
+				pendingIslandVoxels.insert(island.begin(), island.end());
 				pendingIslands.push_back(std::move(island));
+			}
 		}
 
 		if (pendingIslands.empty())
@@ -570,6 +597,8 @@ int main(int argc, char* argv[])
 			for (; uiIslandCursor < island.size() && uiBudget > 0; ++uiIslandCursor)
 			{
 				--uiBudget;
+
+				pendingIslandVoxels.erase(island[uiIslandCursor]);
 
 				const Vector3 v3Position = IntegrityChecker::HashToPosition(island[uiIslandCursor]);
 

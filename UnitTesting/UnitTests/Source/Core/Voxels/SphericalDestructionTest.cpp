@@ -214,47 +214,112 @@ TEST(SphericalDestruction, SurvivesASphereOverTheWindowEdge)
 	EXPECT_EQ(world.Validate(), 0u);
 }
 
-/* Ledger D6's producer half. The old code pushed nine hashes for every
-   destroyed voxel; this collects the surface of what is still standing around
-   the hole, which is the set that can actually have lost support. */
-TEST(SphericalDestruction, SeedsTheSurvivingSurface)
+/* Ledger D6's producer half, and the scope is the whole point.
+ *
+ * The original rule pushed nine hashes for every destroyed voxel. The first
+ * replacement swept the sphere's bounding box afterwards and seeded every
+ * occupied voxel with an empty face neighbour - cheaper, more thorough, and
+ * wrong, because it re-asks the integrity question about geometry the burst
+ * never touched. A bullet clipping one voxel of rubble beside a building seeded
+ * the building's whole surface, and a building that was never ground-connected
+ * then converted to debris in one go.
+ *
+ * Support can only have changed for a voxel that lost a neighbour. */
+TEST(SphericalDestruction, SeedsOnlyWhatLostANeighbour)
 {
 	VoxelWorldHarness world(k_v3Size, k_v3ChunkSize);
 	world.FillGround(k_uiStone);
-	world.FillBox(UVector3(0, 1, 0), UVector3(k_v3Size.x, 20, k_v3Size.z), k_uiStone, 1);
+
+	/* Two structures. One gets clipped; the other is well outside the sphere
+	   but comfortably inside the box the old rule would have swept. */
+	world.FillBox(UVector3(30, 1, 30), UVector3(4, 8, 4), k_uiStone, 1);
+	world.FillBox(UVector3(44, 1, 30), UVector3(4, 8, 4), k_uiStone, 2);
 
 	Recorder recorder;
-	const Vector3 v3Center(32.f, 10.f, 32.f);
-	const float fRadius = 6.f;
-
-	const SphericalDestruction::Result result = Blow(world, v3Center, fRadius, recorder);
-	ASSERT_GT(result.uiDestroyed, 0u);
-
 	std::vector<uint64_t> seeds;
-	SphericalDestruction::CollectSeeds(world.Grid(), v3Center, fRadius, seeds);
 
+	{
+		VoxelEditBatch batch(world.MakeEditTarget());
+
+		SphericalDestruction::Apply(
+			batch, world.Grid(), Vector3(31.f, 4.f, 31.f), 3.f,
+			[](uint16_t) { return true; },
+			[&recorder](const Vector3& v3Position, uint32_t uiColor) { recorder(v3Position, uiColor); },
+			&seeds);
+	}
+
+	ASSERT_GT(recorder.positions.size(), 0u);
+
+	SphericalDestruction::FilterSeeds(world.Grid(), seeds);
 	ASSERT_FALSE(seeds.empty());
 
-	/* Far fewer than nine per destroyed voxel: the surface is an area, the
-	   destroyed set is a volume. */
-	EXPECT_LT(seeds.size(), static_cast<size_t>(result.uiDestroyed));
-
-	/* Every seed is an occupied voxel with an empty face neighbour. */
+	/* Every seed is occupied and touches the hole. */
 	for (uint64_t uiSeed : seeds)
 	{
 		ASSERT_NE(uiSeed, IntegrityChecker::k_uiInvalidHash);
 
 		const Vector3 v3 = IntegrityChecker::HashToPosition(uiSeed);
-		const VoxelCell cell = world.Grid().GetCell(
-			static_cast<uint32_t>(v3.x), static_cast<uint32_t>(v3.y), static_cast<uint32_t>(v3.z));
 
-		EXPECT_TRUE(cell.IsActive()) << "seed at " << v3.x << "," << v3.y << "," << v3.z;
+		EXPECT_TRUE(world.Grid().GetCell(
+			static_cast<uint32_t>(v3.x), static_cast<uint32_t>(v3.y), static_cast<uint32_t>(v3.z)).IsActive());
+
+		/* Nothing from the untouched structure, whose nearest voxel is 13 away
+		   from the centre - well inside the radius+2 box the old sweep used. */
+		EXPECT_LT(v3.x, 40.f) << "seeded a structure this burst never touched";
 	}
 
-	/* And the voxel directly above the hole - what the old rule seeded - is in
-	   the set, so nothing the old producer found is lost. */
-	const uint64_t uiAbove = IntegrityChecker::PositionToHash(32u, 17u, 32u);
-	EXPECT_NE(std::find(seeds.begin(), seeds.end(), uiAbove), seeds.end());
+	/* And the voxel directly above the hole - what the original rule seeded -
+	   is still in the set, so nothing it found is lost. */
+	bool bFoundAbove = false;
+
+	for (uint64_t uiSeed : seeds)
+	{
+		const Vector3 v3 = IntegrityChecker::HashToPosition(uiSeed);
+
+		if (v3.x == 31.f && v3.z == 31.f && v3.y > 4.f)
+			bFoundAbove = true;
+	}
+
+	EXPECT_TRUE(bFoundAbove);
+}
+
+/* The candidates are gathered during the clear, so most of them name voxels the
+   same burst goes on to destroy. Filtering happens once at the end. */
+TEST(SphericalDestruction, SeedsInsideTheHoleAreFilteredOut)
+{
+	VoxelWorldHarness world(k_v3Size, k_v3ChunkSize);
+	world.FillBox(UVector3(0, 1, 0), UVector3(k_v3Size.x, k_v3Size.y - 1, k_v3Size.z), k_uiStone, 1);
+
+	Recorder recorder;
+	std::vector<uint64_t> seeds;
+
+	{
+		VoxelEditBatch batch(world.MakeEditTarget());
+
+		SphericalDestruction::Apply(
+			batch, world.Grid(), Vector3(32.f, 16.f, 32.f), 6.f,
+			[](uint16_t) { return true; },
+			[&recorder](const Vector3& v3Position, uint32_t uiColor) { recorder(v3Position, uiColor); },
+			&seeds);
+	}
+
+	const size_t uiCandidates = seeds.size();
+
+	SphericalDestruction::FilterSeeds(world.Grid(), seeds);
+
+	/* Twenty-six candidates per destroyed voxel - the checker walks
+	   26-connectivity, so the seed set has to as well - of which only the shell
+	   survives the filter. */
+	EXPECT_EQ(uiCandidates, recorder.positions.size() * 26u);
+	EXPECT_LT(seeds.size(), uiCandidates / 4u);
+
+	for (uint64_t uiSeed : seeds)
+	{
+		const Vector3 v3 = IntegrityChecker::HashToPosition(uiSeed);
+
+		EXPECT_TRUE(world.Grid().GetCell(
+			static_cast<uint32_t>(v3.x), static_cast<uint32_t>(v3.y), static_cast<uint32_t>(v3.z)).IsActive());
+	}
 }
 
 /* Ledger D11. Two open-coded copies of this hash both truncated float to

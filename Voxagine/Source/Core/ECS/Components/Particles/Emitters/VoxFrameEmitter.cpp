@@ -12,6 +12,27 @@ void VoxFrameEmitter::Emit(float fDeltatime, ParticlePool& particleData, uint32_
 	if (m_pRenderer->m_BakeData.Positions)
 	{
 		const VoxelGrid* pGrid = m_pSystem->GetWorld()->GetVoxelGrid();
+
+		/* Where this emitter's colours have to come from, and it is not the
+		   same answer for every renderer.
+		 *
+		 * VoxelBaker::Occupy writes the CPU voxel only for a *static*
+		 * renderer; a dynamic one's voxels exist in the mapped voxel buffer
+		 * and nowhere else (CLAUDE.md, "Dynamic renderers are invisible to the
+		 * physics grid"). So reading the CPU voxel here - which is what
+		 * DESTRUCTION_PLAN.md's D4 asked for, to keep an uncached PCIe read of
+		 * VRAM off a per-particle path - produced a colour of zero for every
+		 * dynamic renderer. This emitter is what a dying humanoid uses
+		 * (ParticleCorpse), and every humanoid is dynamic, so *every* corpse
+		 * came apart into black particles.
+		 *
+		 * Decided once, outside the loop, rather than per voxel: the static
+		 * case is the bulk and stays off the mapping, and a dying character is
+		 * a few thousand reads once. D4's point was never "never read the
+		 * mapping" - it was "do not read it per voxel on a path that runs
+		 * millions of times". */
+		RenderSystem* pRenderSystem = m_pSystem->GetWorld()->GetRenderSystem();
+		const bool bColourFromMapping = !m_pRenderer->GetOwner()->IsStatic();
 		uint32_t* bakePositionData = m_pRenderer->m_BakeData.Positions;
 		uint32_t arrSize = m_pRenderer->m_BakeData.Size;
 
@@ -33,15 +54,19 @@ void VoxFrameEmitter::Emit(float fDeltatime, ParticlePool& particleData, uint32_
 
 				particleData.Position[uiStartId + i] = (Vector3)v3Grid + pGrid->GetWorldOffset();
 
-				/* From the CPU voxel, not from RenderSystem::GetVoxel. That
-				   reads the mapping, which is ReBAR host-visible memory, so it
-				   is an uncached PCIe read of VRAM per particle (rule 1) - and
-				   an emitter can spawn a model's worth of them in one frame.
-				   The chunk holds the same colour in ordinary cached memory.
-				   Ledger D4; the destruction path had the identical defect. */
-				const Voxel* pVoxel = pGrid->GetVoxel(v3Grid.x, v3Grid.y, v3Grid.z);
+				if (bColourFromMapping)
+				{
+					particleData.Color[uiStartId + i] = pRenderSystem->GetVoxel(bakePositionData[i]);
+				}
+				else
+				{
+					/* Static: the chunk holds the same colour in ordinary
+					   cached memory, so there is no reason to pay for the
+					   mapping (rule 1, ledger D4). */
+					const Voxel* pVoxel = pGrid->GetVoxel(v3Grid.x, v3Grid.y, v3Grid.z);
 
-				particleData.Color[uiStartId + i] = pVoxel ? pVoxel->Color : 0u;
+					particleData.Color[uiStartId + i] = pVoxel ? pVoxel->Color : 0u;
+				}
 				particleData.GridPosition[uiStartId + i] = particleData.Position[uiStartId + i];
 			}
 		}

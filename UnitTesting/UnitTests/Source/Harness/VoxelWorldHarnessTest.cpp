@@ -132,3 +132,41 @@ TEST(VoxelWorldHarness, TheHashSeesASingleVoxel)
 	b.Clear(3, 3, 3);
 	EXPECT_NE(a.Hash(), b.Hash());
 }
+
+/* A dynamic renderer's voxel: in the mapping, in the brick grid, and *not* in
+   the physics grid. This is the asymmetry that shipped black particles - a
+   colour read from the CPU voxel is zero here - and the harness has to be able
+   to express it or no test can catch the next one. */
+TEST(VoxelWorldHarness, ADynamicVoxelExistsOnlyInTheMapping)
+{
+	VoxelWorldHarness world(k_v3Size, k_v3ChunkSize);
+
+	world.SetDynamic(5, 7, 9, k_uiStone);
+
+	EXPECT_EQ(world.Words()[world.VoxelID(5, 7, 9)], k_uiStone);
+	EXPECT_TRUE(world.Bricks().IsOccupied(world.VoxelID(5, 7, 9)));
+
+	const VoxelCell cell = world.Grid().GetCell(5, 7, 9);
+	ASSERT_TRUE(static_cast<bool>(cell));
+	EXPECT_FALSE(cell.IsActive());
+	EXPECT_EQ(cell.GetColor(), 0u);
+	EXPECT_EQ(cell.GetSlot(), VoxelOwnerVolume::k_uiNoOwnerSlot);
+
+	/* And the brick grid still agrees with the mapping, which is what the
+	   marcher needs - the disagreement is only with the physics grid, which is
+	   what the in-game sync audit reports as "occupied only on the GPU". */
+	EXPECT_EQ(world.Validate(), 0u);
+}
+
+/* Destruction reads the physics grid, so it does not see dynamic voxels at all
+   - before or after the rewrite. Pinned, because "why did my character not get
+   blown up" is a reasonable next question and this is the answer. */
+TEST(VoxelWorldHarness, ADynamicVoxelIsInvisibleToTheGrid)
+{
+	VoxelWorldHarness world(k_v3Size, k_v3ChunkSize);
+
+	world.SetDynamic(5, 7, 9, k_uiStone);
+
+	EXPECT_EQ(world.CountOccupied(), 1u);
+	EXPECT_FALSE(world.Grid().GetCell(5, 7, 9).IsActive());
+}

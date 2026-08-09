@@ -572,6 +572,15 @@ void RenderSystem::Render(const GameTimer& fixedTimer)
 	m_VoxelBaker.Bake();
 
 	m_bForcedUpdate = false;
+
+	/* DESTRUCTION_PLAN.md P16: Render runs once per rendered frame and only on
+	   one that actually ran a fixed tick (Application.cpp gates the call on
+	   bFixedStep) - which is exactly the swap this back-buffered mapper needs.
+	   Swapping on a frame with no fixed tick would present the frame-before-
+	   last's particles, a visible jump; not swapping here would let the next
+	   fixed tick's writes race the frame still being drawn from this one. */
+	if (Mapper* pParticleMapper = m_pRenderContext->GetParticleMapper())
+		pParticleMapper->SwapBuffer();
 }
 
 void RenderSystem::OnWorldResumed(World* pWorld)

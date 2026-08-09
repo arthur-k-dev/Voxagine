@@ -47,7 +47,7 @@ detection) and the loose-voxel registry.
 | 0 — Harness, baseline, CI | DONE | destruction-phase-0 | Gauntlet is a CPU harness, not the running game — see notes |
 | 1 — Unified voxel write path | DONE | destruction-phase-1 | Immediate apply, not deferred — see notes |
 | 2 — `ApplySphericalDestruction` rewrite | DONE | destruction-phase-2 | Hash unchanged; the seeding rule changed and found the same islands |
-| 3 — Particle core rewrite (SoA, no claims) | DONE | destruction-phase-3 | P16 still open; component pools not unified — see notes |
+| 3 — Particle core rewrite (SoA, no claims) | DONE | destruction-phase-3 | P16 fixed and confirmed on screen; component pools not unified — see notes |
 | 4 — Incremental connectivity | DONE | destruction-phase-4 | Memoised flood fill, not the brick-component graph — see notes |
 | 5 — Connectivity off-thread | **CLOSED** | destruction-phase-4 | Measured: the checker uses 9% of its budget |
 | 6 — GPU debris simulation | **CLOSED** | destruction-phase-4 | Measured: 17 ns per particle per tick, linear to 150 k |
@@ -55,8 +55,9 @@ detection) and the loose-voxel registry.
 ### Where this ended up
 
 All five core phases are done and both gated ones are closed by measurement.
-**Every entry in the defect ledger is closed except P16**, which phase 3's notes
-explain — it needs somebody watching the screen, not another test.
+**Every entry in the defect ledger is fixed, and P16 is now confirmed on
+screen too** — see phase 3's notes for what was built and why a test could
+not have closed it.
 
 What the destruction gauntlet says, end to end:
 
@@ -68,15 +69,18 @@ What the destruction gauntlet says, end to end:
 | representation disagreements | 0 | 0 |
 | ungrounded components left standing | not measurable | **0** |
 
-Three things are outstanding and none of them is code:
+Two things are outstanding and neither of them is code:
 
-1. **Nobody has watched the screen.** This was executed overnight. The phases
-   that need eyes are 2 (the D3 off-by-one shifts the destroyed sphere by one
-   column), 3 (debris should *land more often* now — P6's fix — and the bounce
-   feel comes from the same code path) and 4 (islands falling on the tick the
-   damage happens rather than several ticks later).
-2. **P16**, the single-buffered particle mapper.
-3. **The sliding-camera gauntlet**, which needs the harness to model chunk
+1. **Nobody has watched the screen, except for P16.** This was executed
+   overnight. The phases that still need eyes are 2 (the D3 off-by-one shifts
+   the destroyed sphere by one column), 3 (debris should *land more often*
+   now — P6's fix — and the bounce feel comes from the same code path) and 4
+   (islands falling on the tick the damage happens rather than several ticks
+   later). **P16 is the exception**: confirmed on screen under heavy
+   destruction in `Fishing_Village_Beat1`/`Valley_Path_To_Castle_Beat1` with
+   sustained explosive fire — the stray-particle-for-one-frame artefact the
+   original write-up named as the thing to look for is gone.
+2. **The sliding-camera gauntlet**, which needs the harness to model chunk
    streaming. Phase 0's notes say what it would take.
 
 ### Four defects the first play session found
@@ -404,7 +408,7 @@ half the point of the rewrite is that whole classes disappear structurally.
 | P13 | FIXED (phase 3) | Cap `break` starves the **newest** particles (unsimulated, unrendered, still holding claims) — `:1249-1250` |
 | P14 | FIXED (phase 3) | The cap is shared and component systems consume it first — a busy emitter starves debris simulation entirely — `:227-229` |
 | P15 | FIXED (phase 3) | Destroyed particles still increment the count → instance count exceeds live count — `:1252` |
-| P16 | **STILL OPEN** — see phase 3 notes | Particle mapper is single-buffered and written every fixed tick with no fence against the in-flight frame (voxel/brick mappers are double-buffered; this one is not) — `RenderContext.cpp:910-915` |
+| P16 | FIXED (post-phase-3), confirmed on screen — see phase 3 notes | Particle mapper is single-buffered and written every fixed tick with no fence against the in-flight frame (voxel/brick mappers are double-buffered; this one is not) — `RenderContext.cpp:910-915` |
 | P17 | **NOT A DEFECT** — reverted, see "Four defects" | Islands spawn **one particle per voxel** (explosions: one per four) — cost and visual-density inconsistency — `:296` vs `:525` |
 
 ### Loose-voxel registry
@@ -1000,17 +1004,30 @@ hit, with a one-shot warning. That loses a *proxy*, not the debris — those
 voxels revert to being drawn whenever another model's box covers them, which is
 the pre-registry behaviour.
 
-#### Two things that are not done
+#### One thing that is not done, and one that is fixed and confirmed
 
-**P16 — the particle mapper is still single-buffered.** The fix is small
-(`m_bHasBackBuffer = true` plus a swap) and the hazard is real: the CPU writes
-records every fixed tick with no fence against the frame the GPU is reading. But
-the swap has to happen only on frames that actually ran a fixed tick — swapping
-on a frame that did not would present the frame-before-last's particles, which
-is a visible jump — and *that* is a presentation change nobody can judge from a
-log. Deliberately left for a session with eyes on the screen. The symptom to
-look for is a single particle in the wrong place for one frame under heavy
-destruction.
+**P16 — the particle mapper is now double-buffered, and it has been watched
+on screen.** `RenderContext`'s particle `Mapper::Info` now sets
+`m_bHasBackBuffer = true`, and `PhysicsSystem::SimulateParticles` (debris) and
+`TickParticleSystems` (emitters) both write their tick's records through
+`GetBackBufferData()` instead of `GetData()` — the same buffer, since neither
+call swaps between them, so debris and emitter ranges land together. The swap
+itself is one call, `GetParticleMapper()->SwapBuffer()`, placed in
+`RenderSystem::Render` (`RenderContext.h`/`.cpp`, `PhysicsSystem.cpp`,
+`RenderSystem.cpp`) — which Application.cpp already calls exactly once per
+rendered frame and only `if (bFixedStep)`, i.e. only on a frame that actually
+ran a fixed tick. That gate is what stops a swap from presenting the
+frame-before-last's particles on a frame with no new simulation, which would
+be its own visible jump; it comes for free rather than needing new plumbing,
+because `RenderSystem::Render` was already gated on it for the voxel bake.
+Builds clean (bringup, editor, editor-release+tests) and `voxagine_tests`
+still passes — expected, since a presentation-timing fix has no work-counter
+footprint for the gauntlet to see. **Confirmed by Joey on screen**, under
+heavy sustained destruction in `Fishing_Village_Beat1` and
+`Valley_Path_To_Castle_Beat1`: the single-particle-in-the-wrong-place-for-
+one-frame artefact the original write-up named is gone, and no new jump
+appeared on the transition between a fixed-tick frame and the frames after
+it. P16 is closed.
 
 **The component particle systems are not unified into the core.** The plan asked
 for debris and emitters to be spawners over one pool. They share the GPU buffer

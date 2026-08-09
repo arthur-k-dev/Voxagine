@@ -1006,8 +1006,17 @@ void RenderContext::InitializeRenderLoop()
 		mapperInfo.m_Name = "Particle Mapper";
 		mapperInfo.m_ColorFormat = E_UNKNOWN;
 
+		/* DESTRUCTION_PLAN.md P16: double-buffered like the voxel and brick
+		   mappers, for the same reason - PhysicsSystem writes GPU records every
+		   fixed tick with no fence against the frame this pass is reading.
+		   Unlike those two, the swap fires once per rendered frame rather than
+		   on a rare event, and only when a fixed tick actually ran - see
+		   RenderSystem::Render. */
+		mapperInfo.m_bHasBackBuffer = true;
+
 		m_pMappers.push_back(std::make_unique<Mapper>(Get(), mapperInfo, false));
 		pParticleMapper = m_pMappers.back().get();
+		m_pParticleMapper = pParticleMapper;
 
 		// Create screen render target from data
 		m_pParticlePass = new ParticlePass(Get(), pVertexShader, pPixelShader, pCameraBuffer, pParticleMapper, pPointSampler);

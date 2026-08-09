@@ -292,6 +292,12 @@ public:
 	VoxelBrickGrid& GetBrickGrid() { return m_BrickGrid; }
 	Mapper* GetBrickMapper() const { return m_pBrickMapper; }
 
+	/* Double-buffered per DESTRUCTION_PLAN.md P16: PhysicsSystem writes each
+	   fixed tick's records into the back buffer, and RenderSystem::Render
+	   swaps it in only on a frame that actually ran a fixed tick - otherwise
+	   the CPU write races the frame the GPU is still drawing from. */
+	Mapper* GetParticleMapper() const { return m_pParticleMapper; }
+
 	/* Recomputes the whole brick grid from the voxel buffer and logs anything
 	   that disagrees. On demand only - it reads the entire window back out of
 	   uncached memory. */
@@ -440,6 +446,7 @@ protected:
 	
 	ParticlePass* m_pParticlePass = nullptr;
 	uint32_t m_uiParticleCount = 0;
+	Mapper* m_pParticleMapper = nullptr;
 
 	Mapper* m_pVoxelMapper = nullptr;
 	uint32_t* m_pVoxelData = nullptr;

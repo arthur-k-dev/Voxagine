@@ -172,6 +172,19 @@
    what stops the tap pattern from undersampling into noise. */
 #define SUN_SHADOW_MAX_RADIUS 12.0
 
+/* Smallest filter radius, in shadow-map texels, a lookup is ever allowed to
+   use. The map is ~1 texel per 2 voxels and its axes follow the sun rather
+   than the world grid, so an axis-aligned occluder only a voxel or two thick -
+   a fence rail, a railing - is sampled by a sparse, diagonal lattice of
+   texels. A blocker search that comes back essentially touching the receiver
+   used to skip PCF and take one unfiltered point sample there, which reads
+   that lattice raw: a straight rail's own contact shadow came out as a
+   diagonal sawtooth instead of a line, worst exactly where the penumbra
+   should be narrowest. Flooring the radius here keeps every lookup at least a
+   minimal PCF average - under a voxel wide at this resolution, so genuine
+   contact shadows stay effectively hard. */
+#define SUN_SHADOW_MIN_RADIUS 1.0
+
 /* --- Cone-traced ambient occlusion (RENDERING_PLAN.md 7.1b) ---------------
    Five cones over the hemisphere - one on the normal, four on a ring - marched
    against the coverage pyramid, each step sampling the level whose cell is

@@ -120,19 +120,16 @@ float GetSunVisibility(float3 v3Position, float3 v3Normal, float2 v2ScreenPositi
 	   trick: it is contact hardening, and it is free. */
 	float fBlocker = fBlockerSum / fBlockerCount;
 
-	float fRadius = min(
+	/* Floored at SUN_SHADOW_MIN_RADIUS rather than letting PCSS's own estimate
+	   reach zero - see that constant. A blocker essentially touching the
+	   receiver still gets the filter loop, just at the smallest radius, so
+	   contact reads as a hard line rather than being smeared by a wide
+	   penumbra *and* never falls back to a single point sample of a map whose
+	   own texel grid is coarser and diagonal to the geometry it is sampling. */
+	float fRadius = clamp(
 		SUN_ANGULAR_RADIUS * max(fReceiver - fBlocker, 0.0) * max(v2TexelsPerUnit.x, v2TexelsPerUnit.y),
+		SUN_SHADOW_MIN_RADIUS,
 		SUN_SHADOW_MAX_RADIUS);
-
-	/* A blocker essentially touching the receiver gets no filter, so contact
-	   stays a hard line rather than being smeared by the minimum tap spacing -
-	   but it still has to be *tested*. Returning 0 here instead was a bug worth
-	   remembering: the blocker search finding anything at all is not the same
-	   as this pixel being occluded, so one stray tap out of sixteen turned into
-	   a hard black pixel. It only became visible when the search radius shrank
-	   and pushed most pixels down this path. */
-	if (fRadius < 0.5)
-		return (sunShadowMap.SampleLevel(s0, v2UV, 0) < fReceiver) ? 0.0 : 1.0;
 
 	float fLit = 0.0;
 

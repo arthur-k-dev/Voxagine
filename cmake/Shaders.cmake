@@ -13,6 +13,17 @@
 find_program(DXC_EXECUTABLE NAMES dxc HINTS ENV VULKAN_SDK PATH_SUFFIXES bin)
 
 set(VOXAGINE_DXC_SHIFTS
+    # DXC defaults to targeting vulkan1.0 and refuses to emit any SPIR-V
+    # subgroup operation for it. VKDevice asks for VK_API_VERSION_1_3, so this
+    # only tells the compiler what the runtime has always been. Raise it here,
+    # not per shader - a mismatch between the two is invisible until a shader
+    # fails to compile.
+    #
+    # Added for QuadReadAcrossX/Y in the soft shadow, which has since gone back
+    # to per-pixel sampling; nothing uses a subgroup op right now. Kept because
+    # the target env should match the device regardless, and because the phase 7
+    # mip-pyramid build is a compute pass that will want wave intrinsics.
+    -fspv-target-env=vulkan1.1
     -fvk-b-shift 0 0
     -fvk-t-shift 100 0
     -fvk-u-shift 200 0

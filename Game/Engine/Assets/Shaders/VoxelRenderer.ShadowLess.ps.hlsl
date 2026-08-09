@@ -24,6 +24,8 @@ struct PS_in
 
 #include "SDFMarcher.hlsl"
 #include "AmbientOcclusion.hlsl"
+#include "AmbientCone.hlsl"
+#include "Lighting.hlsl"
 
 FORCE_DEPTH_TEST
 float4 main(PS_in IN) : TAR_OUT
@@ -60,18 +62,22 @@ float4 main(PS_in IN) : TAR_OUT
 		return float4(0.0, 0.0, 0.0, 0.0);
 	}
 
-    /* Directional lighting */
+    /* Same sun-plus-sky model as VoxelRenderer.ps.hlsl (rule 8: non-shadow
+       changes land in both), with the sun unoccluded because this variant
+       casts no shadow ray at all. */
     float difference = clamp(dot(marchDiffuse.Normal, -lightDirection.xyz), 0.0, 1.0);
-    float shadowMultiplier = difference * (1.0-AMBIENT_VALUE) + AMBIENT_VALUE;
+
+    float skyVisibility = GetSkyVisibility(marchDiffuse.Position, marchDiffuse.Mask, marchDiffuse.SRDirection, marchDiffuse.Normal, marchDiffuse.UV);
+
+#if AO_CONE_ENABLED
+    skyVisibility *= GetConeSkyVisibility(marchDiffuse.SmoothPosition, marchDiffuse.Normal, IN.NormScreenPosition.xy);
+#endif
+
+    marchDiffuse.Color.xyz = ShadeSurface(marchDiffuse.Color.xyz, marchDiffuse.Normal, 1.0, skyVisibility);
 
     /* Fake specular "shine line" on lit voxel edges - see GetShineLine in
        AmbientOcclusion.hlsl. */
-    shadowMultiplier *= GetShineLine(marchDiffuse.Position, marchDiffuse.Normal, marchDiffuse.UV, lightDirection.xyz, difference);
-
-    /* Ambient occlusion - hit-time only, zero added per-step cost */
-    float4 ambient = GetAmbientOcclusion(marchDiffuse.Position, marchDiffuse.Mask, marchDiffuse.SRDirection, marchDiffuse.Normal, marchDiffuse.UV);
-
-    marchDiffuse.Color.xyz *= float3(shadowMultiplier, shadowMultiplier, shadowMultiplier) * ambient.xyz;
+    marchDiffuse.Color.xyz *= GetShineLine(marchDiffuse.Position, marchDiffuse.Normal, marchDiffuse.UV, lightDirection.xyz, difference);
     marchDiffuse.Color.a = 1.0;
 
 #ifdef MARCH_STEP_DEBUG

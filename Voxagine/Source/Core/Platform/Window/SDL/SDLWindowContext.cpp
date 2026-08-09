@@ -1,6 +1,8 @@
 #include "pch.h"
 #include "SDLWindowContext.h"
 
+#include "Core/LaunchOptions.h"
+
 #include "Core/Application.h"
 #include "Core/Platform/Platform.h"
 #include "Core/Platform/Rendering/RenderContext.h"
@@ -42,7 +44,26 @@ void SDLWindowContext::CreateWindow()
 	if (settings.IsFullscreen())
 		flags |= SDL_WINDOW_FULLSCREEN;
 
-	const UVector2 resolution = settings.m_v2InitialWindowSize;
+	UVector2 resolution = settings.m_v2InitialWindowSize;
+
+	/* --hidden: render everything, display nothing (LaunchOptions.h). Vulkan
+	   still gets a real surface, which is what SDL_VIDEODRIVER=offscreen cannot
+	   provide on this driver.
+
+	   Fullscreen has to come *off* with it, and --size only means anything
+	   here: a mapped window is the compositor's to size - Hyprland tiles it and
+	   ignores the request - but an unmapped one is not, so this is the only
+	   place a measurement run can pin its own resolution. */
+	const LaunchOptions& options = LaunchOptions::Get();
+
+	if (options.IsHidden())
+	{
+		flags |= SDL_WINDOW_HIDDEN;
+		flags &= ~SDL_WINDOW_FULLSCREEN;
+
+		if (options.HasSize())
+			resolution = UVector2(options.GetWidth(), options.GetHeight());
+	}
 
 	m_pWindow = SDL_CreateWindow(settings.GetTitle().c_str(),
 	                             static_cast<int>(resolution.x),

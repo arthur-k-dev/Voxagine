@@ -36,6 +36,7 @@
 #include "Core/Platform/Rendering/Passes/DebugPass.h"
 #include "Core/Platform/Rendering/Passes/PostProcessingPass.h"
 #include "Core/Platform/Rendering/Passes/UIPass.h"
+#include "Core/Platform/Rendering/Passes/SunShadowPass.h"
 #include "Core/Platform/Rendering/Passes/VoxelPass.h"
 #include "Core/Platform/Rendering/Passes/VoxelBakePass.h"
 
@@ -433,6 +434,7 @@ bool RenderContext::Present()
 	Buffer* pSpriteBuffer = m_mBuffers["Sprite Data"].get();
 
 	PRenderPass* pParticlePass = m_pRenderPasses["Particles"].get();
+	PRenderPass* pSunShadowPass = m_pRenderPasses["Sun Shadow"].get();
 	PRenderPass* pVoxelPass = m_pRenderPasses["Voxel"].get();
 	PRenderPass* pUIPass = m_pRenderPasses["UI Renderer"].get();
 	PRenderPass* pPostProcessingPass = m_pRenderPasses["Post Processing"].get();
@@ -567,6 +569,79 @@ bool RenderContext::Present()
 			m_PreviousSceneCamera.m_WorldPos = m_CameraData.m_WorldPos;
 			m_PreviousSceneCamera.m_Offset = m_CameraData.m_CameraOffset;
 
+			/* Light-space frame for the sun shadow map - RENDERING_PLAN.md
+			   7.1a, and CameraData.hlsl documents the mapping. Computed here
+			   rather than in a shader because both inputs are effectively
+			   constant: lightDirection is a fixed engine value and uWorldSize
+			   only moves when the voxel grid is resized.
+
+			   The basis is built off world up rather than off an arbitrary
+			   orthogonal vector, so the map's V axis stays roughly vertical.
+			   That matters for nothing mathematically and for a lot when
+			   reading the map in a debug view. */
+			{
+				const Vector3 v3Light(v4LightDirection);
+
+				Vector3 v3Tangent = glm::cross(v3Light, Vector3(0.f, 1.f, 0.f));
+
+				/* Degenerate only for a light pointing straight down, which
+				   this one does not - but it is a fixed constant today and a
+				   setting tomorrow. */
+				v3Tangent = glm::dot(v3Tangent, v3Tangent) > 1e-6f
+					? glm::normalize(v3Tangent)
+					: Vector3(1.f, 0.f, 0.f);
+
+				const Vector3 v3Bitangent = glm::normalize(glm::cross(v3Light, v3Tangent));
+
+				/* The window's projection onto the basis. A box's support along
+				   an axis is the sum of its extents weighted by |axis|, so the
+				   eight corners never have to be enumerated - and the box's
+				   near corner in window space is the origin, so the minimum is
+				   just the negative part of each weighted extent. */
+				const Vector3 v3Extent(
+					static_cast<float>(uWorldSize.x),
+					static_cast<float>(uWorldSize.y),
+					static_cast<float>(uWorldSize.z));
+
+				auto AxisRange = [&v3Extent](const Vector3& v3Axis, float& fMin, float& fMax)
+				{
+					fMin = 0.f;
+					fMax = 0.f;
+
+					for (int i = 0; i < 3; ++i)
+					{
+						const float fTerm = v3Axis[i] * v3Extent[i];
+
+						if (fTerm < 0.f)
+							fMin += fTerm;
+						else
+							fMax += fTerm;
+					}
+				};
+
+				float fMinU, fMaxU, fMinV, fMaxV, fMinW, fMaxW;
+
+				AxisRange(v3Tangent, fMinU, fMaxU);
+				AxisRange(v3Bitangent, fMinV, fMaxV);
+				AxisRange(v3Light, fMinW, fMaxW);
+
+				const float fSizeU = std::max(fMaxU - fMinU, 1.f);
+				const float fSizeV = std::max(fMaxV - fMinV, 1.f);
+
+				pCameraBuffer->AddConstantData(Vector4(v3Tangent, 0.f));
+				pCameraBuffer->AddConstantData(Vector4(v3Bitangent, 0.f));
+				pCameraBuffer->AddConstantData(Vector4(fMinU, fMinV, fSizeU, fSizeV));
+
+				/* World units per shadow texel on each axis, which is what a
+				   PCSS filter radius has to be converted through, plus the
+				   plane the march starts from. */
+				pCameraBuffer->AddConstantData(Vector4(
+					fMinW,
+					fSizeU / static_cast<float>(k_uiSunShadowResolution),
+					fSizeV / static_cast<float>(k_uiSunShadowResolution),
+					fMaxW - fMinW));
+			}
+
 			pCameraBuffer->Allocate();
 
 			//Sets the forced data update to false
@@ -605,6 +680,16 @@ bool RenderContext::Present()
 		pVDirectEngine->Begin(pParticlePass);
 		pVDirectEngine->Draw(pParticlePass);
 		pVDirectEngine->End(pParticlePass);
+
+		/* The voxel pass samples this one's target at t3, so it has to be
+		   complete first - same ordering constraint as the particle targets
+		   above, and the same reason there is one render pass instance each. */
+		if (pSunShadowPass != nullptr)
+		{
+			pVDirectEngine->Begin(pSunShadowPass);
+			pVDirectEngine->Draw(pSunShadowPass);
+			pVDirectEngine->End(pSunShadowPass);
+		}
 
 		pVDirectEngine->Begin(pVoxelPass);
 		pVDirectEngine->Draw(pVoxelPass);
@@ -916,6 +1001,35 @@ void RenderContext::InitializeRenderLoop()
 		m_pRenderPasses.emplace(m_pParticlePass->GetData().m_Name, std::unique_ptr<ParticlePass>(m_pParticlePass));
 	}
 
+	/* Sun Shadow Pass. Before the voxel pass, which samples its target -
+	   RENDERING_PLAN.md 7.1a. Only built when shadows are on; the ShadowLess
+	   voxel shader declares no t3, so the pass would be a target nothing
+	   reads. */
+	SunShadowPass* pSunShadowPass = nullptr;
+
+	if (settings.IsShadowEnabled())
+	{
+		Shader::Info vertexShader;
+		vertexShader.m_FilePath = "Engine/Assets/Shaders/ScreenQuad.vs";
+		vertexShader.m_Type = Shader::E_VERTEX;
+
+		m_pShaders.push_back(std::make_unique<Shader>(Get(), vertexShader));
+		Shader* pVertexShader = m_pShaders.back().get();
+
+		Shader::Info pixelShader;
+		pixelShader.m_FilePath = "Engine/Assets/Shaders/SunShadow.ps";
+		pixelShader.m_Type = Shader::E_PIXEL;
+
+		m_pShaders.push_back(std::make_unique<Shader>(Get(), pixelShader));
+		Shader* pPixelShader = m_pShaders.back().get();
+
+		pSunShadowPass = new SunShadowPass(
+			Get(), pVertexShader, pPixelShader, pPointSampler,
+			pCameraBuffer, m_pVoxelMapper, m_pBrickMapper);
+
+		m_pRenderPasses.emplace(pSunShadowPass->GetData().m_Name, std::unique_ptr<SunShadowPass>(pSunShadowPass));
+	}
+
 	// Voxel Pass
 	{
 		// Vertex shader
@@ -935,7 +1049,11 @@ void RenderContext::InitializeRenderLoop()
 		Shader* pPixelShader = m_pShaders.back().get();
 
 		// Create screen render target from data
-		pVoxelPass = new VoxelPass(Get(), pVertexShader, pPixelShader, pPointSampler, m_pVoxelMapper, m_pBrickMapper, pCameraBuffer, pAABBBuffer, m_pParticlePass->GetTargetView(0), m_pParticlePass->GetTargetView(1));
+		/* The shadow map goes in as the third texture, so t3 - see
+		   VoxelRenderer.ps.hlsl. Null under ShadowLess, where that variant
+		   declares no t3 and VoxelPass skips the binding. */
+		pVoxelPass = new VoxelPass(Get(), pVertexShader, pPixelShader, pPointSampler, m_pVoxelMapper, m_pBrickMapper, pCameraBuffer, pAABBBuffer, m_pParticlePass->GetTargetView(0), m_pParticlePass->GetTargetView(1),
+			pSunShadowPass != nullptr ? pSunShadowPass->GetTargetView() : nullptr);
 		m_pRenderPasses.emplace(pVoxelPass->GetData().m_Name, std::unique_ptr<VoxelPass>(pVoxelPass));
 	}
 
@@ -1121,6 +1239,13 @@ bool RenderContext::OnResize(uint32_t uiWidth, uint32_t uiHeight)
 	resolutionDelta.x = static_cast<int32_t>(m_v2RenderResolution.x * m_fRenderScale) - static_cast<int32_t>(oldResolution.x * m_fRenderScale);
 	resolutionDelta.y = static_cast<int32_t>(m_v2RenderResolution.y * m_fRenderScale) - static_cast<int32_t>(oldResolution.y * m_fRenderScale);
 
+	/* Deliberately not logged here. This size is what the engine *asked* for -
+	   SetFullscreen calls OnResize with the screen resolution - and a tiling
+	   compositor is free to ignore it, which Hyprland does until Alt+Up. A log
+	   line here reads as ground truth and is not: it reported 2732x1536 for a
+	   run whose passes were all rasterizing at 1365x767. VKRenderPass logs the
+	   size each pass actually creates its attachments at, which is the number a
+	   GPU timing is comparable against. */
 	SizeChanged(
 		static_cast<uint32_t>(uiWidth * m_fRenderScale),
 		static_cast<uint32_t>(uiHeight * m_fRenderScale),

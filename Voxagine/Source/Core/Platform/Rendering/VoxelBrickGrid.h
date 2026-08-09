@@ -59,7 +59,7 @@ public:
 	   needs a definition. Release inlines every use and links; Debug does not.
 	   This tree has shipped that difference twice (see CLAUDE.md on the owner
 	   slot constants); constexpr is implicitly inline in C++17 and ends it. */
-	static constexpr uint32_t k_uiBrickShift = 3;
+	static constexpr uint32_t k_uiBrickShift = 2;
 	static constexpr uint32_t k_uiBrickSize = 1u << k_uiBrickShift;
 	static constexpr uint32_t k_uiBrickVolume = k_uiBrickSize * k_uiBrickSize * k_uiBrickSize;
 

@@ -93,6 +93,17 @@ bool VKRenderPass::CreateAttachments()
 
 	m_TargetSize = size;
 
+	/* The size this pass actually rasterizes at, which is the only number a GPU
+	   timing can be compared against. It is not the window size and it is not
+	   RenderContext::GetRenderResolution() either: Settings::ResolutionScale
+	   reaches the passes through Data::m_fRenderScale, and only the Voxel and
+	   Particle passes take it - UI, Debug and PostProcessing hardcode 1.0. So
+	   the Voxel pass can be rendering at 3841x2159 while everything upstream
+	   still reports 2732x1536, and two runs whose numbers are not comparable
+	   look identical in the log. */
+	fprintf(stderr, "[render] pass '%s' target %ux%u (scale %.3f)\n",
+		m_Data.m_Name.c_str(), size.x, size.y, m_Data.m_fRenderScale);
+
 	/* One view per render target, times the back buffer count. The engine
 	   indexes them as i + backBuffer * renderViewCount. */
 	const uint32_t uiViews = m_Data.m_uiRenderViewCount * (m_Data.m_uiBackBuffers + 1);

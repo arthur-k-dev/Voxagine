@@ -169,6 +169,20 @@ public:
 	// Maximum queued frames on the GPU
 	static const uint32_t m_uiFrameCount = 2;
 
+	/* Side of the square sun shadow map - RENDERING_PLAN.md 7.1a.
+	   Its cost is one brick-DDA march per texel and is *independent of screen
+	   resolution*, which is the whole reason the sun stopped being a per-pixel
+	   ray: at 3840x2160 a single shadow ray per pixel measures ~9.45 ms, and
+	   the entire lighting budget is 3 ms.
+
+	   Sizing: the 768x128x768 window projects to roughly 1065 x 877 world units
+	   perpendicular to the light, so 1024 is close to one texel per voxel and
+	   512 is one per two. A depth map records the nearest blocker per texel, so
+	   a coarser map makes a one-voxel post cast a shadow wider than itself
+	   rather than losing it - erring thick, which is the right direction here
+	   (phase 6.2 could not make thin occluders read at all). */
+	static constexpr uint32_t k_uiSunShadowResolution = 1024;
+
 	virtual ~RenderContext();
 
 	static void Report();
@@ -326,6 +340,17 @@ public:
 
 	/* Present all the gathered data to the screen */
 	virtual bool Present();
+
+	/* Write a named pass's render target to `path` as a binary PPM, for
+	   --screenshot (LaunchOptions.h). Stalls the GPU and allocates a staging
+	   buffer the size of the target, so it is a debugging facility and not
+	   something to call per frame.
+
+	   It exists so that a rendering change can be *looked at* without putting a
+	   window on the developer's display - and so an intermediate target can be
+	   inspected directly rather than through a debug shader that has to be
+	   written, compiled and then removed again. */
+	virtual void CaptureTarget(const std::string& passName, const std::string& path) { (void)passName; (void)path; }
 
 	Platform* GetPlatform() { return m_pPlatform; }
 	UVector2 GetRenderResolution() const { return UVector2(m_v2RenderResolution.x * m_fRenderScale, m_v2RenderResolution.y * m_fRenderScale); }

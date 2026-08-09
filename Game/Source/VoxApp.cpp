@@ -1,4 +1,5 @@
 #include "VoxApp.h"
+#include "Core/LaunchOptions.h"
 #include <iostream>
 #include "Core/ECS/World.h"
 #include "Core/Platform/Input/Temp/InputContextNew.h"
@@ -21,7 +22,13 @@ void VoxApp::OnCreate()
 #if !defined(EDITOR)
 	auto projectSettings = ProjectSettings();
 	projectSettings.Initialize(&m_Serializer, "ProjectSettings.vgps");
-	std::string outPath = projectSettings.GetDefaultMap();
+
+	/* --map wins over the project's default, so choosing a level for a
+	   measurement or a capture no longer means editing ProjectSettings.vgps and
+	   remembering to put it back. See LaunchOptions.h. */
+	std::string outPath = LaunchOptions::Get().HasMap()
+		? LaunchOptions::Get().GetMap()
+		: projectSettings.GetDefaultMap();
 
 	if (outPath.empty())
 	{

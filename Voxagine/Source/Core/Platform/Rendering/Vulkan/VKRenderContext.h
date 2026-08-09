@@ -25,6 +25,8 @@ public:
 
 	virtual bool OnResize(uint32_t uiWidth, uint32_t uiHeight) override;
 
+	virtual void CaptureTarget(const std::string& passName, const std::string& path) override;
+
 	virtual bool IsVSyncEnabled() const override { return m_Swapchain.IsVSyncEnabled(); }
 	virtual void SetVSyncEnabled(bool bEnabled) override;
 

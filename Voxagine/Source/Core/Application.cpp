@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "Core/Application.h"
+#include "Core/LaunchOptions.h"
 
 #ifdef _ORBIS
 #include "Core/System/ORBIS/ORBFileSystem.h"
@@ -226,6 +227,34 @@ void Application::Run()
 #endif
 
 			OnDraw();
+
+			/* --frames / --screenshot (LaunchOptions.h). Counted here rather
+			   than in the outer while loop because that one spins on the game
+			   timer and iterates many times per rendered frame - counting there
+			   would make --frames mean something other than frames.
+
+			   The capture happens on the last frame and *before* Present, so
+			   what it reads is a target the GPU has finished with rather than
+			   one being composited. */
+			{
+				const LaunchOptions& options = LaunchOptions::Get();
+
+				if (options.GetFrameLimit() > 0)
+				{
+					++m_uiRenderedFrames;
+
+					if (m_uiRenderedFrames >= options.GetFrameLimit())
+					{
+						if (options.HasScreenshot())
+						{
+							m_Platform.GetRenderContext()->CaptureTarget(
+								options.GetScreenshotPass(), options.GetScreenshot());
+						}
+
+						m_bExit = true;
+					}
+				}
+			}
 
 			m_Platform.GetRenderContext()->Present();
 

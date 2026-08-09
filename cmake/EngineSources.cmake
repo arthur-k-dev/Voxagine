@@ -112,6 +112,7 @@ set(VOXAGINE_ENGINE_SOURCES
     ${VOXAGINE_SOURCE_DIR}/Core/Platform/Rendering/Passes/PostProcessingPass.cpp
     ${VOXAGINE_SOURCE_DIR}/Core/Platform/Rendering/Passes/UIPass.cpp
     ${VOXAGINE_SOURCE_DIR}/Core/Platform/Rendering/Passes/VoxelBakePass.cpp
+    ${VOXAGINE_SOURCE_DIR}/Core/Platform/Rendering/Passes/SunShadowPass.cpp
     ${VOXAGINE_SOURCE_DIR}/Core/Platform/Rendering/Passes/VoxelPass.cpp
     ${VOXAGINE_SOURCE_DIR}/Core/Platform/Rendering/RenderContext.cpp
     ${VOXAGINE_SOURCE_DIR}/Core/Platform/Rendering/VoxelBrickGrid.cpp
@@ -135,6 +136,7 @@ set(VOXAGINE_ENGINE_SOURCES
     ${VOXAGINE_SOURCE_DIR}/Core/Resources/Formats/VoxModel.cpp
     ${VOXAGINE_SOURCE_DIR}/Core/Resources/ResourceManager.cpp
     ${VOXAGINE_SOURCE_DIR}/Core/Particles/ParticleCore.cpp
+    ${VOXAGINE_SOURCE_DIR}/Core/LaunchOptions.cpp
     ${VOXAGINE_SOURCE_DIR}/Core/Settings.cpp
     ${VOXAGINE_SOURCE_DIR}/Core/Voxels/VoxelEditBatch.cpp
     ${VOXAGINE_SOURCE_DIR}/Core/System/Posix/PosixFileSystem.cpp

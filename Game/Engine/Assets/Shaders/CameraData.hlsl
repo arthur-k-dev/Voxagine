@@ -40,4 +40,24 @@ CONSTANT_BUFFER Data : register(b0)
 
 	float4 sceneCamPosition;
 	float4 sceneCamOffset;
+
+	/* --- Light-space frame for the sun shadow map (RENDERING_PLAN.md 7.1a) ---
+	   An orthonormal basis around lightDirection, plus the rectangle the
+	   resident window projects onto in it. RenderContext::Present computes all
+	   of this on the CPU: lightDirection is a fixed engine constant and
+	   worldSize only changes when the grid is resized, so there is nothing
+	   per-pixel about it.
+
+	   A window-space point p maps to light space as
+	     (dot(p, shadowTangent.xyz), dot(p, shadowBitangent.xyz), dot(p, lightDirection.xyz))
+	   where the third component is depth along the light and the first two are
+	   normalized against shadowRect into the map's UV.
+
+	   Appended, never inserted - see farFieldSize. shadowRect is
+	   (minU, minV, sizeU, sizeV); shadowDepth is (nearW, invTexelsPerUnitU,
+	   invTexelsPerUnitV, unused). */
+	float4 shadowTangent;
+	float4 shadowBitangent;
+	float4 shadowRect;
+	float4 shadowDepth;
 };

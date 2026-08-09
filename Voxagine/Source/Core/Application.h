@@ -75,4 +75,7 @@ private:
 
 	std::atomic_bool m_bSuspended;
 	std::atomic_bool m_bExit;
+
+	/* Rendered frames, for --frames. Only counted when a limit is set. */
+	uint32_t m_uiRenderedFrames = 0;
 };

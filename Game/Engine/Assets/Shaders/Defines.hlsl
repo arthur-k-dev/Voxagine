@@ -1,32 +1,53 @@
 /* Global */
-#define AMBIENT_VALUE 0.5
 #define OPTIMIZED 1
 // #define DIRECT_LIGHTING 2
 
-/* Shadow ray distance-to-fade scale.
-   `shadowMultiplier = min(Distance * K * difference + AMBIENT_VALUE, 1.0)`, so
-   the fade saturates at `(1 - AMBIENT_VALUE) / (K * difference)` - 200 world
-   units at K = 0.0025, difference = 1.
-   Phase 1 left this at Splody's 0.0125, which saturates at 40 units; combined
-   with phase 2 removing the shadow ray's 64-step cap, everything past a short
-   distance from its occluder rendered at full brightness and read as AO being
-   "excluded" near shadow edges. Tune by eye. */
-#define SHADOW_FADE_K 0.0025
+/* --- Soft shadows (RENDERING_PLAN.md phase 6.2) ---------------------------
+   How far the four cone rays of a quad spread, as a tangent: a sample at the
+   pattern's full radius leaves the light direction by about this much, so the
+   penumbra is roughly 2 * SHADOW_CONE_SPREAD * (distance to occluder) wide.
+
+   0.05 was tried first and is too wide for this art. It is ~10x the sun's real
+   angular radius, which puts a 4-voxel gradient on anything 40 voxels out - so
+   a one-voxel post occludes a quarter of the cone and its shadow all but
+   disappears. Reported as "thin shadows too weak". 0.02 is ~4x the real sun:
+   still far softer than physical, and a post still reads.
+
+   It is also the noise knob, which is not obvious. All the sampling variance
+   lives in partially-occluded pixels, and the penumbra *is* the set of
+   partially-occluded pixels - so halving the spread roughly halves the area
+   that can be noisy at all. Widening this without also raising
+   SHADOW_CONE_SAMPLES trades thin shadows and grain for softness. */
+#define SHADOW_CONE_SPREAD 0.02
+
+/* Shadow rays per pixel, all of them this pixel's own.
+
+   Smoothness costs rays linearly here, which is the whole reason
+   RENDERING_PLAN.md phase 7.1 exists - a cone trace through a filtered mip
+   pyramid integrates the same coverage analytically, in one trace. Until then
+   this is the brute-force version and the knob is honest about it: raise it
+   for a smoother penumbra and a proportionally more expensive frame.
+
+   Sharing rays across the 2x2 quad was tried and removed. It bought four times
+   the directions for free, but averaging over a quad is a box filter on the
+   shadow term, and thin occluders - railings, posts, beams - cast shadows only
+   a pixel or two wide, which is exactly what a box filter erases. */
+#define SHADOW_CONE_SAMPLES 4
 
 /* Occupancy bricks (RENDERING_PLAN.md phase 2). One count of occupied voxels
    per BRICK_SIZE^3 block of the resident window, maintained CPU-side by
    VoxelBrickGrid; the marcher walks bricks and only descends into ones that
    hold something. BRICK_SHIFT is the C++ side's k_uiBrickShift - change both
    or neither. */
-#define BRICK_SHIFT 3
-#define BRICK_SIZE 8
-#define BRICK_SIZE_F 8.0
-#define BRICK_INV_SIZE 0.125
+#define BRICK_SHIFT 2
+#define BRICK_SIZE 4
+#define BRICK_SIZE_F 4.0
+#define BRICK_INV_SIZE 0.25
 
 /* Voxel crossings a ray can make inside one brick before it has to leave:
    3 axes x BRICK_SIZE cells. The inner walk also breaks the moment the ray
    leaves the brick, so this only bounds the pathological case. */
-#define BRICK_MAX_VOXEL_STEPS 24
+#define BRICK_MAX_VOXEL_STEPS 12
 
 /* Safety ceiling on how much marching one pixel may do, counted in DDA
    crossings - brick-level and voxel-level alike - and shared by every ray the
@@ -57,7 +78,153 @@
 
    Running out of it ends the march exactly as running out of brick steps
    already does - alpha 0, which the caller reads as a miss. */
-#define MARCH_STEP_BUDGET 1024
+/* Scale this with SHADOW_CONE_SAMPLES. The budget is shared by every ray a
+   pixel fires, and **running out reports lit** - so a budget set too low does
+   not degrade gracefully, it puts bright speckle exactly where geometry is
+   densest and the rays are longest. That reads as noise and is easy to blame
+   on the sampling instead.
+
+   Sizing, at BRICK_SHIFT 2 on a 768x128x768 window: a shadow ray climbing out
+   of the window is ~43 brick steps plus descents, call it ~100, so 8 of them
+   plus a primary ray is ~1400 for a typical pixel - but the *worst* case is
+   iMaxBrickSteps (273) x BRICK_MAX_VOXEL_STEPS (12) = ~3300 per ray. 4096 sat
+   between the two, which is the wrong place for a safety net to sit: never
+   binding on an ordinary pixel, frequently binding on a dense one. */
+#define MARCH_STEP_BUDGET 16384
+
+/* Uncomment to shade the sun with GetSunVisibilityByRays - the brute-force
+   cone of exact shadow rays - instead of sampling the shadow map. Ground truth
+   to compare the map against: it is correct by construction and far too slow
+   to ship. Differences are the map's, not the light's. */
+// #define SUN_SHADOW_REFERENCE
+
+/* --- Sun shadow map (RENDERING_PLAN.md 7.1a) ------------------------------
+   Side of the square light-space depth map. Must equal
+   RenderContext::k_uiSunShadowResolution - change both or neither; they are
+   the SPIR-V/C++ contract for this pass exactly as BRICK_SHIFT is for the
+   brick grid. */
+#define SUN_SHADOW_RESOLUTION 1024.0
+
+/* Written for a light-space column that hits nothing. Has to exceed any depth
+   a receiver can compute for itself, including one pushed a little past the
+   window's far plane by rounding. */
+#define SUN_SHADOW_FAR 1.0e9
+
+/* Depth slack, in world units, between a receiver and the blocker recorded for
+   its own texel. A texel covers up to a couple of voxels of light-space
+   footprint, so a lit surface's own depth can differ from what its texel
+   recorded by about that much; without the slack every lit surface shadows
+   itself in stripes. Voxel geometry is axis aligned, which is why a constant
+   works here where a sloped-surface renderer would need a slope-scaled one. */
+#define SUN_SHADOW_BIAS 1.5
+
+/* World units the lookup pushes its sample point out along the surface normal
+   before projecting it into light space. Voxel faces are axis aligned so one
+   voxel is exact; raise it if acne survives, lower it if shadows visibly
+   detach from the geometry casting them. */
+#define SUN_SHADOW_NORMAL_OFFSET 1.0
+
+/* How much the bias and the normal offset grow as a surface turns edge-on to
+   the light, as a multiplier on (1 - N.L).
+
+   A flat bias is only ever correct for a surface facing the light. At a grazing
+   angle one shadow texel spans a long run of the receiver, so the depth
+   recorded for the texel differs from this pixel's own depth by far more than a
+   constant can absorb, and the surface stripes itself in shadow. A wall lit
+   near edge-on is the worst case and is extremely common here - the light sits
+   at ~48 degrees elevation, so every vertical face is close to grazing. */
+#define SUN_SHADOW_GRAZING_SCALE 6.0
+
+/* Tangent of the sun's angular radius, as SHADOW_CONE_SPREAD was. The PCSS
+   filter width is this times the distance between receiver and blocker, so the
+   penumbra widens with occluder distance without costing any rays - which is
+   the property phase 6.2 had to buy with sample count. */
+#define SUN_ANGULAR_RADIUS 0.03
+
+/* Taps for the blocker search and for the filter itself. Both are 2D texture
+   samples of a map that is at most 4 MiB, so they are nothing like the cost of
+   the rays they replace. */
+#define SUN_SHADOW_BLOCKER_TAPS 16
+#define SUN_SHADOW_FILTER_TAPS 24
+
+/* Largest filter radius, in shadow-map texels. Caps how far the penumbra can
+   spread when a blocker is very distant, which is both a quality choice and
+   what stops the tap pattern from undersampling into noise. */
+#define SUN_SHADOW_MAX_RADIUS 12.0
+
+/* --- Cone-traced ambient occlusion (RENDERING_PLAN.md 7.1b) ---------------
+   OFF. The cone works; the *data* it marches is too coarse, and the two ways
+   it fails bracket the problem with no setting in between:
+
+     - Cone start under ~8 voxels: a ring cone leaves at ~52 degrees, so near
+       the surface it travels along it and samples the 4-voxel bricks
+       containing the wall it started on. The wall occludes itself. On stepped
+       geometry the origin lands inside the ledge above and the surface goes
+       black in wedges.
+     - Cone start at 8 voxels: nothing then measures occlusion between 1 voxel
+       (GetSkyVisibility's neighbour test) and 8. That gap is exactly the scale
+       of the gaps between stones in a wall, so the wall reads flat - and
+       inconsistent, because which samples land in an occupied brick depends on
+       where a block happens to fall in a lattice that knows nothing about it.
+
+   Both were seen on screen. This is the answer to the question 7.1b was posed
+   as - "is brick resolution enough for AO?" - and it is no. The pyramid is
+   required, and specifically levels *finer* than the 4-voxel brick, with
+   trilinear filtering so a cone samples its own scale rather than a fixed grid.
+
+   Set to 1 to re-enable while working on it. AmbientCone.hlsl is kept because
+   the cone itself is right and becomes the pyramid version's body. */
+#define AO_CONE_ENABLED 0
+
+/* 1 / BRICK_SIZE^3 at BRICK_SHIFT 2. Turns a brick's occupied-voxel count into
+   a density. Change with BRICK_SHIFT. */
+#define AO_INV_BRICK_VOLUME (1.0 / 64.0)
+
+/* Cones in the ring around the normal, plus one along it. Five total. */
+#define AO_RING_CONES 4
+
+/* The ring's tilt from the normal, as a cosine/sine pair. ~52 degrees puts the
+   ring near the centroid of the cosine-weighted hemisphere, so five cones cover
+   it about as evenly as five can. */
+#define AO_RING_COSINE 0.615
+#define AO_RING_SINE 0.788
+
+/* Samples per cone, and how fast the step grows. Geometric, so six steps from
+   AO_CONE_START reach ~114 voxels - far enough to feel a building, which the
+   twelve-tap neighbour test never could.
+
+   AO_CONE_START is 8 rather than 4 because of the brick resolution, and this is
+   the subtle part. A ring cone leaves at ~52 degrees from the normal, so near
+   the surface it travels mostly *along* it - and a brick is four voxels, so a
+   sample taken a few voxels out still lands in a brick containing the wall the
+   cone started on. A flat wall then reads as enclosed by itself. At 8 voxels a
+   ring sample is ~4.9 voxels clear of the surface along the normal, which is
+   more than a brick, so it is sampling somewhere else at last.
+
+   The near field this gives up is exactly what GetSkyVisibility's twelve-tap
+   neighbour test already covers, which is why the two are multiplied rather
+   than one replacing the other. */
+#define AO_CONE_STEPS 6
+#define AO_CONE_START 8.0
+#define AO_CONE_GROWTH 1.7
+
+/* How much a fully solid brick occludes per step. Under 1 because a cone step
+   samples one point of a footprint that is mostly not that point; tune by eye
+   against how heavy enclosed areas look. */
+#define AO_CONE_STRENGTH 0.35
+
+/* Where a cone starts, along the surface normal.
+
+   This was a full brick (4.0) and that was actively wrong on detailed
+   geometry: on a stepped wall, four voxels along a recessed face's normal
+   lands *inside* the ledge above it, so the cone began in solid rock and the
+   surface came out black. The artefact followed the steps, which is what
+   "full of black triangles" was.
+
+   Two voxels is enough to leave the surface without reaching a neighbour.
+   Escaping the surface's own *brick* is AO_CONE_START's job, not this one -
+   see below. */
+#define AO_SURFACE_OFFSET 2.0
 
 /* Sky colour for rays that leave the world without hitting anything or the
    ground plane. Becomes fog input in RENDERING_PLAN.md phase 6.1. */
@@ -83,17 +250,6 @@
 /* Cell crossings a ray can make inside one far-field brick: 3 axes x
    BRICK_SIZE cells, as BRICK_MAX_VOXEL_STEPS is for the window. */
 #define FARFIELD_MAX_CELL_STEPS 24
-
-/* How the far field is lit: exactly what VoxelRenderer.ps.hlsl does for a
-   surface whose shadow ray found nothing, and nothing else. No shadow ray and
-   no AO - at four voxels per cell there is no detail for either to land on, and
-   it is only ever seen at a distance.
-
-   Sharing AMBIENT_VALUE rather than picking a far-field constant is what keeps
-   the same hillside from changing brightness as it crosses the detail window's
-   edge. A tuned value here reads as a seam, which is how the first attempt at
-   this was found. */
-#define FARFIELD_AMBIENT AMBIENT_VALUE
 
 /* Pushed off the window's face before the far-field march starts, in world
    units, so that a ray leaving the detail window cannot re-enter the cell it

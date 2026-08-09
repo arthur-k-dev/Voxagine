@@ -13,6 +13,10 @@ RW_STRUCTURED_BUFFER(uint) voxelBrickData : register(u1);
 Texture2D<float4> particlePass : register(t1);
 Texture2D<float> particleDepthPass : register(t2);
 
+/* Light-space sun shadow map - RENDERING_PLAN.md 7.1a. Third texture pushed by
+   VoxelPass, so t3; the bindless model array below stays at t4. */
+Texture2D<float> sunShadowMap : register(t3);
+
 VOXEL_BUFFER voxelModelData[] : register(t4);
 
 struct PS_in
@@ -24,6 +28,9 @@ struct PS_in
 
 #include "SDFMarcher.hlsl"
 #include "AmbientOcclusion.hlsl"
+#include "AmbientCone.hlsl"
+#include "SunShadowLookup.hlsl"
+#include "Lighting.hlsl"
 
 FORCE_DEPTH_TEST
 float4 main(PS_in IN) : TAR_OUT
@@ -71,37 +78,56 @@ float4 main(PS_in IN) : TAR_OUT
         return float4(0.0, 0.0, 0.0, 0.0);
     }
 
-    /* Directional lighting */
+    /* Sun visibility. The shadow map is a fixed cost whatever the screen
+       resolution is, and PCSS on lookup gives a penumbra that widens with
+       distance to the occluder without firing a single ray - see
+       SunShadowLookup.hlsl. SUN_SHADOW_REFERENCE swaps in the exact cone of
+       rays it replaced, which is correct and unaffordable. */
     float difference = clamp(dot(marchDiffuse.Normal, -lightDirection.xyz), 0.0, 1.0);
-    float shadowMultiplier = difference * (1.0-AMBIENT_VALUE) + AMBIENT_VALUE;
+
+    float sunVisibility = 1.0;
 
     if (difference > 0.1)
 	{
-        /* Same budget as the primary ray, and at full stride. The 64-step,
-           2x-stride walk this replaces could not reach across the level and
-           stepped straight over single-voxel-thick occluders; its coarse
-           quantization is also what made phase 1's distance fade band. */
-        MarchResult marchLighting = MarchLight(
+#ifdef SUN_SHADOW_REFERENCE
+        sunVisibility = GetSunVisibilityByRays(
             marchDiffuse.SmoothPosition - lightDirection.xyz,
-            -lightDirection.xyz,
+            IN.NormScreenPosition.xy,
             maxBrickSteps
         );
 
-        if (marchLighting.Color.a > 0.0) {
-		 	shadowMultiplier = min(marchLighting.Distance * SHADOW_FADE_K * difference + AMBIENT_VALUE, 1.0);
-		}
+        /* Keeps t3 alive. This path never reads the shadow map, DXC strips an
+           unused texture out of the SPIR-V, and VoxelPass still pushes it - so
+           the pass binds a descriptor the reflected layout no longer has and
+           the run dies at startup. Multiplying by zero is the cheapest way to
+           make the reference switch a *shader* change rather than one that has
+           to be matched on the C++ side. */
+        sunVisibility += sunShadowMap.SampleLevel(s0, float2(0.5, 0.5), 0) * 0.0;
+#else
+        sunVisibility = GetSunVisibility(
+            marchDiffuse.SmoothPosition,
+            marchDiffuse.Normal,
+            IN.NormScreenPosition.xy
+        );
+#endif
     }
 
+    /* Sky visibility, which is what ambient occlusion actually measures.
+       Hit-time only, zero added per-step cost. Phase 7.1 replaces this with a
+       cone trace through the radiance pyramid. */
+    float skyVisibility = GetSkyVisibility(marchDiffuse.Position, marchDiffuse.Mask, marchDiffuse.SRDirection, marchDiffuse.Normal, marchDiffuse.UV);
+
+#if AO_CONE_ENABLED
+    skyVisibility *= GetConeSkyVisibility(marchDiffuse.SmoothPosition, marchDiffuse.Normal, IN.NormScreenPosition.xy);
+#endif
+
+    marchDiffuse.Color.xyz = ShadeSurface(marchDiffuse.Color.xyz, marchDiffuse.Normal, sunVisibility, skyVisibility);
+
     /* Fake specular "shine line" on lit voxel edges - see GetShineLine in
-       AmbientOcclusion.hlsl. Pulled forward from RENDERING_PLAN.md phase 5
-       step 6 since it only needs res.UV/res.Normal, which this phase's AO
-       work already populates. */
-    shadowMultiplier *= GetShineLine(marchDiffuse.Position, marchDiffuse.Normal, marchDiffuse.UV, lightDirection.xyz, difference);
-
-    /* Ambient occlusion - hit-time only, zero added per-step cost */
-    float4 ambient = GetAmbientOcclusion(marchDiffuse.Position, marchDiffuse.Mask, marchDiffuse.SRDirection, marchDiffuse.Normal, marchDiffuse.UV);
-
-    marchDiffuse.Color.xyz *= float3(shadowMultiplier, shadowMultiplier, shadowMultiplier) * ambient.xyz;
+       AmbientOcclusion.hlsl. It returns 1.0 for anything the sun does not
+       reach, so applying it to the whole shaded result rather than to the sun
+       term alone only ever brightens a rim that is already lit. */
+    marchDiffuse.Color.xyz *= GetShineLine(marchDiffuse.Position, marchDiffuse.Normal, marchDiffuse.UV, lightDirection.xyz, difference);
     marchDiffuse.Color.a = 1.0;
 
 #ifdef MARCH_STEP_DEBUG

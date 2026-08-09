@@ -14,7 +14,7 @@
 VoxelPass::VoxelPass(
 	PRenderContext* pContext, Shader* pVertex, Shader* pPixel, Sampler* pSampler,
 	Mapper* pVoxelMapper, Mapper* pBrickMapper, Buffer* pCameraBuffer, Buffer* pAABBBuffer,
-	View* pParticleTexture, View* pParticleDepthTexture
+	View* pParticleTexture, View* pParticleDepthTexture, View* pSunShadowTexture
 ) : PRenderPass(pContext)
 {
 	// Creates a screen render target (for each buffer, m_uiFrameCount)
@@ -51,6 +51,12 @@ VoxelPass::VoxelPass(
 	   identical between the two. */
 	RenderPassData.m_Textures.push_back(pParticleTexture);
 	RenderPassData.m_Textures.push_back(pParticleDepthTexture);
+
+	/* Sun shadow map at t3, when shadows are enabled. The ShadowLess variant
+	   declares nothing at t3, and pushing a texture a shader never names would
+	   put a descriptor in the layout with no binding to match it. */
+	if (pSunShadowTexture != nullptr)
+		RenderPassData.m_Textures.push_back(pSunShadowTexture);
 
 	RenderPassData.m_uiBindlessResourceCount = 1;
 	RenderPassData.m_BindlessSource = RenderPass::E_BINDLESS_SOURCE_MODELS;

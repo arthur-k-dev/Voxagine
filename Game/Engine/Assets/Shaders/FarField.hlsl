@@ -24,6 +24,8 @@
    back out in world units. FarFieldVolume.h holds the same three-space note on
    the C++ side. */
 
+#include "Lighting.hlsl"
+
 struct FarFieldResult
 {
 	float4 Color;
@@ -290,13 +292,17 @@ FarFieldResult MarchFarFieldFromWindow(float3 v3LevelOrigin, float3 v3Direction)
 	return result;
 }
 
-/* Ambient plus a single N.L term against the scene light. No shadow ray and no
-   AO - see FARFIELD_AMBIENT. */
-float4 ShadeFarField(FarFieldResult far) {
-	float fDifference = clamp(dot(far.Normal, -lightDirection.xyz), 0.0, 1.0);
-	float fLight = fDifference * (1.0 - FARFIELD_AMBIENT) + FARFIELD_AMBIENT;
+/* Exactly what the window's shaders compute for a surface that is unshadowed
+   and open to the sky, and nothing else - no shadow ray and no AO, because at
+   four voxels per cell there is no detail for either to land on.
 
-	return float4(far.Color.xyz * fLight, 1.0);
+   Sharing ShadeSurface rather than keeping a second formula here is what stops
+   the same hillside changing brightness as it crosses the window's boundary.
+   The first attempt at this phase used its own ambient constant and that seam
+   is how it was found (RENDERING_PLAN.md phase 4). It is also why the endless
+   ground plane goes through here. */
+float4 ShadeFarField(FarFieldResult far) {
+	return float4(ShadeSurface(far.Color.xyz, far.Normal, 1.0, 1.0), 1.0);
 }
 
 /* The whole background: far-field geometry, then the endless ground plane, then

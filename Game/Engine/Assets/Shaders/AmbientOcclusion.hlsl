@@ -51,18 +51,31 @@ float4 GetVoxelAO(float3 pos, float3 d1, float3 d2) {
 	return 1.0 - ao;
 }
 
-float4 GetAmbientOcclusion(float3 position, float3 mask, float3 srDirection, float3 normal, float2 uv) {
+/* How open this point is to the sky, in [0, 1]: 1 is unoccluded, 0 is a fully
+   enclosed corner. Feeds `ShadeSurface`'s sky term and nothing else.
+
+   This used to be `GetAmbientOcclusion`, which returned a colour and remapped
+   the same quantity into 0.75..1.0 with a `pow(x, 2.2)` on the end - a narrow
+   multiplier over the *whole* shaded result, sun included. Two things were
+   wrong with that and both are now the caller's business rather than being
+   baked in here: the range was arbitrary, and applying it to direct sunlight
+   made lit crevices dark, which they are not. Returning the raw visibility
+   lets Lighting.hlsl occlude only what AO actually occludes.
+
+   The pow(x, 1/3) that used to be here is **gone**. It softened the
+   interpolated corner term to fit that old narrow remap; against a raw
+   visibility it only washes the term out, which is most of why AO read as
+   weaker after the split. Shaping happens once now, in Lighting.hlsl's
+   SKY_AO_CURVE, rather than as two curves fighting each other. */
+float GetSkyVisibility(float3 position, float3 mask, float3 srDirection, float3 normal, float2 uv) {
 	float4 ambient = GetVoxelAO(position - mask * srDirection, mask.zxy, mask.yzx);
 
 	if (abs(normal.b) > 0.5)
 		uv = float2(uv.y, uv.x);
 
 	float interpolatedAO = lerp(lerp(ambient.z, ambient.w, uv.y), lerp(ambient.y, ambient.x, uv.y), uv.x);
-	interpolatedAO = pow(interpolatedAO, 1.0 / 3.0);
 
-	float color = 0.75 + interpolatedAO * 0.25;
-
-	return float4(pow(float3(color, color, color), float3(2.2, 2.2, 2.2)), 1);
+	return saturate(interpolatedAO);
 }
 
 /* Fake specular "shine line" - a brightness kick on the rim of a lit face

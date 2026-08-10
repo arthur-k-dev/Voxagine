@@ -17,12 +17,18 @@ SunShadowModelPass::SunShadowModelPass(
 	RenderPassData.m_Name = "Sun Shadow Models";
 	RenderPassData.m_TargetType = E_STATE_PIXEL_SHADER_RESOURCE;
 
-	/* Same fixed size as SunShadowPass's own target - the two are combined
-	   texel for texel in SunShadowCombine.ps.hlsl. */
+	/* Same size as SunShadowPass's own target - the two are combined texel for
+	   texel in SunShadowCombine.ps.hlsl. Settings::GetSunShadowResolution, not
+	   a compile-time constant - it is a player-facing quality setting, and
+	   VKRenderContext::ApplyRenderSettings resizes this pass (by name)
+	   alongside "Sun Shadow" and "Sun Shadow Combine" whenever it changes at
+	   runtime, not just at construction. */
+	const uint32_t uiResolution = pContext->GetPlatform()->GetApplication()
+		->GetSettings().GetSunShadowResolution();
+
 	RenderPassData.m_bUseScreenResolution = false;
 	RenderPassData.m_TargetSize = Vector2(
-		static_cast<float>(RenderContext::k_uiSunShadowResolution),
-		static_cast<float>(RenderContext::k_uiSunShadowResolution));
+		static_cast<float>(uiResolution), static_cast<float>(uiResolution));
 	RenderPassData.m_fRenderScale = 1.0f;
 
 	RenderPassData.m_TargetFormat = { E_R32_FLOAT };

@@ -1640,7 +1640,7 @@ void RenderContext::InitializeRenderLoop()
 			Shader* pCombinePixelShader = m_pShaders.back().get();
 
 			pSunShadowCombinePass = new SunShadowCombinePass(
-				Get(), pCombineVertexShader, pCombinePixelShader, pPointSampler,
+				Get(), pCombineVertexShader, pCombinePixelShader, pPointSampler, pCameraBuffer,
 				pSunShadowPass->GetTargetView(), pSunShadowModelPass->GetTargetView());
 
 			m_pRenderPasses.emplace(pSunShadowCombinePass->GetData().m_Name, std::unique_ptr<SunShadowCombinePass>(pSunShadowCombinePass));

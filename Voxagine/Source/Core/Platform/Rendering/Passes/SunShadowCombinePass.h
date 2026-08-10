@@ -4,6 +4,7 @@
 #include "Core/Platform/Rendering/RenderDefines.h"
 
 class Shader;
+class Buffer;
 
 /* DYNAMIC_MODELS_PLAN.md phase 4. Full-screen min() of SunShadowPass's world
  * target and SunShadowModelPass's dynamic-renderer target, into one map
@@ -17,6 +18,6 @@ class SunShadowCombinePass : public PRenderPass
 public:
 	SunShadowCombinePass(
 		PRenderContext* pContext, Shader* pVertex, Shader* pPixel, Sampler* pSampler,
-		View* pWorldShadowTexture, View* pModelShadowTexture
+		Buffer* pCameraBuffer, View* pWorldShadowTexture, View* pModelShadowTexture
 	);
 };

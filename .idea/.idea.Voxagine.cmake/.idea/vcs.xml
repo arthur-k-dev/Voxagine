@@ -2,5 +2,9 @@
 <project version="4">
   <component name="VcsDirectoryMappings">
     <mapping directory="" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/Build/Linux/Editor/Debug/_deps/rttr-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/Build/Linux/Editor/Release/_deps/rttr-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/Build/Linux/Game/Debug/_deps/rttr-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/Build/Linux/Game/Release/_deps/rttr-src" vcs="Git" />
   </component>
 </project>

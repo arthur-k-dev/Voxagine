@@ -1,4 +1,5 @@
 #include "Defines.hlsl"
+#include "CameraData.hlsl" // register(b0) - SUN_SHADOW_RESOLUTION reads renderQuality.w from here
 
 /* DYNAMIC_MODELS_PLAN.md phase 4. The world shadow map (SunShadow.ps.hlsl)
  * and the dynamic-model one (SunShadowModel.ps.hlsl) each hold, per

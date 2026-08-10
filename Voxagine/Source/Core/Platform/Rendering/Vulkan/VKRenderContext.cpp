@@ -420,16 +420,26 @@ void VKRenderContext::ApplyRenderSettings()
 
 	/* ShadowQuality, as the size of the map. Not skipped at SHQ_OFF: the pass
 	   is simply not drawn in that mode and the target it is not drawing into
-	   should be the small one. */
-	auto shadowEntry = m_pRenderPasses.find("Sun Shadow");
-
-	if (shadowEntry != m_pRenderPasses.end() && shadowEntry->second != nullptr)
+	   should be the small one.
+	 *
+	 * All three sun shadow targets, not just the world one - DYNAMIC_MODELS_PLAN.md
+	 * phase 4. SunShadowCombine.ps.hlsl samples "Sun Shadow" and "Sun Shadow
+	 * Models" texel for texel and only exists when shadows are enabled in the
+	 * first place, so the three have to stay the same size as each other or
+	 * the combine reads the wrong texels - and VoxelPass binds the combine
+	 * pass's own target as its shadow map, so that one has to resize too. */
+	for (const char* pShadowPassName : { "Sun Shadow", "Sun Shadow Models", "Sun Shadow Combine" })
 	{
+		auto shadowEntry = m_pRenderPasses.find(pShadowPassName);
+
+		if (shadowEntry == m_pRenderPasses.end() || shadowEntry->second == nullptr)
+			continue;
+
 		const uint32_t uiResolution = settings.GetSunShadowResolution();
 
 		shadowEntry->second->Resize(UVector2(uiResolution, uiResolution));
 
-		printf("[render] pass 'Sun Shadow' resized to %ux%u\n", uiResolution, uiResolution);
+		printf("[render] pass '%s' resized to %ux%u\n", pShadowPassName, uiResolution, uiResolution);
 	}
 
 	LogRenderSettings();

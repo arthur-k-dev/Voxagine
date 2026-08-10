@@ -34,8 +34,12 @@ VoxelModelPass::VoxelModelPass(
 	   this pass's output is sampled by the voxel pass, which is itself scaled,
 	   and the two have to agree on footprint (VoxelRenderer.ps.hlsl divides by
 	   voxelRenderScale when sampling the particle pair; the model pair is read
-	   the same way). */
+	   the same way). m_bFollowsResolutionScale is what makes that hold at
+	   runtime too, not just at construction: RenderContext::ApplyRenderSettings
+	   (VKRenderContext.cpp) re-reads and resizes every pass with this flag set
+	   when the player changes the setting, same as ParticlePass/VoxelPass. */
 	RenderPassData.m_fRenderScale = pContext->GetPlatform()->GetApplication()->GetSettings().GetResolutionScale();
+	RenderPassData.m_bFollowsResolutionScale = true;
 
 	RenderPassData.m_pVertexShader = pVertex;
 	RenderPassData.m_pPixelShader = pPixel;

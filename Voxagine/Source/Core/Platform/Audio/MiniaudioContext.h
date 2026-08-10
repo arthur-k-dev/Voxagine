@@ -21,10 +21,12 @@
  *    PCM and there are 12 of them; decoding music is not affordable on a phone
  *    and is not free on a desktop either.
  *
- * VOXAGINE_AUDIO_NULL_DEVICE=1 runs the whole backend on miniaudio's null
- * device: sounds still load and decode, the mixer still runs, nothing reaches
- * a speaker. That is what a headless capture or a CI run wants - it exercises
- * the audio path rather than skipping it, which AA_NONE does.
+ * **A --hidden run uses miniaudio's null device.** Sounds still load and decode
+ * and the mixer still runs; nothing reaches a speaker. That is what a headless
+ * capture or a CI run wants - it exercises the audio path rather than skipping
+ * it, which AA_NONE does - and it is implied by --hidden rather than opt-in
+ * because a benchmark has no business taking over the machine's audio output.
+ * VOXAGINE_AUDIO_NULL_DEVICE overrides in both directions when it is set.
  *
  * Channel handles handed out through the void* in the interface are validated
  * against m_Channels before use. The engine's channel bookkeeping is loose -

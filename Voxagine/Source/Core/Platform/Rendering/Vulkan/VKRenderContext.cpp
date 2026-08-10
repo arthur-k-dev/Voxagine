@@ -99,6 +99,10 @@ void VKRenderContext::Initialize()
 		return;
 	}
 
+	/* What the renderer is set to, before a single frame - a frame rate quoted
+	   without this says nothing now that every one of them is a setting. */
+	LogRenderSettings();
+
 	/* Decided before any command engine is created: their Initialize()
 	   reads this to decide whether to allocate query pools at all.
 
@@ -364,6 +368,101 @@ bool VKRenderContext::OnResize(uint32_t uiWidth, uint32_t uiHeight)
 	}
 
 	return true;
+}
+
+/* The two render settings that are image sizes rather than shader constants -
+ * RenderContext::ApplyRenderSettings says which and why. Reached from
+ * Settings::RenderQualityChanged, so it runs on any quality change and does
+ * nothing for most of them, which is cheaper than working out which changed.
+ *
+ * Every Resize below idles the device before reallocating, so this is not
+ * something to call per frame. It is called when a human moves a menu row. */
+void VKRenderContext::ApplyRenderSettings()
+{
+	if (!m_bBackendReady)
+		return;
+
+	Settings& settings = m_pPlatform->GetApplication()->GetSettings();
+
+	const float fResolutionScale = settings.GetResolutionScale();
+	const UVector2 resolution = GetRenderResolution();
+
+	for (auto& entry : m_pRenderPasses)
+	{
+		PRenderPass* pPass = entry.second.get();
+
+		if (pPass == nullptr)
+			continue;
+
+		/* ResolutionScale. The Voxel and Particle passes carry a copy of it
+		   taken at construction, and it has to be updated as well as acted on -
+		   the window-resize path above re-reads it from the pass rather than
+		   from Settings, so a stale copy would undo this on the next resize. */
+		if (pPass->GetData().m_bFollowsResolutionScale)
+		{
+			pPass->SetRenderScale(fResolutionScale);
+
+			const UVector2 target(
+				static_cast<uint32_t>(resolution.x * fResolutionScale),
+				static_cast<uint32_t>(resolution.y * fResolutionScale));
+
+			pPass->Resize(target);
+
+			/* Logged for the same reason VKRenderPass logs the size it creates
+			   its attachments at: a pass time is only comparable against another
+			   if you know how many pixels each was. A resolution change that
+			   silently did not take is indistinguishable from one that did and
+			   bought nothing, and both look like "the setting does nothing". */
+			printf("[render] pass '%s' resized to %ux%u (scale %.3f)\n",
+			       pPass->GetData().m_Name.c_str(), target.x, target.y, fResolutionScale);
+		}
+	}
+
+	/* ShadowQuality, as the size of the map. Not skipped at SHQ_OFF: the pass
+	   is simply not drawn in that mode and the target it is not drawing into
+	   should be the small one. */
+	auto shadowEntry = m_pRenderPasses.find("Sun Shadow");
+
+	if (shadowEntry != m_pRenderPasses.end() && shadowEntry->second != nullptr)
+	{
+		const uint32_t uiResolution = settings.GetSunShadowResolution();
+
+		shadowEntry->second->Resize(UVector2(uiResolution, uiResolution));
+
+		printf("[render] pass 'Sun Shadow' resized to %ux%u\n", uiResolution, uiResolution);
+	}
+
+	LogRenderSettings();
+}
+
+/* One line saying what the renderer is actually doing, on every change and once
+   at startup.
+ *
+ * It exists because a frame rate is meaningless without it. Every one of these
+ * is the player's to change now, so "13 fps" and "60 fps" can be the same build,
+ * the same device and the same scene - and on a phone the log is the only way to
+ * ask what a setting ended up as, since there is no console and the answer lives
+ * three layers down in PlayerPrefs. */
+void VKRenderContext::LogRenderSettings() const
+{
+	Settings& settings = m_pPlatform->GetApplication()->GetSettings();
+
+	static const char* const k_pShadow[] = { "off", "hard", "soft", "sharp" };
+	static const char* const k_pAmbient[] = { "off", "simple", "cone" };
+
+	const uint32_t uiShadow = static_cast<uint32_t>(settings.GetShadowQuality());
+	const uint32_t uiAmbient = static_cast<uint32_t>(settings.GetAmbientQuality());
+
+	printf("[render] shadows=%s (map %u) ao=%s bounce=%s reflections=%s fxaa=%s "
+	       "scale=%.2f vsync=%s\n",
+	       uiShadow < 4 ? k_pShadow[uiShadow] : "?",
+	       settings.GetSunShadowResolution(),
+	       uiAmbient < 3 ? k_pAmbient[uiAmbient] : "?",
+	       settings.IsBounceLightEnabled() ? "on" : "off",
+	       settings.IsReflectionEnabled() ? "on" : "off",
+	       settings.IsFXAAEnabled() ? "on" : "off",
+	       settings.GetResolutionScale(),
+	       settings.IsVSyncEnabled() ? "on" : "off");
 }
 
 void VKRenderContext::LoadShader(ShaderReference* pShaderReference)

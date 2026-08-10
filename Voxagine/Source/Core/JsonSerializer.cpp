@@ -1,6 +1,8 @@
 #include "pch.h"
 #include "JsonSerializer.h"
 
+#include <set>
+
 #include "Core/ECS/World.h"
 #include "Core/ECS/Entities/Camera.h"
 #include "Core/ECS/Systems/Physics/PhysicsSystem.h"
@@ -391,9 +393,32 @@ Component* JsonSerializer::ValueToComponent(World& world, Value& val, Entity* pE
 	std::string componentTypeName = val["ComponentType"].GetString();
 	rttr::type componentType = rttr::type::get_by_name(componentTypeName);
 
-	// Check if the type is valid before creation
+	/* An unknown component type used to be dropped in complete silence, and the
+	   entity came up looking right with a piece of its behaviour missing - a
+	   button that focuses and does nothing, a script that never runs. It is the
+	   same class of defect as Settings::FromJson applying zero properties: the
+	   file parsed, the entity built, nothing said otherwise.
+
+	   The usual cause is not a typo. It is a reflection-only translation unit
+	   whose RTTR_REGISTRATION never made it into the binary - see CLAUDE.md's
+	   note on Settings.cpp - so the name the world file asks for was never
+	   registered. `nm -C <binary> | grep <Type>` is the ten-second confirmation.
+
+	   Once per type rather than per entity: a world can hold hundreds of the
+	   same component and the second line adds nothing. */
 	if (!componentType.is_valid())
+	{
+		static std::set<std::string> reported;
+
+		if (reported.insert(componentTypeName).second)
+		{
+			printf("[serializer] unknown component type '%s' - it is not RTTR-registered "
+			       "in this binary, so every one of them is being dropped\n",
+			       componentTypeName.c_str());
+		}
+
 		return nullptr;
+	}
 
 	// Create Component using rttr type
 	rttr::variant componentVar = componentType.create({ pEntity });

@@ -2,6 +2,59 @@
 #define OPTIMIZED 1
 // #define DIRECT_LIGHTING 2
 
+/* --- Render quality, as settings rather than as constants -------------------
+ * Cone-traced ambient occlusion, the diffuse bounce, environment specular, the
+ * sun shadow's filter and its map size, and FXAA are all decided at *runtime*
+ * from Settings, which reaches these shaders as CameraData.hlsl's
+ * `renderQuality`. The accessors below are the whole interface; nothing outside
+ * this block should touch `renderQuality` directly.
+ *
+ * **Why runtime and not a compile-time profile.** The desktop and a phone want
+ * different answers by four or five times over - measured on a Galaxy S23
+ * (Adreno 740) in an arena, at half resolution, the frame was 13 fps with the
+ * Voxel pass at 48.0 ms and Sun Shadow at ~21.5 ms of ~77 ms, against the
+ * 16.6 ms that 60 fps costs. A build-time switch would have answered that, but
+ * it makes the trade the *build's* to make rather than the player's, and it
+ * leaves a desktop with a weak GPU no way down and a phone no way up. The
+ * platform decides only the defaults (Settings::ApplyPlatformRenderDefaults);
+ * the settings menu decides the rest.
+ *
+ * **What it costs to do it this way.** Every branch below is uniform across the
+ * whole draw, so the GPU never diverges on one - but the code on both sides is
+ * compiled in either way, and a large shader has lower occupancy than a small
+ * one whether or not it runs all of itself. On a tiler that is a real cost and
+ * it is the price of the setting being a setting. It has not been measured
+ * against a permutation build; if the voxel pass ever needs the last 10%, that
+ * is the experiment to run.
+ */
+#define QUALITY_SHADOW_OFF 0u
+#define QUALITY_SHADOW_HARD 1u
+#define QUALITY_SHADOW_SOFT 2u
+#define QUALITY_SHADOW_RAY 3u
+
+#define QUALITY_AMBIENT_OFF 0u
+#define QUALITY_AMBIENT_SIMPLE 1u
+#define QUALITY_AMBIENT_CONE 2u
+
+#define QUALITY_FLAG_BOUNCE 1u
+#define QUALITY_FLAG_REFLECTIONS 2u
+#define QUALITY_FLAG_FXAA 4u
+
+#define GetShadowQuality() ((uint)renderQuality.x)
+#define GetAmbientQuality() ((uint)renderQuality.y)
+#define HasQualityFlag(f) ((((uint)renderQuality.z) & (f)) != 0u)
+
+/* Side of the square sun shadow map, in texels - Settings::
+   GetSunShadowResolution, and it follows the shadow quality. It travels in the
+   constant buffer rather than being a constant on both sides because the Sun
+   Shadow pass's target is resized live when the setting changes, and a shader
+   holding the old number would sample the map with the wrong footprint and read
+   as shadows sliding off their casters. */
+#define SUN_SHADOW_RESOLUTION (renderQuality.w)
+
+/* Settings::ShadowRayDistance - SHQ_RAY only, 0 meaning unbounded. */
+#define SHADOW_RAY_DISTANCE (renderTuning.x)
+
 /* --- Soft shadows (RENDERING_PLAN.md phase 6.2) ---------------------------
    How far the four cone rays of a quad spread, as a tangent: a sample at the
    pattern's full radius leaves the light direction by about this much, so the
@@ -119,11 +172,10 @@
 // #define SUN_SHADOW_REFERENCE
 
 /* --- Sun shadow map (RENDERING_PLAN.md 7.1a) ------------------------------
-   Side of the square light-space depth map. Must equal
-   RenderContext::k_uiSunShadowResolution - change both or neither; they are
-   the SPIR-V/C++ contract for this pass exactly as BRICK_SHIFT is for the
-   brick grid. */
-#define SUN_SHADOW_RESOLUTION 1024.0
+   The side of the square light-space depth map used to be a constant here,
+   paired by hand with RenderContext::k_uiSunShadowResolution. It is
+   Settings::GetSunShadowResolution now and arrives as renderQuality.w - see
+   SUN_SHADOW_RESOLUTION at the top of this file. */
 
 /* Written for a light-space column that hits nothing. Has to exceed any depth
    a receiver can compute for itself, including one pushed a little past the
@@ -163,7 +215,14 @@
 
 /* Taps for the blocker search and for the filter itself. Both are 2D texture
    samples of a map that is at most 4 MiB, so they are nothing like the cost of
-   the rays they replace. */
+   the rays they replace.
+
+   Read only at SHQ_SOFT. The comment above is right that a tap is not a ray,
+   but there are forty of them on every pixel that faces the light at all, in
+   two dependent rounds - the blocker search decides the radius the filter
+   spreads over - and that is priced against a desktop where all forty hit in
+   L1. SHQ_HARD replaces the pair with one Gather; SunShadowLookup.hlsl has
+   what that keeps and what it gives up. */
 #define SUN_SHADOW_BLOCKER_TAPS 16
 #define SUN_SHADOW_FILTER_TAPS 24
 
@@ -211,8 +270,13 @@
 
    The filter alone was 4.6x the whole rest of the cone. Route B moves the
    pyramid into a 3D texture's mip chain, where a step is one SampleLevel and
-   the filter is the sampler's - the middle row is what that was priced at. */
-#define AO_CONE_ENABLED 1
+   the filter is the sampler's - the middle row is what that was priced at.
+
+   Now Settings::AmbientQuality rather than a constant: the cones run at
+   AMQ_CONE only. AMQ_SIMPLE keeps GetSkyVisibility, the twelve-neighbour test
+   these cones *multiply* rather than replace - so stepping down loses enclosure
+   and keeps contact darkening, and stepping to AMQ_OFF loses both. */
+#define AO_CONE_ENABLED (GetAmbientQuality() >= QUALITY_AMBIENT_CONE)
 
 /* Half-angle of a cone as a radius-over-distance ratio. Five cones covering a
    hemisphere is ~45 degrees each; a little under that keeps them from
@@ -240,32 +304,19 @@
    4-voxel brick containing the wall the cone started on. The finest level is
    two voxels, so a sample two voxels out is already reading somewhere else -
    and the 1-to-8 voxel gap that made walls read flat closes. */
-/* Halved on mobile. Not a guess dressed as a measurement: measured on a
-   Galaxy S23 (Adreno 740, arm64) at native resolution in an arena, the Voxel
-   pass alone was 108.8 ms of a ~138 ms frame - 79% of it, and fragment-bound.
-   Every cone step here is a dependent Texture3D sample (the next step's
-   position depends on the last), for *two* cones per shaded pixel - this one
-   and GetConeSpecular's SPEC_CONE_STEPS below - stacked on top of the primary
-   march and a filtered shadow-map lookup. Both cone traces are recent
-   additions (RENDERING_PLAN.md 7.3 diffuse bounce, 7.4 specular) added after
-   the desktop numbers elsewhere in this file were taken, and neither had been
-   measured on a phone before this - AO_CONE_ENABLED's last measured desktop
-   cost (2.44 -> 3.47 ms at 4K) predates both.
- *
- * This is the cheap, reversible half of the experiment: fewer steps costs
- * less per pixel with a shorter, coarser cone, in exchange for AO/bounce that
- * reads a little flatter up close. What it is *not* is a measured answer -
- * nobody has run a build with this change on the device it was written for.
- * Re-run the profiler capture (VOXAGINE_PROFILE_DEFAULT is already on for the
- * `benchmark` Android variant) and see whether "Voxel" actually moved before
- * tuning this further in either direction. See CMake/Shaders.cmake for why
- * this needs `cmake --build`, not an incremental one, to actually take
- * effect if a desktop build has run more recently in the same source tree. */
-#ifdef VOXAGINE_MOBILE
-#define AO_CONE_STEPS 4
-#else
+/* This was halved on mobile for a while, as a cheap reversible experiment
+   against the S23's 108.8 ms Voxel pass, and it is one number again.
+
+   The reason is that AmbientQuality now decides whether these cones run at all.
+   A platform that cannot afford them turns them off; one that can should get
+   the cone the constant above was tuned for, and a phone whose player has
+   deliberately switched them on should get the same cone rather than a quietly
+   shorter one. Two knobs for one question is how a setting comes to mean
+   something different on each platform.
+
+   The measurement that produced the halving is still the reason the setting
+   exists - see the top of this file. */
 #define AO_CONE_STEPS 7
-#endif
 #define AO_CONE_START 2.0
 #define AO_CONE_GROWTH 1.7
 
@@ -300,8 +351,16 @@
    to the AO cones; they are not, and a quarter-res pass would need a G-buffer
    the voxel pass does not produce - it shades inside the AABB proxies, so
    position and normal exist only at hit time. Full resolution, sharing the
-   trace, measured cheaper than the upsample machinery would have cost. */
-#define GI_BOUNCE_ENABLED 1
+   trace, measured cheaper than the upsample machinery would have cost.
+
+   Now Settings::BounceLightEnabled, and it is worth switching separately from
+   the cones rather than falling out of them: sharing the trace made it cheap
+   *relative to a second set of cones*, not cheap. ConeIncidentLight puts a
+   shadow-map fetch inside every cone sample that lands on something, so turning
+   only this off takes up to thirty-five texture reads a pixel out of the frame
+   while leaving occlusion exactly as it was. The specular cone runs it too, so
+   this reaches pixels the diffuse cones do not. */
+#define GI_BOUNCE_ENABLED HasQualityFlag(QUALITY_FLAG_BOUNCE)
 
 /* Irradiance gain on the gathered bounce, before the receiver's own albedo
    multiplies it. Linear - this is not one of 7.2's converted constants, it is
@@ -363,17 +422,15 @@
    because a reflection that is as wide as an ambient cone is not a reflection.
    The cost of narrowness is that it resolves to the fine pyramid levels for
    most of its length - see GetConeSpecular - which is why it gets its own,
-   shorter step count rather than AO_CONE_STEPS. */
-#define SPEC_CONE_ENABLED 1
+   shorter step count rather than AO_CONE_STEPS.
+
+   Now Settings::ReflectionsEnabled. SPEC_CUTOFF already keeps most of the
+   screen out of the loop, so this is the cheapest of the three cone traces to
+   keep - and the one whose absence is hardest to see, because it is a rim sheen
+   on grazing faces and GetShineLine still draws one of those for nothing. */
+#define SPEC_CONE_ENABLED HasQualityFlag(QUALITY_FLAG_REFLECTIONS)
 #define SPEC_CONE_APERTURE 0.12
-/* Halved on mobile - same reasoning and same caveat as AO_CONE_STEPS above.
-   GetConeSpecular already skips the loop below its Fresnel cutoff, so this
-   only shortens the cone for the grazing-angle pixels that actually run it. */
-#ifdef VOXAGINE_MOBILE
-#define SPEC_CONE_STEPS 3
-#else
 #define SPEC_CONE_STEPS 5
-#endif
 
 /* Reflectance at normal incidence. 0.04 is the standard dielectric value and
    this art is stone, wood, cloth and sand - there is no metal in it. */
@@ -401,9 +458,35 @@
    1 - 1/e of the surface is gone. At 0.0009 that is about 1100 units, so the
    level's own far edge - roughly 2000 out - is nearly sky, and the endless
    ground plane past it is entirely sky. */
-#define FOG_ENABLED 1
+/* Off. Aerial perspective was here to hide the seam where the resident window
+   ends and the far field takes over - it fades both toward the sky, so the
+   boundary between two differently-detailed representations stops being a line.
+   It is a handful of ALU and it was never a performance problem.
+
+   Removed because it is not wanted on this art: a voxel game reads as flat,
+   saturated colour and a distance haze washes that out, which is a look
+   decision rather than a cost one. The seam it was covering is now uncovered -
+   if it shows, this is the switch that was hiding it, not a new bug.
+
+   Left as a constant rather than deleted: the curve, its two tuned values and
+   the reasoning in Fog.hlsl are worth more kept than re-derived, and at 0 the
+   branch compiles out entirely. */
+#define FOG_ENABLED 0
 #define FOG_START 200.0
 #define FOG_DENSITY 0.0014
+
+/* --- Antialiasing in post -------------------------------------------------
+   Settings::FXAAEnabled, which until now was registered for serialization and
+   read by nothing at all.
+
+   Post processing runs at the window's full resolution while the scene target
+   is at Settings::ResolutionScale - 0.5 on a phone by default - so there FXAA
+   is smoothing edges a bilinear upscale has already smoothed, at four times the
+   pixel count of the pass that drew them. It also gates
+   IsSceneNeighbourhoodOpaque, the nine Loads that decide whether to run it at
+   all, which is the larger cost of the two on a pixel that turns out to be near
+   a silhouette. */
+#define FXAA_ENABLED HasQualityFlag(QUALITY_FLAG_FXAA)
 
 /* Sky colour for rays that leave the world without hitting anything or the
    ground plane, and the colour everything fades toward - see Fog.hlsl. */

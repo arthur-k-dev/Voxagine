@@ -65,6 +65,15 @@ float2 SunShadowTap(uint uiIndex, uint uiCount, float fRotation)
    Off the map is lit, exactly as the receiver lookup assumes. */
 float GetSunVisibilityAt(float3 v3Position)
 {
+	/* Nothing is drawing the map in these modes, so there is nothing to read -
+	   see GetSunVisibility below. The bounce cones have no brick-step budget of
+	   their own to march a real ray with, so an unshadowed sample is the answer
+	   here rather than a ray. */
+	const uint uiMapQuality = GetShadowQuality();
+
+	if (uiMapQuality == QUALITY_SHADOW_OFF || uiMapQuality == QUALITY_SHADOW_RAY)
+		return 1.0;
+
 	float3 v3Light = SunShadowToLightSpace(v3Position);
 	float2 v2UV = SunShadowUV(v3Light.xy);
 
@@ -76,8 +85,43 @@ float GetSunVisibilityAt(float3 v3Position)
 	return (v3Light.z - GI_SUN_TOLERANCE <= fDepth) ? 1.0 : 0.0;
 }
 
+/* SHQ_HARD: one point-sampled tap, compared, and that is the whole filter.
+ *
+ * This started as a Gather of the four texels bilinear filtering would use,
+ * each compared and the results blended by the bilinear weights - textbook PCF,
+ * and wrong for what this mode is *for*. Blending four binary comparisons
+ * produces a gradient, so "hard" shadows arrived with a soft edge a texel wide,
+ * which at a 256 map is several voxels of mush. A hard shadow should have a hard
+ * edge: the answer is lit or not lit.
+ *
+ * s0 is the point sampler on this pass, so the single SampleLevel below lands on
+ * exactly one texel with no filtering of its own. The edge is then the map's own
+ * texel grid - stair-stepped, and deliberately so. SHQ_SOFT is what to pick if
+ * that is not wanted.
+ *
+ * It is also cheaper than the Gather it replaces, which is the rare case of the
+ * better-looking answer for this art being the faster one. */
+float SunShadowPointTest(float2 v2UV, float fReceiver)
+{
+	const float fDepth = sunShadowMap.SampleLevel(s0, v2UV, 0);
+
+	return fDepth < fReceiver ? 0.0 : 1.0;
+}
+
 float GetSunVisibility(float3 v3Position, float3 v3Normal, float2 v2ScreenPosition)
 {
+	/* Settings::ShadowQuality, uniform across the draw. SHQ_OFF never touches
+	   the map at all - the Sun Shadow pass is not drawn in that mode and its
+	   target holds whatever it last wrote, so reading it would be reading a
+	   stale frame rather than an empty one. */
+	uint uiQuality = GetShadowQuality();
+
+	/* SHQ_RAY never reaches here - VoxelRenderer.ps.hlsl marches the ray itself,
+	   where the brick-step budget is in scope - and SHQ_OFF has no map to read.
+	   Both are handled by the caller; this is the map path only. */
+	if (uiQuality == QUALITY_SHADOW_OFF || uiQuality == QUALITY_SHADOW_RAY)
+		return 1.0;
+
 	/* Both the offset and the depth bias scale with how edge-on this surface is
 	   to the light. See SUN_SHADOW_GRAZING_SCALE - a constant is only ever right
 	   for a face pointing at the sun, and a vertical wall under a 48-degree sun
@@ -100,6 +144,14 @@ float GetSunVisibility(float3 v3Position, float3 v3Normal, float2 v2ScreenPositi
 	float fRotation = frac(52.9829189 * frac(dot(v2ScreenPosition, float2(0.06711056, 0.00583715)))) * 6.2831853;
 
 	float fReceiver = v3Light.z - SUN_SHADOW_BIAS * fGrazing;
+
+	/* One tap instead of the forty below. The bias above is kept in full: acne is
+	   a property of the map's texel footprint against the receiver's own depth,
+	   and it does not get smaller because the filter did. At SHQ_HARD the map is
+	   usually smaller too, so the footprint is *larger* and the grazing scale
+	   matters more here than it does at SHQ_SOFT. */
+	if (uiQuality == QUALITY_SHADOW_HARD)
+		return SunShadowPointTest(v2UV, fReceiver);
 
 	/* --- Blocker search ---------------------------------------------------
 	   Average depth of whatever is in front of this surface. The radius is the

@@ -51,6 +51,16 @@ public:
 
 	bool IsShuttingDown() const { return m_bExit; }
 
+	/* Persist whatever the player changed in the settings menu, and restore it
+	   at startup. See the definitions in Application.cpp for why this is
+	   PlayerPrefs rather than Settings.vgs, and for the three-layer order.
+
+	   SaveRenderSettings is public because the settings menu is the only thing
+	   that calls it - it writes the whole set on leaving the screen rather than
+	   on every keypress, so a player scrubbing through options is not writing a
+	   file per frame. */
+	void SaveRenderSettings();
+
 protected:
 	virtual void OnCreate() {};
 	virtual void OnUpdate() {};
@@ -68,6 +78,7 @@ protected:
 	PlayerPrefs m_PlayerPrefs;
 private:
 	void LoadSettings();
+	void LoadRenderSettings();
 
 #ifdef EDITOR
  	Editor m_Editor;

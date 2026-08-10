@@ -150,25 +150,75 @@ float4 main(PS_in IN) : TAR_OUT
            to be matched on the C++ side. */
         sunVisibility += sunShadowMap.SampleLevel(s0, float2(0.5, 0.5), 0) * 0.0;
 #else
-        sunVisibility = GetSunVisibility(
-            marchDiffuse.SmoothPosition,
-            marchDiffuse.Normal,
-            IN.NormScreenPosition.xy
-        );
+        /* SHQ_RAY - Settings.h. One exact occlusion test from the surface toward
+           the sun, through the same brick DDA the primary ray just used, instead
+           of a map: no resolution, no depth bias, no acne, and a silhouette that
+           is right to the voxel.
+
+           It is here rather than in SunShadowLookup.hlsl because the step budget
+           the march needs is a property of this pixel and is in scope here.
+
+           The origin is pushed one unit along the light exactly as
+           GetSunVisibilityByRays does - MarchShadow also treats an occupied
+           origin voxel as lit, which is what keeps a wall from shadowing
+           itself. */
+        if (GetShadowQuality() == QUALITY_SHADOW_RAY)
+        {
+            /* Settings::ShadowRayDistance, converted from world units into the
+               brick steps MarchShadow counts in. A ray that runs out reports
+               lit, which is what makes the limit a *distance* rather than a
+               truncation artefact: past it, nothing casts.
+
+               The +2 covers the partial bricks at each end - without it a limit
+               that is an exact multiple of the brick size stops one brick short
+               of what the player asked for. Zero means unbounded, and then this
+               is the window's own diagonal as before. */
+            int shadowBrickSteps = maxBrickSteps;
+
+            if (SHADOW_RAY_DISTANCE > 0.0)
+            {
+                shadowBrickSteps = min(maxBrickSteps,
+                    int(SHADOW_RAY_DISTANCE * BRICK_INV_SIZE) + 2);
+            }
+
+            sunVisibility = MarchShadow(
+                marchDiffuse.SmoothPosition - lightDirection.xyz,
+                -lightDirection.xyz,
+                shadowBrickSteps
+            );
+        }
+        else
+        {
+            sunVisibility = GetSunVisibility(
+                marchDiffuse.SmoothPosition,
+                marchDiffuse.Normal,
+                IN.NormScreenPosition.xy
+            );
+        }
 #endif
     }
 
-    /* Sky visibility, which is what ambient occlusion actually measures.
-       Hit-time only, zero added per-step cost. Phase 7.1 replaces this with a
-       cone trace through the radiance pyramid. */
-    float skyVisibility = GetSkyVisibility(marchDiffuse.Position, marchDiffuse.Mask, marchDiffuse.SRDirection, marchDiffuse.Normal, marchDiffuse.UV);
+    /* Sky visibility, which is what ambient occlusion actually measures, in the
+       three tiers Settings::AmbientQuality names.
+
+       AMQ_SIMPLE is GetSkyVisibility alone: the twelve-neighbour test, hit-time
+       only, no added per-step cost, and it sees exactly one voxel out. AMQ_CONE
+       multiplies it by the cone trace through the radiance pyramid, which is
+       what knows about a wall two metres away. AMQ_OFF leaves the term at 1 and
+       the sky lights everything equally.
+
+       The cones *multiply* rather than replace, which is why the two tiers are
+       nested rather than exclusive - see AmbientCone.hlsl's header. */
+    float skyVisibility = 1.0;
+
+    if (GetAmbientQuality() >= QUALITY_AMBIENT_SIMPLE)
+        skyVisibility = GetSkyVisibility(marchDiffuse.Position, marchDiffuse.Mask, marchDiffuse.SRDirection, marchDiffuse.Normal, marchDiffuse.UV);
 
     /* Bounce light from the same cones - RENDERING_PLAN.md 7.3. */
     float3 bounce = 0.0;
 
-#if AO_CONE_ENABLED
-    skyVisibility *= GetConeAmbient(marchDiffuse.SmoothPosition, marchDiffuse.Normal, IN.NormScreenPosition.xy, bounce);
-#endif
+    if (AO_CONE_ENABLED)
+        skyVisibility *= GetConeAmbient(marchDiffuse.SmoothPosition, marchDiffuse.Normal, IN.NormScreenPosition.xy, bounce);
 
     /* Linear radiance from here to EncodeSceneColor below - RENDERING_PLAN.md
        phase 7.2, and Color.hlsl for why the encode is here rather than at

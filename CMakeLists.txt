@@ -137,14 +137,19 @@ include(CMake/Shaders.cmake)
 # them. They are build output, so .gitignore excludes *.spv.
 set(VOXAGINE_SHADER_DEFINES "")
 
-if(VOXAGINE_MOBILE)
-    # Lets Defines.hlsl branch the two cone-trace step counts by platform - see
-    # its own comment for why the voxel pass is worth attacking there first.
-    # cmake/Shaders.cmake has the important caveat: this makes the compiled
-    # .spv depend on which platform was configured last, because the output
-    # path is not platform-qualified.
-    list(APPEND VOXAGINE_SHADER_DEFINES VOXAGINE_MOBILE)
-endif()
+# **No shader is compiled differently per platform any more, and that is worth
+# knowing rather than rediscovering.** VOXAGINE_MOBILE used to be passed to dxc
+# so Defines.hlsl could halve the two cone-trace step counts on a phone; the
+# render quality those knobs stood in for is a runtime setting now
+# (CameraData.hlsl's renderQuality), so the same .spv serves every platform and
+# the player - not the build - decides what it costs.
+#
+# That closes the hazard CMake/Shaders.cmake describes at length: the shader
+# output path is not platform-qualified, so whichever preset configured last
+# used to decide what every other preset's asset root picked up. With no
+# per-platform defines there is nothing to differ. Re-introducing one brings the
+# hazard back with it, so prefer a uniform in the constant buffer.
+
 
 voxagine_add_shaders(voxagine_shaders_game
     SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/Game/Engine/Assets/Shaders

@@ -54,37 +54,32 @@ void Application::Run()
 	m_LoggingSystem.Initialize(this);
 	m_Serializer.Initialize(m_pFileSystem);
 
+	/* Before LoadSettings, because the render settings the player chose live in
+	   here and LoadSettings is what restores them. It used to be initialized in
+	   VoxApp::OnCreate, which runs *after* Platform::Initialize has already
+	   built the render passes from Settings - too late to decide how large the
+	   shadow map should be. Nothing else about it moved: it is an Application
+	   member and always was. */
+	m_PlayerPrefs.Initialize(&m_Serializer, "PlayerPrefs.vgprefs");
+
 	LoadSettings();
 
-#ifdef EDITOR
-	/* The lock is a game presentation choice; the editor wants the whole
-	   window. Play mode still uses the camera's own aspect ratio. */
-	m_Settings.SetLockedAspectRatio(0.f);
-#elif defined(VOXAGINE_MOBILE)
-	/* Same on a phone, for a different reason. The lock letterboxes the frame
-	   to 16:9 whatever the display is, and a modern phone is nearer 20:9 - so
-	   a locked game would run with black bars down a fifth of the screen while
-	   the device it is on has no bars anywhere else. Rendering at the device's
-	   own ratio widens the view instead, which is the right trade for a
-	   top-down game: it shows more of the arena rather than stretching it.
+#if defined(EDITOR) || defined(VOXAGINE_MOBILE)
+	/* The 16:9 lock is a game presentation choice and neither of these wants
+	   it, for two different reasons.
 
-	   The screen is also the only place a phone has to put anything, so
-	   spending a fifth of it on nothing is worse here than on a monitor. */
-	m_Settings.SetLockedAspectRatio(0.f);
+	   The editor wants the whole window; play mode still uses the camera's own
+	   aspect ratio.
 
-	/* Half resolution by default, and this is the single biggest performance
-	   lever the engine has on a phone.
-	 *
-	 * Measured on a Galaxy S23 (Adreno 740) at native 2340x1080, in an arena:
-	 * the Voxel pass alone is 108.8 ms of a ~138 ms frame - 79% of it - and it
-	 * is fragment-bound, so it scales with pixel count almost linearly. Sun
-	 * Shadow (a fixed 1024^2) and the full-resolution post and UI passes do
-	 * not scale, which is why this is worth about 2.5x rather than 4x.
-	 *
-	 * Set from code rather than from Settings.vgs on purpose: that file is
-	 * shared with the desktop build, and a half-resolution default is very
-	 * much not wanted on a 4070. */
-	m_Settings.SetResolutionScale(0.5f);
+	   A phone is nearer 20:9, so a locked frame would run with black bars down
+	   a fifth of a screen that has no bars anywhere else. Rendering at the
+	   device's own ratio widens the view instead, which is the right trade for
+	   a top-down game: it shows more of the arena rather than stretching it.
+
+	   The render *quality* defaults that used to sit in this block are in
+	   Settings::ApplyPlatformRenderDefaults now, where the player's own choices
+	   can be layered on top of them. */
+	m_Settings.SetLockedAspectRatio(0.f);
 #endif
 
 	m_JobManager.Initialize();
@@ -357,6 +352,48 @@ void Application::LoadSettings()
 		GetSerializer().ToJsonFile(m_Settings, "Settings.vgs", true);
 	}
 
+	/* Render quality is three layers and the order is the whole design:
+	 *
+	 *   1. Settings.vgs, above  - shipped engine configuration, one file for
+	 *      every platform.
+	 *   2. the platform's defaults - what a phone should do differently, which
+	 *      cannot live in a file shared with the desktop build.
+	 *   3. the player's own choices from the settings menu, restored last so
+	 *      that anything they have deliberately changed survives both.
+	 *
+	 * A key the player has never touched is simply absent from PlayerPrefs, so
+	 * layer 3 is not "all settings" - it is exactly the ones they chose, which
+	 * is what lets a future change to the mobile defaults reach everyone who
+	 * never opened the menu. */
+	m_Settings.ApplyPlatformRenderDefaults();
+	LoadRenderSettings();
+
+	/* --render-quality, after all three layers so that it overrides them, and
+	   nothing is written back - the same contract --uncapped has. It exists so
+	   that pricing the shading levers does not mean editing PlayerPrefs and
+	   remembering to put it back; LaunchOptions.h has the full reasoning. */
+	switch (LaunchOptions::Get().GetQualityPreset())
+	{
+	case LaunchOptions::QualityPreset::E_LOW:
+		m_Settings.SetShadowQuality(SHQ_HARD);
+		m_Settings.SetAmbientQuality(AMQ_OFF);
+		m_Settings.SetBounceLight(false);
+		m_Settings.SetReflections(false);
+		m_Settings.SetFXAA(false);
+		break;
+
+	case LaunchOptions::QualityPreset::E_HIGH:
+		m_Settings.SetShadowQuality(SHQ_SOFT);
+		m_Settings.SetAmbientQuality(AMQ_CONE);
+		m_Settings.SetBounceLight(true);
+		m_Settings.SetReflections(true);
+		m_Settings.SetFXAA(true);
+		break;
+
+	case LaunchOptions::QualityPreset::E_UNSET:
+		break;
+	}
+
 	/* --uncapped, after the file so that it overrides it - RENDERING_PLAN.md
 	   phase 0b, and it should have been there from the start.
 
@@ -376,4 +413,82 @@ void Application::LoadSettings()
 		m_Settings.SetVSync(false);
 		m_Settings.SetFrameLimit(0.0);
 	}
+}
+
+/* The player's render choices, in PlayerPrefs rather than in Settings.vgs.
+ *
+ * Settings.vgs is shipped content - on Android it is a file inside the APK that
+ * gets extracted once per install, and rewriting it would be rewriting an
+ * asset. PlayerPrefs is already the per-install store this game writes to (the
+ * level unlocks live there), it is already on a writable path on every
+ * platform, and its "has the key" test is exactly the question layer 3 asks.
+ *
+ * The keys are prefixed and spelled out rather than generated from the RTTR
+ * property names: a renamed C++ member should not silently lose a player's
+ * settings, and a name in a save file is a compatibility promise. */
+namespace
+{
+	const char* k_pShadowQualityKey = "Render_ShadowQuality";
+	const char* k_pShadowResolutionKey = "Render_ShadowResolution";
+	const char* k_pShadowRayDistanceKey = "Render_ShadowRayDistance";
+	const char* k_pAmbientQualityKey = "Render_AmbientQuality";
+	const char* k_pBounceKey = "Render_BounceLight";
+	const char* k_pReflectionsKey = "Render_Reflections";
+	const char* k_pFXAAKey = "Render_FXAA";
+	const char* k_pResolutionScaleKey = "Render_ResolutionScale";
+	const char* k_pVSyncKey = "Render_VSync";
+}
+
+void Application::LoadRenderSettings()
+{
+	if (PlayerPrefs::HasKey(k_pShadowQualityKey))
+	{
+		m_Settings.SetShadowQuality(static_cast<ShadowQuality>(
+			PlayerPrefs::GetInt(k_pShadowQualityKey, static_cast<int32_t>(SHQ_SOFT))));
+	}
+
+	if (PlayerPrefs::HasKey(k_pShadowResolutionKey))
+	{
+		m_Settings.SetSunShadowResolution(static_cast<uint32_t>(
+			PlayerPrefs::GetInt(k_pShadowResolutionKey, 1024)));
+	}
+
+	if (PlayerPrefs::HasKey(k_pShadowRayDistanceKey))
+		m_Settings.SetShadowRayDistance(PlayerPrefs::GetFloat(k_pShadowRayDistanceKey, 0.f));
+
+	if (PlayerPrefs::HasKey(k_pAmbientQualityKey))
+	{
+		m_Settings.SetAmbientQuality(static_cast<AmbientQuality>(
+			PlayerPrefs::GetInt(k_pAmbientQualityKey, static_cast<int32_t>(AMQ_CONE))));
+	}
+
+	if (PlayerPrefs::HasKey(k_pBounceKey))
+		m_Settings.SetBounceLight(PlayerPrefs::GetInt(k_pBounceKey, 1) != 0);
+
+	if (PlayerPrefs::HasKey(k_pReflectionsKey))
+		m_Settings.SetReflections(PlayerPrefs::GetInt(k_pReflectionsKey, 1) != 0);
+
+	if (PlayerPrefs::HasKey(k_pFXAAKey))
+		m_Settings.SetFXAA(PlayerPrefs::GetInt(k_pFXAAKey, 1) != 0);
+
+	if (PlayerPrefs::HasKey(k_pResolutionScaleKey))
+		m_Settings.SetResolutionScale(PlayerPrefs::GetFloat(k_pResolutionScaleKey, 1.f));
+
+	if (PlayerPrefs::HasKey(k_pVSyncKey))
+		m_Settings.SetVSync(PlayerPrefs::GetInt(k_pVSyncKey, 0) != 0);
+}
+
+void Application::SaveRenderSettings()
+{
+	PlayerPrefs::SetInt(k_pShadowQualityKey, static_cast<int32_t>(m_Settings.GetShadowQuality()));
+	PlayerPrefs::SetInt(k_pShadowResolutionKey, static_cast<int32_t>(m_Settings.GetSunShadowResolution()));
+	PlayerPrefs::SetFloat(k_pShadowRayDistanceKey, m_Settings.GetShadowRayDistance());
+	PlayerPrefs::SetInt(k_pAmbientQualityKey, static_cast<int32_t>(m_Settings.GetAmbientQuality()));
+	PlayerPrefs::SetInt(k_pBounceKey, m_Settings.IsBounceLightEnabled() ? 1 : 0);
+	PlayerPrefs::SetInt(k_pReflectionsKey, m_Settings.IsReflectionEnabled() ? 1 : 0);
+	PlayerPrefs::SetInt(k_pFXAAKey, m_Settings.IsFXAAEnabled() ? 1 : 0);
+	PlayerPrefs::SetFloat(k_pResolutionScaleKey, m_Settings.GetResolutionScale());
+	PlayerPrefs::SetInt(k_pVSyncKey, m_Settings.IsVSyncEnabled() ? 1 : 0);
+
+	PlayerPrefs::Save();
 }

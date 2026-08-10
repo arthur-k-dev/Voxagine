@@ -12,6 +12,7 @@
 #include "Core/Application.h"
 #include "Core/Platform/Platform.h"
 #include "Core/Platform/Input/Temp/InputContextNew.h"
+#include "Core/LaunchOptions.h"
 
 RTTR_REGISTRATION
 {
@@ -34,6 +35,8 @@ Canvas::Canvas(World * pWorld)
 
 Canvas::~Canvas()
 {
+	GetWorld()->Resumed -= this;
+
 	OnDisabled();
 
 	GetWorld()->GetApplication()->GetPlatform().GetInputContext()->UnBindAction(m_InputBindings);
@@ -42,6 +45,11 @@ Canvas::~Canvas()
 void Canvas::Awake()
 {
 	Entity::Awake();
+
+	/* Popping a world that was pushed over this one resumes this one, and that
+	   is the only signal a canvas gets that it is in front again. */
+	GetWorld()->Resumed += Event<World*>::Subscriber(
+		std::bind(&Canvas::OnWorldResumed, this, std::placeholders::_1), this);
 
 	// Register all input actions
 	m_pInputContext = GetWorld()->GetApplication()->GetPlatform().GetInputContext();
@@ -155,6 +163,83 @@ void Canvas::Tick(float fDeltaTime)
 	}
 }
 
+/* See the header. The world stack is the authority on which menu is in front,
+   because nothing else is: the canvas underneath is still enabled, still
+   navigatable and still bound to the same input map. */
+void Canvas::OnWorldResumed(World*)
+{
+	TakeControl();
+}
+
+void Canvas::TakeControl()
+{
+	if (!IsInteractive())
+		return;
+
+	/* --- The input map ------------------------------------------------------
+	   This is the half that actually broke, and the mechanism is worth keeping.
+
+	   OnEnabled remembers whichever map happened to be active when this canvas
+	   was enabled, and OnDisabled hands that exact string back. For a single
+	   canvas over gameplay that is right. For a canvas pushed over *another
+	   canvas* it is only right if the map active at that moment was the one the
+	   canvas underneath wants - and on the main menu it is not: players join and
+	   move their characters there, so the active map is the gameplay one, and
+	   the settings screen dutifully saved it and restored it on the way out.
+	   The main menu came back with the stick moving a character and the pause
+	   button opening the pause menu, over a menu that no longer navigated.
+
+	   Restoring a remembered string cannot be made correct - the canvas that is
+	   in front is the only thing that knows what the map should be, so it says
+	   so itself rather than trusting what the one leaving put back. */
+	InputContextNew* pInput = GetWorld()->GetApplication()->GetPlatform().GetInputContext();
+
+	if (pInput != nullptr)
+	{
+		/* Re-record first: what is active now is what this canvas should hand
+		   back when it is the one going away. */
+		const InputBindingMapInformation* pActive = pInput->GetActiveBindingMap(BindingMapType::BMT_PLAYERCONTROLLERS);
+
+		if (pActive != nullptr && pActive->Name != UI_INPUT_LAYER)
+			m_PreviousBindingMap = pActive->Name;
+
+		pInput->SetActiveBindingMap(UI_INPUT_LAYER, BindingMapType::BMT_PLAYERCONTROLLERS);
+	}
+
+	TraceUI("take-control", nullptr);
+
+	/* --- The focus ----------------------------------------------------------
+	   A canvas focuses its default component once, from Start, and being pushed
+	   over does not disable it - so nothing re-runs OnEnabled on the way back
+	   and whatever state the focus was left in is what it comes back with.
+
+	   ChangeFocus refuses a null argument, so the fallback is picked here. */
+	UIComponent* pTarget = m_pFocusedComp != nullptr ? m_pFocusedComp : GetDefaultFocus();
+
+	if (pTarget == nullptr)
+		return;
+
+	/* Straight to OnFocus rather than through ChangeFocus: re-focusing what is
+	   already focused would otherwise fire OnFocusLost on it first, which plays
+	   the navigation sound and reads as a phantom keypress on returning to a
+	   menu. */
+	m_pFocusedComp = pTarget;
+	m_pFocusedComp->OnFocus();
+}
+
+bool Canvas::IsInteractive() const
+{
+	if (!IsEnabled() || !IsNavigatable())
+		return false;
+
+	World* pWorld = GetWorld();
+
+	if (pWorld == nullptr)
+		return false;
+
+	return pWorld->GetApplication()->GetWorldManager().GetTopWorld() == pWorld;
+}
+
 void Canvas::RegisterUIComponent(UIComponent* pUIComponent)
 {
 	std::vector<UIComponent*>::iterator position = std::find(m_UIComponents.begin(), m_UIComponents.end(), pUIComponent);
@@ -228,7 +313,7 @@ bool Canvas::IsNavigatable() const
 
 void Canvas::SetFocusPrevious()
 {
-	if (!IsEnabled() || !IsNavigatable())
+	if (!IsInteractive())
 		return;
 
 	if (m_pFocusedComp)
@@ -243,7 +328,7 @@ void Canvas::SetFocusPrevious()
 
 void Canvas::SetFocusNext()
 {
-	if (!IsEnabled() || !IsNavigatable())
+	if (!IsInteractive())
 		return;
 
 	if (m_pFocusedComp)
@@ -258,7 +343,7 @@ void Canvas::SetFocusNext()
 
 void Canvas::SetFocusUp()
 {
-	if (!IsEnabled() || !IsNavigatable())
+	if (!IsInteractive())
 		return;
 
 	if (m_pFocusedComp)
@@ -273,7 +358,7 @@ void Canvas::SetFocusUp()
 
 void Canvas::SetFocusDown()
 {
-	if (!IsEnabled() || !IsNavigatable())
+	if (!IsInteractive())
 		return;
 
 	if (m_pFocusedComp)
@@ -288,7 +373,7 @@ void Canvas::SetFocusDown()
 
 void Canvas::SetFocusLeft()
 {
-	if (!IsEnabled() || !IsNavigatable())
+	if (!IsInteractive())
 		return;
 
 	if (m_pFocusedComp)
@@ -303,7 +388,7 @@ void Canvas::SetFocusLeft()
 
 void Canvas::SetFocusRight()
 {
-	if (!IsEnabled() || !IsNavigatable())
+	if (!IsInteractive())
 		return;
 
 	if (m_pFocusedComp)
@@ -314,6 +399,28 @@ void Canvas::SetFocusRight()
 
 		ChangeFocus(nextFocusComp);
 	}
+}
+
+/* --ui-script traces these, because "the menu stopped responding" is three
+   different states that look identical in a screenshot: no focused component,
+   a focused component on a canvas that is no longer in front, or the wrong
+   binding map entirely. See LaunchOptions::GetUIScript. */
+void Canvas::TraceUI(const char* pWhat, const char* pDetail) const
+{
+	if (!LaunchOptions::Get().HasUIScript())
+		return;
+
+	const InputContextNew* pInput = m_pInputContext;
+
+	const InputBindingMapInformation* pActive = pInput != nullptr
+		? pInput->GetActiveBindingMap(BindingMapType::BMT_PLAYERCONTROLLERS)
+		: nullptr;
+
+	printf("[ui]   %-14s canvas='%s' %s map='%s'\n",
+	       pWhat,
+	       GetName().c_str(),
+	       pDetail != nullptr ? pDetail : "",
+	       pActive != nullptr ? pActive->Name.c_str() : "<none>");
 }
 
 void Canvas::ChangeFocus(UIComponent * pNextFocusComponent)
@@ -330,6 +437,8 @@ void Canvas::ChangeFocus(UIComponent * pNextFocusComponent)
 			m_pFocusedComp->OnFocus();
 			if (m_pPressedComp)
 				m_pFocusedComp->OnPressed();
+
+			TraceUI("focus", m_pFocusedComp->GetOwner()->GetName().c_str());
 		}
 	}
 	else
@@ -360,7 +469,7 @@ UIComponent * Canvas::GetDefaultFocus()
 
 void Canvas::OnPressed()
 {
-	if (!IsEnabled() || !IsNavigatable())
+	if (!IsInteractive())
 		return;
 
 	if (m_pFocusedComp)
@@ -372,7 +481,7 @@ void Canvas::OnPressed()
 
 void Canvas::OnPressedRepeat()
 {
-	if (!IsEnabled() || !IsNavigatable())
+	if (!IsInteractive())
 		return;
 
 	if (m_pFocusedComp)
@@ -381,7 +490,7 @@ void Canvas::OnPressedRepeat()
 
 void Canvas::OnReleased()
 {
-	if (!IsEnabled() || !IsNavigatable())
+	if (!IsInteractive())
 		return;
 
 	if(m_pFocusedComp)

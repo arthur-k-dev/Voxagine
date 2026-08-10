@@ -70,6 +70,26 @@ bool LaunchOptions::Parse(int argc, char** argv)
 		{
 			m_ScreenshotPass = argv[++i];
 		}
+		else if (strcmp(argv[i], "--ui-script") == 0 && bHasValue)
+		{
+			m_UIScript = argv[++i];
+		}
+		else if (strcmp(argv[i], "--ui-script-interval") == 0 && bHasValue)
+		{
+			m_uiUIScriptInterval = std::max(1u,
+				static_cast<uint32_t>(strtoul(argv[++i], nullptr, 10)));
+		}
+		else if (strcmp(argv[i], "--render-quality") == 0 && bHasValue)
+		{
+			const char* pValue = argv[++i];
+
+			if (strcmp(pValue, "low") == 0)
+				m_QualityPreset = QualityPreset::E_LOW;
+			else if (strcmp(pValue, "high") == 0)
+				m_QualityPreset = QualityPreset::E_HIGH;
+			else
+				fprintf(stderr, "[args] --render-quality wants 'low' or 'high', not '%s'\n", pValue);
+		}
 		else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0)
 		{
 			printf(
@@ -86,6 +106,13 @@ bool LaunchOptions::Parse(int argc, char** argv)
 				"  --screenshot <path>     write the last frame as a binary PPM and exit\n"
 				"  --screenshot-pass <name>  which pass's target to capture\n"
 				"                          (default \"Post Processing\"; try \"Voxel\", \"Sun Shadow\")\n"
+				"  --ui-script <seq>       comma-separated menu presses fed through SDL, one per\n"
+				"                          --ui-script-interval frames: up down left right confirm\n"
+				"                          back wait. Also traces focus and input-map changes\n"
+				"  --ui-script-interval <n>  frames between presses (default 30)\n"
+				"  --render-quality <p>    'low' (the mobile defaults) or 'high' (the full suite),\n"
+				"                          instead of whatever the player last chose. Does not\n"
+				"                          touch ResolutionScale - use --size for pixel count\n"
 				"\n"
 				"A benchmark or a look, without touching any file or taking the display:\n"
 				"  BitBuster --hidden --uncapped --size 3840x2160 --frames 600 --map Content/Worlds/...\n");

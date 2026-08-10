@@ -120,13 +120,15 @@ float4 AmbientConeTrace(float3 v3Origin, float3 v3Direction, float3 v3InvWorld)
 		   rather than needing a distance weight. */
 		float fTransmittance = 1.0 - fOcclusion;
 
-#if GI_BOUNCE_ENABLED
 		/* Skipped where there is nothing to bounce off, which is most steps of
 		   most cones on open ground - and it is the shadow map tap inside
-		   ConeIncidentLight that this is really skipping. */
-		if (v4Cell.a > 0.0)
+		   ConeIncidentLight that this is really skipping.
+
+		   The setting test is first because it is uniform across the draw,
+		   which lets the whole wave skip the fetch rather than each lane
+		   deciding on its own cell. */
+		if (GI_BOUNCE_ENABLED && v4Cell.a > 0.0)
 			v3Radiance += (fTransmittance * AO_CONE_STRENGTH) * v4Cell.rgb * ConeIncidentLight(v3Sample);
-#endif
 
 		fOcclusion += fTransmittance * v4Cell.a * AO_CONE_STRENGTH;
 
@@ -156,7 +158,12 @@ float4 AmbientConeTrace(float3 v3Origin, float3 v3Direction, float3 v3InvWorld)
    wants; a constant gain reads as the whole surface being wet. */
 float3 GetConeSpecular(float3 v3Position, float3 v3Normal, float3 v3View)
 {
-#if SPEC_CONE_ENABLED
+	/* Settings::ReflectionsEnabled, uniform across the draw, so this leaves
+	   before the Fresnel term rather than after it - the whole wave returns
+	   together and nothing below is reached at all. */
+	if (!SPEC_CONE_ENABLED)
+		return 0.0;
+
 	float fNdotV = saturate(dot(v3Normal, -v3View));
 	float fFresnel = SPEC_F0 + (1.0 - SPEC_F0) * pow(1.0 - fNdotV, 5.0);
 
@@ -201,9 +208,6 @@ float3 GetConeSpecular(float3 v3Position, float3 v3Normal, float3 v3View)
 	v3Radiance += (1.0 - fOcclusion) * SrgbToLinear(SKY_COLOR.rgb) * SKY_LIGHT_COLOR;
 
 	return v3Radiance * (fFresnel * SPEC_STRENGTH);
-#else
-	return 0.0;
-#endif
 }
 
 /* How open this point is to the sky, 0..1 - the same contract as the

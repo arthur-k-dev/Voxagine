@@ -24,6 +24,8 @@ public:
 	virtual bool Present() override;
 
 	virtual bool OnResize(uint32_t uiWidth, uint32_t uiHeight) override;
+	virtual void ApplyRenderSettings() override;
+	void LogRenderSettings() const;
 
 	/* Android destroys the app's ANativeWindow while backgrounded - the same
 	   handle the live VkSurfaceKHR was created from - so the surface does not

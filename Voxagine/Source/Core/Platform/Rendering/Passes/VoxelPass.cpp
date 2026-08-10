@@ -28,6 +28,7 @@ VoxelPass::VoxelPass(
 	RenderPassData.m_uiVertexCount = 14;
 	RenderPassData.m_uiInstanceCount = 0;
 	RenderPassData.m_fRenderScale = pContext->GetPlatform()->GetApplication()->GetSettings().GetResolutionScale();
+	RenderPassData.m_bFollowsResolutionScale = true;
 	RenderPassData.m_pVertexShader = pVertex;
 	RenderPassData.m_pPixelShader = pPixel;
 	RenderPassData.m_bEnableDepth = true;

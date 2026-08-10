@@ -39,6 +39,11 @@ ParticlePass::ParticlePass(
 	RenderPassData.m_uiVertexCount = 24;
 	RenderPassData.m_uiInstanceCount = 0;
 	RenderPassData.m_fRenderScale = pContext->GetPlatform()->GetApplication()->GetSettings().GetResolutionScale();
+
+	/* Has to move with the Voxel pass: VoxelRenderer.ps.hlsl samples this
+	   target at `viewport.xy * voxelRenderScale`, so a scale the two passes
+	   disagree on reads the particle image at the wrong footprint. */
+	RenderPassData.m_bFollowsResolutionScale = true;
 	RenderPassData.m_pVertexShader = pVertex;
 	RenderPassData.m_pPixelShader = pPixel;
 	RenderPassData.m_bEnableDepth = true;

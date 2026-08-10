@@ -35,7 +35,12 @@ float main(float4 v4Position : POS_OUT) : TAR_OUT
 	/* Light-space UV of this texel's centre, then the world-space point it
 	   names on the window's near plane. shadowRect is (minU, minV, sizeU,
 	   sizeV) and shadowDepth.x is the near plane's own light-space depth. */
-	float2 v2UV = v4Position.xy / float(SUN_SHADOW_RESOLUTION);
+	/* SUN_SHADOW_RESOLUTION is Settings::GetSunShadowResolution arriving in the
+	   constant buffer now, not a compile-time constant - the pass's target is
+	   resized live when the shadow quality changes. It is always the size this
+	   draw is actually covering, because RenderContext resizes the target and
+	   uploads the number in the same place. */
+	float2 v2UV = v4Position.xy / SUN_SHADOW_RESOLUTION;
 
 	float2 v2Light = shadowRect.xy + v2UV * shadowRect.zw;
 

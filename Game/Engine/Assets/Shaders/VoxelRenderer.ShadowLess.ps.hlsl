@@ -105,14 +105,18 @@ float4 main(PS_in IN) : TAR_OUT
        casts no shadow ray at all. */
     float difference = clamp(dot(marchDiffuse.Normal, -lightDirection.xyz), 0.0, 1.0);
 
-    float skyVisibility = GetSkyVisibility(marchDiffuse.Position, marchDiffuse.Mask, marchDiffuse.SRDirection, marchDiffuse.Normal, marchDiffuse.UV);
+    /* Settings::AmbientQuality's three tiers, identical to
+       VoxelRenderer.ps.hlsl's - that file's comment is the one to read. */
+    float skyVisibility = 1.0;
+
+    if (GetAmbientQuality() >= QUALITY_AMBIENT_SIMPLE)
+        skyVisibility = GetSkyVisibility(marchDiffuse.Position, marchDiffuse.Mask, marchDiffuse.SRDirection, marchDiffuse.Normal, marchDiffuse.UV);
 
     /* Bounce light from the same cones - RENDERING_PLAN.md 7.3. */
     float3 bounce = 0.0;
 
-#if AO_CONE_ENABLED
-    skyVisibility *= GetConeAmbient(marchDiffuse.SmoothPosition, marchDiffuse.Normal, IN.NormScreenPosition.xy, bounce);
-#endif
+    if (AO_CONE_ENABLED)
+        skyVisibility *= GetConeAmbient(marchDiffuse.SmoothPosition, marchDiffuse.Normal, IN.NormScreenPosition.xy, bounce);
 
     /* Linear radiance until EncodeSceneColor - RENDERING_PLAN.md phase 7.2. */
     float3 v3Radiance = ShadeSurface(marchDiffuse.Color.xyz, marchDiffuse.Normal, 1.0, skyVisibility, bounce);

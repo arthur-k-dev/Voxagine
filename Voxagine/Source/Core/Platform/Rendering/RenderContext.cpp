@@ -59,12 +59,29 @@ void RenderContext::SetFadeValue(float fValue)
 
 RenderContext::~RenderContext()
 {
+	/* Settings is an Application member and outlives every render context, so
+	   a subscription left behind here is a call into freed memory the next time
+	   somebody changes a setting. Only reachable if a context is destroyed
+	   without the application following it, which the editor's play mode is
+	   close enough to that it is not worth relying on the order. */
+	if (m_pPlatform != nullptr && m_pPlatform->GetApplication() != nullptr)
+	{
+		Settings& settings = m_pPlatform->GetApplication()->GetSettings();
+
+		settings.RenderQualityChanged -= this;
+		settings.FullscreenChanged -= this;
+	}
 }
 
 void RenderContext::Initialize()
 {
 	Settings& settings = m_pPlatform->GetApplication()->GetSettings();
 	settings.FullscreenChanged += Event<bool>::Subscriber(std::bind(&RenderContext::OnFullscreenChanged, this, std::placeholders::_1), this);
+
+	/* The settings menu writes straight into Settings and does not know a
+	   renderer exists; this is what turns a changed value into resized
+	   attachments. See ApplyRenderSettings for what actually needs it. */
+	settings.RenderQualityChanged += Event<>::Subscriber(std::bind(&RenderContext::ApplyRenderSettings, this), this);
 
 	m_bIsFullscreen = settings.IsFullscreen();
 
@@ -453,6 +470,35 @@ uint32_t RenderContext::ValidateVoxelPyramid()
 void RenderContext::UploadVoxelPyramid(PCommandEngine* pEngine)
 {
 	if (pEngine == nullptr || m_pPyramidView == nullptr || m_pPyramidStaging == nullptr)
+		return;
+
+	/* Nothing samples the pyramid unless a cone is traced through it, and the
+	   only three that do are cone AO, the diffuse bounce and the environment
+	   specular. With all three off this was still copying its dirty boxes into
+	   a 3D texture every frame for no reader: measured on a Galaxy S23 at
+	   exactly those settings, `Voxel Pyramid Upload` was 0.97 ms of a 19.1 ms
+	   frame - 5% of the budget spent on an image nothing looked at.
+	 *
+	 * The mirror and the dirty set are still maintained on the CPU, which is
+	 * what makes this safe to skip rather than merely cheap: VoxelBrickGrid
+	 * keeps accumulating dirty regions while this is not draining them, so
+	 * turning AO back on mid-frame uploads everything outstanding on the next
+	 * pass rather than showing a stale texture. TakeDensityRegions' "the whole
+	 * thing is wrong" path covers the case where that backlog grows past the
+	 * point of being worth issuing box by box.
+	 *
+	 * Deliberately not gated on the *pass* existing - the voxel shader always
+	 * declares the texture and the pass always binds it, because those are
+	 * startup decisions and this is a per-frame one. An unread texture holding
+	 * stale densities is fine; a descriptor pointing at nothing is not. */
+	const Settings& settings = m_pPlatform->GetApplication()->GetSettings();
+
+	const bool bPyramidRead =
+		settings.GetAmbientQuality() >= AMQ_CONE ||
+		settings.IsBounceLightEnabled() ||
+		settings.IsReflectionEnabled();
+
+	if (!bPyramidRead)
 		return;
 
 	if (m_pPyramidView->GetNative() == nullptr || m_pPyramidStaging->GetNative() == nullptr)
@@ -891,12 +937,49 @@ bool RenderContext::Present()
 
 				/* World units per shadow texel on each axis, which is what a
 				   PCSS filter radius has to be converted through, plus the
-				   plane the march starts from. */
+				   plane the march starts from.
+
+				   The resolution is the setting's, not a constant: the map is
+				   half size at SHQ_HARD, so a texel covers twice the world and
+				   a filter radius quoted in texels means twice as much. Reading
+				   a fixed 1024 here would put every shadow edge at half the
+				   width it should be the moment the quality dropped. */
+				const float fShadowResolution =
+					static_cast<float>(settings.GetSunShadowResolution());
+
 				pCameraBuffer->AddConstantData(Vector4(
 					fMinW,
-					fSizeU / static_cast<float>(k_uiSunShadowResolution),
-					fSizeV / static_cast<float>(k_uiSunShadowResolution),
+					fSizeU / fShadowResolution,
+					fSizeV / fShadowResolution,
 					fMaxW - fMinW));
+			}
+
+			/* Render quality - CameraData.hlsl's renderQuality, and Settings is
+			   the authority on every component. Uploaded unconditionally rather
+			   than on a change flag: the buffer is rewritten field by field
+			   whenever anything in it moves, so a conditional append would
+			   shift every field after it on the frames it skipped. */
+			{
+				uint32_t uiFlags = 0;
+
+				if (settings.IsBounceLightEnabled())
+					uiFlags |= 1u;
+
+				if (settings.IsReflectionEnabled())
+					uiFlags |= 2u;
+
+				if (settings.IsFXAAEnabled())
+					uiFlags |= 4u;
+
+				pCameraBuffer->AddConstantData(Vector4(
+					static_cast<float>(settings.GetShadowQuality()),
+					static_cast<float>(settings.GetAmbientQuality()),
+					static_cast<float>(uiFlags),
+					static_cast<float>(settings.GetSunShadowResolution())));
+
+				/* CameraData.hlsl's renderTuning. */
+				pCameraBuffer->AddConstantData(Vector4(
+					settings.GetShadowRayDistance(), 0.f, 0.f, 0.f));
 			}
 
 			pCameraBuffer->Allocate();
@@ -944,8 +1027,17 @@ bool RenderContext::Present()
 
 		/* The voxel pass samples this one's target at t3, so it has to be
 		   complete first - same ordering constraint as the particle targets
-		   above, and the same reason there is one render pass instance each. */
-		if (pSunShadowPass != nullptr)
+		   above, and the same reason there is one render pass instance each.
+
+		   Skipped entirely at SHQ_OFF and SHQ_RAY, which is the whole point of
+		   both modes:
+		   this pass is one full march of the resident window per texel and
+		   costs the same whether or not anything reads it. The target is left
+		   holding whatever it last wrote rather than being cleared to "lit" -
+		   the lookup returns 1.0 without touching it, so its contents cannot be
+		   observed, and clearing a megapixel target every frame to say nothing
+		   would be paying a fraction of the cost this mode exists to avoid. */
+		if (pSunShadowPass != nullptr && settings.NeedsSunShadowMap())
 		{
 			pVDirectEngine->Begin(pSunShadowPass);
 			pVDirectEngine->Draw(pSunShadowPass);
@@ -1470,6 +1562,7 @@ void RenderContext::InitializeRenderLoop()
 			pVertexShader,
 			pPixelShader,
 			pLinearSampler,
+			pPointSampler,
 			pCameraBuffer,
 			m_pVoxelMapper,
 			m_pFarFieldMapper,

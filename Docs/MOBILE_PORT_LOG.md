@@ -964,3 +964,313 @@ asset root picks up next, silently. Always do a real `cmake --build` for the
 platform you are about to run before running it; an incremental "no work to
 do" from Ninja does not mean the bytes are right. `CMake/Shaders.cmake` has
 the full reasoning at the top of `voxagine_add_shaders`.
+
+---
+
+## Graphics settings, because 60 fps on a phone is a trade somebody has to make
+
+Reported as "fix the FPS on Android, aim for 60 — GI, AO and such are probably
+too heavy and shadows can be much simpler." The diagnosis was right and the
+first implementation of it was wrong in a way worth recording.
+
+### What the arithmetic says, before any code
+
+The S23 numbers from the session above: **13 fps**, Voxel 48.0 ms, Sun Shadow
+~21.5 ms, everything else ~7.5 ms, of a ~77 ms frame — already at
+`ResolutionScale` 0.5. 60 fps is **16.6 ms for all of it**. That is not a
+tuning problem. Three features have to stop happening:
+
+- **Cone-traced AO** is five cones of `AO_CONE_STEPS` samples each — ~20
+  `Texture3D` fetches per shaded pixel whose addresses are known only one step
+  at a time, which is the worst shape a mobile texture unit can be handed.
+- **The diffuse bounce** shares those cones, so it looked free. It is not:
+  `ConeIncidentLight` puts a **shadow-map fetch inside every cone sample that
+  lands on something**, so it is up to thirty-five more texture reads a pixel,
+  and the specular cone runs it as well.
+- **PCSS** is 16 blocker taps deciding the radius for 24 filter taps — forty
+  fetches in two dependent rounds, on every pixel facing the light, priced
+  against a desktop where all forty hit in L1.
+
+And the Sun Shadow pass is one full march of the resident window **per texel**,
+so its cost is exactly its resolution squared and nothing else. At 1024² it was
+the second largest item in the frame while drawing a 4 MiB image.
+
+### The first attempt was a build-time profile, and it was rejected
+
+A `VOXAGINE_LOW_QUALITY_SHADING` CMake option, defaulting on for mobile,
+switching all of the above through `#ifdef`s in `Defines.hlsl`. It would have
+worked. It was rejected on sight and correctly:
+
+> "i dont think we should hack with ifdefs, there should be render settings
+> that are tweakable in a settings option in the main menu and pause menu."
+
+The objection is not stylistic. A build-time profile makes the trade the
+*build's* to make: a desktop with a weak GPU has no way down and a phone has no
+way up, and the one machine that can actually answer "is this fast enough" —
+the one it is running on — is the one with no say. It also means two binaries
+where the difference between them is invisible in the source you are reading.
+
+### What is there instead
+
+**Every graphics setting is a runtime setting, read from the camera constant
+buffer each frame.** `CameraData.hlsl` grew a `renderQuality` float4 and
+`Defines.hlsl` wraps it in named accessors; `AO_CONE_ENABLED`,
+`GI_BOUNCE_ENABLED`, `SPEC_CONE_ENABLED`, `SUN_SHADOW_PCSS`, `FXAA_ENABLED` and
+`SUN_SHADOW_RESOLUTION` all became expressions over it rather than constants.
+Changing one takes effect on the next frame with no pipeline rebuild.
+
+| setting | values | desktop default | mobile default |
+|---|---|---|---|
+| Shadows | Off / Hard / Soft | Soft | **Hard** |
+| Ambient occlusion | Off / Simple / Cone | Cone | **Simple** |
+| Bounce light | Off / On | On | **Off** |
+| Reflections | Off / On | On | **Off** |
+| Anti-aliasing | Off / On | On | **Off** |
+| Resolution | 50 / 65 / 80 / 100% | 100% | **50%** |
+| V-Sync | Off / On | from `Settings.vgs` | from `Settings.vgs` |
+
+Three things are worth knowing about the pieces:
+
+- **`SHQ_HARD` is one `GatherRed`.** The four texels bilinear filtering would
+  have used, each compared against the receiver on its own, blended by the
+  bilinear weights — one texture instruction for a smoothly varying edge.
+  Comparing each and blending is the whole trick; averaging four depths and
+  comparing once is meaningless, because the mean of "5 units away" and "900
+  units away" describes nothing in the scene. What it gives up is contact
+  hardening: every edge is one texel of the map wide, everywhere.
+- **`SHQ_HARD` also halves the map**, 1024 → 512, which is a quarter of the
+  marches. `RenderContext::ApplyRenderSettings` resizes the target live and the
+  resolution travels in the constant buffer, because a shader holding the old
+  number samples with the wrong footprint and reads as shadows sliding off
+  their casters.
+- **`SHQ_OFF` does not draw the pass at all** and leaves the target holding
+  whatever it last wrote. The lookup returns 1.0 without touching it, so the
+  contents cannot be observed — clearing a megapixel target every frame to say
+  "nothing here" would be paying a fraction of the cost the mode exists to
+  avoid.
+
+**`Settings::ApplyPlatformRenderDefaults` is the only place a platform decides
+anything**, and it is a *default*: the order is `Settings.vgs` (shipped, one
+file for every platform) → platform defaults → the player's own choices from
+PlayerPrefs. A key the player never touched is simply absent, so changing the
+mobile defaults later still reaches everyone who never opened the menu.
+
+### The settings screen
+
+`SettingsCanvas` (`Game/Source/UI/Settings/`), a `Canvas` subclass built
+entirely in code out of `TextRenderer` rows. Up/Down moves, **Left/Right change
+the focused row's value** — which is why it is a Canvas subclass and not a
+component, since `Canvas::SetFocusLeft/Right` are the virtuals that decide what
+a horizontal press means. Confirm cycles a value forward, so a pad with a stick
+and one button is enough. `BACK` saves to PlayerPrefs and pops.
+
+**It is text because there is no settings art in this project** and every other
+menu here is authored as three sprite PNGs per button. Text needs none, reads
+at any resolution, and can name a setting that did not exist when the art was
+drawn; what it does not do is look like the rest of the game. If art appears,
+the row list is the part worth keeping.
+
+It lives in a new `Settings_Menu.wld`, **pushed** rather than switched to —
+`World::OpenWorld(path, false)`, the same call `Player.cpp` uses for the pause
+menu. `WorldSwitch` *replaces* the world, which would throw away the live game
+underneath the pause menu. Reached from a `GRAPHICS` row in the pause menu, and
+from the main menu's existing Settings screen (the Controls canvas), so the
+controls page stays reachable.
+
+**Touch still cannot drive it**, exactly as it cannot drive any menu here.
+Nothing in this engine hit-tests a screen point to a UI component; a gamepad
+works today. That is the touch-native UI initiative's problem, not this
+screen's.
+
+### Measured, on a desktop, which is not the machine with the problem
+
+`--render-quality low|high` applies a whole preset over the platform defaults
+and instead of the player's saved settings, so pricing the levers no longer
+means editing `PlayerPrefs.vgprefs` and putting it back — the same argument
+`--map` makes. It deliberately does **not** touch `ResolutionScale`: changing
+the pixel count at the same time would confound every other lever.
+
+RTX 4070 SUPER, `Valley_Path_To_Castle_Beat1`, 2880x1620, `--hidden
+--uncapped`, GPU pass times. `master` is `405010e` built in a separate worktree
+and measured the same way:
+
+| pass | master | high | low | high -> low |
+|---|---|---|---|---|
+| Voxel | 2.60-2.63 ms | 2.68 ms | 1.204 ms | **2.23x** |
+| Sun Shadow | 0.348 ms | 0.347 ms | 0.216 ms | 1.61x |
+| Post Processing | 0.131 ms | 0.147 ms | 0.053 ms | 2.77x |
+| Particles | 0.017 ms | 0.017 ms | 0.016 ms | - |
+| UI Renderer | 0.016 ms | 0.016 ms | 0.016 ms | - |
+| **GPU total** | **3.11 ms** | **3.21 ms** | **1.51 ms** | **2.13x** |
+| frame rate | 245-251 fps | 236-245 fps | 480-484 fps | ~1.9x |
+
+**Making it a runtime setting costs about 4% of the voxel pass at full
+quality**, 2.61 -> 2.68 ms, consistently and outside the run-to-run variance
+(master 2.600/2.601/2.618/2.625, this branch 2.682/2.695/2.718). That is the
+price named in `Defines.hlsl`'s header: the branches are uniform across a draw
+so the GPU never diverges on one, but both sides are compiled in either way and
+a larger shader has lower occupancy whether or not it runs all of itself. It has
+not been compared against a permutation build. 4% for the trade being the
+player's rather than the build's is worth paying; if the voxel pass ever needs
+that last 4% back, permutations are the experiment.
+
+**A caution about how these were taken, because the first set was wrong.** The
+first `high` reading was 3.363 ms with a 13.2 ms peak - a 30% regression that
+was not there. An Android cross-build was running on the same machine. The
+numbers above were taken with nothing else running and each was repeated;
+`Docs/RENDERING_PLAN.md` and CLAUDE.md both already say to measure on a quiet
+machine and it cost half an hour to rediscover.
+
+The image is intact and moves the way the features predict: over the whole
+frame the mean luminance goes 82.63 → 82.01, and over the valley-wall crop
+93.19 → 89.42 — a few percent darker where geometry encloses, which is the
+bounce leaving.
+
+**Sun Shadow only halving rather than quartering is the one number to read
+carefully.** 512² is a quarter of the texels but the pass measured 1.62x, so
+roughly 0.15 ms of it is fixed overhead on this card. On an Adreno, where the
+same pass costs 21.5 ms rather than 0.35, the marches are overwhelmingly the
+cost and the ratio should be much closer to 4x. That is a prediction, not a
+measurement.
+
+### What is not known, stated plainly
+
+**Nobody has run this on the S23.** 2.60x on a 4070 does not become 4.6x on an
+Adreno by arithmetic, and 4.6x is what 13 fps needs. The honest expectation is
+that the low preset gets most of the way and that the last of it comes from the
+`RESOLUTION` row, which is now the player's to move — 50% is the default and 65
+/ 80 / 100 are there for a device that can afford them.
+
+Do these next, in order:
+
+1. **Done: measured on the S23 itself, over several iterations.** The
+   diagnosis from the desktop ratios was wrong in one place and right
+   everywhere else, and both are worth recording.
+
+   **The input map bug was real and unrelated to performance**, and it
+   surfaced first: pushing the settings screen over a menu left the *menu
+   underneath* still bound to `UIInput`, because `Canvas::OnEnabled` remembers
+   whatever map was active when it was enabled and hands that exact string back
+   on `OnDisabled` - and on the main menu the active map is the gameplay one.
+   `Canvas::TakeControl` now asserts the map itself on becoming the top of the
+   world stack rather than trusting what the departing canvas restored, and a
+   canvas checks `IsInteractive()` (top-of-stack, not just enabled) before
+   acting on any input at all. Diagnosed with a new `--ui-script` harness
+   (`LaunchOptions.h`) that feeds scripted presses through the *real* SDL
+   keyboard-state path and traces every focus and binding-map change as `[ui]`
+   lines - it had to land in `SDLKeyboard::GetState`, not SDL's event queue,
+   because this engine polls state and never reads key events at all.
+
+   **Every menu button is text now** (`Game/Source/UI/TextMenuButton.cpp`),
+   replacing three sprite PNGs per button per state. It surfaced the map bug
+   faster than sprites would have: a sprite button kept its focused child
+   enabled through the whole mess, so the symptom was invisible until buttons
+   drew their own focus colour.
+
+   **The diagnosis that needed correcting: the cone traces and PCSS were not
+   the majority of the cost.** With every shading feature off, the Voxel pass
+   was still ~17 ms of a ~20 ms frame at 50% resolution, Medium shadows off.
+   That is the primary ray march itself, which no setting reaches - the S23's
+   per-pixel cost is roughly 46x the 4070's, which points at the marcher's
+   memory access pattern (a texel buffer read one voxel at a time) rather than
+   at its arithmetic. Recorded rather than fixed; it is real renderer work.
+
+   **The shadow map's own size was the second-largest lever, and it is now a
+   setting** (`SHADOW DETAIL`, low/medium/high = 256/512/1024). The pass is one
+   full window march *per texel*, so its cost is exactly that number squared:
+   2.0 ms at 256, 8.3 ms at 512, on the S23. `Docs/MOBILE_PORT_LOG.md`'s mobile
+   default ships at 512 - a deliberate 6.3 ms trade for shadow sharpness,
+   because 256 stair-steps in chunks large enough to read as an artefact rather
+   than a style on this level's geometry. The real fix, not yet built: the map
+   is sized to the whole resident window but the camera only ever sees a
+   fraction of it - fitting the light-space rect to the visible frustum would
+   let 256 texels resolve what 512 does today.
+
+   **A `SHQ_RAY` mode was built and rejected, and the failure is the
+   interesting result.** One exact shadow ray per lit pixel through the same
+   brick DDA, instead of a map - conceptually cheaper on a screen with fewer
+   pixels than the map has texels, and it is what the engine used before the
+   shadow map existed (`GetSunVisibilityByRays`/`MarchShadow` in
+   `SDFMarcher.hlsl`). Desktop measured it competitive: 2.75 ms against the
+   map's 2.34-2.70 ms at 2880x1620. **Unbounded, on the S23, it was 55.8 ms -
+   three times what the map costs**, because rays from a jagged voxel surface
+   all take different lengths and a GPU wave waits for its longest lane. The
+   desktop's per-pixel scaling factor (46x) undersold this mode by ~6x; SIMD
+   divergence does not show up in a per-pixel-cost extrapolation from hardware
+   that does not have the same wave width or the same cost model for it.
+   `Settings::ShadowRayDistance` caps the march (64 units default, roughly
+   contact-shadow range) rather than deleting the mode - it is a real,
+   requested "original look" option, just not a default.
+
+   **`SHQ_HARD`'s filter was replaced with a single point tap**, and it is
+   both cheaper and more correct for what "hard" is supposed to mean: the
+   Gather-and-blend that shipped first was PCF by the textbook, which produces
+   a one-texel gradient - a hard shadow with a soft edge, mush at a small map
+   size. One `SampleLevel` through the point sampler is lit-or-not, stair-
+   stepped on the map's own grid.
+
+   **The upscale was linear and it should not have been.** Post processing
+   reads the half-resolution scene target back at full window size, and did so
+   through the same linear sampler FXAA needs - so a hard voxel edge became a
+   two-pixel gradient on every frame, independent of any shading setting. It
+   is the reported "low res makes the screen blurrier". Fixed with a second,
+   point-sampled slot on the Post Processing pass, used for the scene and UI
+   fetches; FXAA keeps the linear one, since it is built on reading between
+   texels. With this fixed, lower `RESOLUTION` steps read as bigger voxels
+   rather than a softer image, which is what let 25% and 35% become real
+   options rather than something to avoid.
+
+   **The coverage pyramid upload is skipped when nothing reads it.** It only
+   feeds the AO/bounce/specular cones; with all three off (the mobile default)
+   it was still copying dirty boxes into a 3D texture every frame for no
+   reader - 0.97 ms on the S23, ~5% of the frame at the settings that shipped.
+   The CPU-side mirror and dirty set are still maintained, so re-enabling a
+   cone term uploads the backlog on the next frame rather than showing stale
+   data.
+
+   **Fog (`FOG_ENABLED`) is off everywhere**, desktop and mobile, on request -
+   it read as washing out this art's flat saturated colour. It was hiding the
+   seam where the resident window ends and the far field begins, since both
+   faded toward the same sky colour; if that boundary becomes visible, this is
+   the switch that used to cover it, not a new defect.
+
+   **Where the S23 landed, in one arena, over the course of this pass**
+   (frame-rate readings are single samples from a live session, not a
+   controlled benchmark - the Voxel-pass and Sun-Shadow-pass timings are the
+   trustworthy numbers, since Sun Shadow is vantage-independent and Voxel was
+   cross-checked against its own resize log):
+
+   | change | Voxel | Sun Shadow | fps |
+   |---|---|---|---|
+   | start of this pass (map 512, AO+bounce+reflections+FXAA on) | 21.8 ms | 8.6-9.0 ms | ~28 |
+   | AO/bounce/reflections/FXAA off, pyramid upload skipped | ~17-22 ms | 8.3 ms | ~26 |
+   | shadow detail Low (256) | 14.4-22.8 ms\* | 2.0 ms | 45 |
+   | shadow detail Medium (512, current default) | 22.8 ms | 8.3 ms | ~26 |
+   | resolution 35% (vantage differs from the row above) | 18.5 ms | 8.8 ms | ~30-35 |
+
+   \*Two readings taken at different points in the level; Sun Shadow is the
+   number to trust from that row.
+
+   **Not yet reached**: a controlled, fixed-vantage sweep on the device of
+   every `RESOLUTION` x `SHADOW DETAIL` combination, the kind
+   `--render-quality` enables on desktop. `--ui-script` reaching a fixed arena
+   automatically, so a device sweep does not need a person standing in the
+   same spot every time, is the obvious next tool.
+
+4. **The `Particles` pipeline still fails on Adreno** with `VkResult -13`. Not
+   touched here and still the reason no particle has ever rendered on that
+   device.
+
+### One thing fixed in passing: a headless run was not silent
+
+`--hidden` means a capture, a benchmark or a CI job, and every one of them was
+opening the machine's real sound device and playing the game's music out loud.
+The null-device path already existed for exactly this and was opt-in behind
+`VOXAGINE_AUDIO_NULL_DEVICE`, which nothing in the documented benchmark
+invocation sets.
+
+`--hidden` now implies it. The environment variable still decides when it is
+set, in both directions - `=0` with `--hidden` gets a real device back for
+confirming a sound by ear without a window in the way. Sounds still load,
+decode and mix either way, so a headless run keeps proving the audio path
+works; it just stops being audible.

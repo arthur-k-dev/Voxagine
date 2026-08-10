@@ -75,6 +75,55 @@ public:
 	   without a debug shader - "Sun Shadow" dumps the shadow map itself. */
 	const std::string& GetScreenshotPass() const { return m_ScreenshotPass; }
 
+	/* A whole render-quality preset, applied over the platform defaults and
+	   *instead of* the player's saved settings - see
+	   Application::LoadRenderSettings.
+	 *
+	 * This is a measurement tool and it is here for the same reason --map is:
+	 * the alternative is editing PlayerPrefs.vgprefs, which is shared state
+	 * another agent may be holding and which has to be put back afterwards.
+	 * Every graphics setting is now the player's, so "measure the mobile
+	 * configuration" and "measure the desktop one" stopped being two builds and
+	 * became two runs - but only if there is a way to say which from outside.
+	 *
+	 * `low` is what Settings::ApplyPlatformRenderDefaults gives a phone, `high`
+	 * is the full desktop suite. It does not touch ResolutionScale: the point of
+	 * this switch is to price the *shading* levers against each other, and
+	 * changing the pixel count at the same time would confound every one of
+	 * them. Pass --size for that. */
+	enum class QualityPreset
+	{
+		E_UNSET,
+		E_LOW,
+		E_HIGH
+	};
+
+	QualityPreset GetQualityPreset() const { return m_QualityPreset; }
+
+	/* A scripted sequence of menu presses, fed into SDL's own event queue so
+	 * that the whole real input path runs - binding maps, canvas callbacks,
+	 * focus - rather than a shortcut that would prove nothing about either.
+	 *
+	 * This exists because menu bugs were being diagnosed by building an APK,
+	 * installing it, and pressing buttons on a phone: a five minute loop for a
+	 * one line question, and the class of bug in question (which canvas owns the
+	 * input map after a world is popped) is invisible in a still frame. With
+	 * this a whole trip through the menus is a headless run of a few seconds.
+	 *
+	 * Comma separated, one per --ui-script-interval frames:
+	 *   up down left right  the four navigation directions
+	 *   confirm             the menus' accept key
+	 *   back                escape / pause
+	 *   wait                do nothing this slot, for a world load to settle
+	 *
+	 * Turning it on also traces every focus change and binding map switch as
+	 * [ui] lines, which is the actual output - the sequence is just how you get
+	 * the engine into the state worth tracing. */
+	const std::string& GetUIScript() const { return m_UIScript; }
+	bool HasUIScript() const { return !m_UIScript.empty(); }
+
+	uint32_t GetUIScriptInterval() const { return m_uiUIScriptInterval; }
+
 private:
 	std::string m_Map;
 	std::string m_Screenshot;
@@ -86,4 +135,9 @@ private:
 
 	bool m_bHidden = false;
 	bool m_bUncapped = false;
+
+	QualityPreset m_QualityPreset = QualityPreset::E_UNSET;
+
+	std::string m_UIScript;
+	uint32_t m_uiUIScriptInterval = 30;
 };

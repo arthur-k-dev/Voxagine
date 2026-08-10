@@ -3,6 +3,21 @@
 #include "Camera.hlsl"
 
 SamplerState s0 : register(s0);
+
+/* Point-sampled, and this pass is where it matters.
+ *
+ * The scene target is rendered at Settings::ResolutionScale - half size on a
+ * phone by default - and read back here at the window's full resolution, so
+ * every fetch of it is an upscale. Bilinear turns a hard voxel edge into a
+ * two-pixel gradient, which on this art is not "softer", it is wrong: the
+ * subject is cubes, and the thing a player sees at half resolution should be
+ * bigger cubes rather than blurred ones.
+ *
+ * FXAA keeps s0. It is built on bilinear taps - the whole method is reading
+ * *between* texels - and handing it a point sampler would not sharpen it, it
+ * would break it. */
+SamplerState pointSampler : register(s1);
+
 Texture2D<float4> targetTexture : register(t0);
 Texture2D<float4> uiTexture : register(t1);
 
@@ -84,17 +99,24 @@ bool IsSceneNeighbourhoodOpaque(float2 v2PixelPosition)
 
 float4 main(float4 position : POS_OUT) : TAR_OUT
 {
-    float4 uiColor = uiTexture.Sample(s0, position.xy / viewport.xy);
+    /* The UI target is already full resolution, so this is a 1:1 fetch either
+       way - point keeps it exact rather than trusting that to stay true. */
+    float4 uiColor = uiTexture.Sample(pointSampler, position.xy / viewport.xy);
     if (uiColor.a == 1.0) return lerp(float4(0.0, 0.0, 0.0, 1.0), uiColor, sceneFader);
 
-	float4 rawScene = targetTexture.Sample(s0, position.xy / viewport.xy);
+	/* The upscale. See pointSampler above. */
+	float4 rawScene = targetTexture.Sample(pointSampler, position.xy / viewport.xy);
 	float4 sceneColor;
 
 	if (rawScene.a == 0.0)
 	{
 		sceneColor = GetBackground(position.xy);
 	}
-	else if (!IsSceneNeighbourhoodOpaque(position.xy))
+	/* Settings::FXAAEnabled, and the flag is tested before the neighbourhood
+	   test rather than after: those nine Loads exist only to decide whether FXAA
+	   is safe here, so with FXAA off they are nine texture reads a pixel
+	   answering a question nobody asks. */
+	else if (!FXAA_ENABLED || !IsSceneNeighbourhoodOpaque(position.xy))
 	{
 		sceneColor = rawScene;
 	}
@@ -122,7 +144,7 @@ float4 main(float4 position : POS_OUT) : TAR_OUT
 			FxaaFloat4(0.0f, 0.0f, 0.0f, 0.0f)				// FxaaFloat fxaaConsole360ConstDir,
 		);
 #else
-		sceneColor = targetTexture.Sample(s0, position.xy / viewport.xy);
+		sceneColor = targetTexture.Sample(pointSampler, position.xy / viewport.xy);
 #endif
 	}
 

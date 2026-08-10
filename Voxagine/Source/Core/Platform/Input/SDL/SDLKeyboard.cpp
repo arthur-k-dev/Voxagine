@@ -3,6 +3,108 @@
 
 #include <SDL3/SDL.h>
 
+#include "Core/LaunchOptions.h"
+
+#include <cctype>
+#include <cstdio>
+#include <string>
+#include <vector>
+
+/* --ui-script lives here rather than beside SDL's event queue, and the reason is
+ * worth recording: this engine does not read the keyboard from events at all, it
+ * takes a snapshot with SDL_GetKeyboardState every frame. Pushing synthetic
+ * SDL_EVENT_KEY_DOWN events - the obvious approach, and the first one tried -
+ * therefore does nothing whatsoever, silently. The state array is the boundary,
+ * so the script writes into the state it returns.
+ *
+ * Everything above this line still runs for real: the binding maps, the canvas
+ * callbacks, the focus walk. Only the two hundred microseconds where a physical
+ * key would have been are replaced. See LaunchOptions::GetUIScript. */
+namespace
+{
+	struct UIScript
+	{
+		std::vector<std::string> Tokens;
+		size_t uiStep = 0;
+		uint32_t uiFrame = 0;
+		SDL_Scancode Held = SDL_SCANCODE_UNKNOWN;
+		bool bParsed = false;
+	};
+
+	UIScript g_UIScript;
+
+	SDL_Scancode ScancodeForToken(const std::string& token)
+	{
+		if (token == "up") return SDL_SCANCODE_UP;
+		if (token == "down") return SDL_SCANCODE_DOWN;
+		if (token == "left") return SDL_SCANCODE_LEFT;
+		if (token == "right") return SDL_SCANCODE_RIGHT;
+		if (token == "confirm") return SDL_SCANCODE_RETURN;
+		if (token == "back") return SDL_SCANCODE_ESCAPE;
+		if (token == "wait") return SDL_SCANCODE_UNKNOWN;
+
+		fprintf(stderr, "[ui] unknown script token \'%s\'\n", token.c_str());
+		return SDL_SCANCODE_UNKNOWN;
+	}
+
+	void ParseUIScript()
+	{
+		const std::string& script = LaunchOptions::Get().GetUIScript();
+
+		size_t start = 0;
+
+		while (start <= script.size())
+		{
+			const size_t comma = script.find(',', start);
+			const size_t end = comma == std::string::npos ? script.size() : comma;
+
+			std::string token = script.substr(start, end - start);
+
+			while (!token.empty() && isspace(static_cast<unsigned char>(token.front())))
+				token.erase(token.begin());
+			while (!token.empty() && isspace(static_cast<unsigned char>(token.back())))
+				token.pop_back();
+
+			if (!token.empty())
+				g_UIScript.Tokens.push_back(token);
+
+			if (comma == std::string::npos)
+				break;
+
+			start = comma + 1;
+		}
+
+		g_UIScript.bParsed = true;
+	}
+
+	/* One token per interval, held for a single frame. Held for exactly one is
+	   what makes a press *and* a release happen: the menus bind some actions on
+	   press and others on release, and a key that stayed down would fire the
+	   repeat handlers instead. */
+	SDL_Scancode StepUIScript()
+	{
+		if (!LaunchOptions::Get().HasUIScript())
+			return SDL_SCANCODE_UNKNOWN;
+
+		if (!g_UIScript.bParsed)
+			ParseUIScript();
+
+		const uint32_t uiInterval = LaunchOptions::Get().GetUIScriptInterval();
+
+		if (g_UIScript.uiFrame++ % uiInterval != 0)
+			return SDL_SCANCODE_UNKNOWN;
+
+		if (g_UIScript.uiStep >= g_UIScript.Tokens.size())
+			return SDL_SCANCODE_UNKNOWN;
+
+		const std::string& token = g_UIScript.Tokens[g_UIScript.uiStep++];
+
+		printf("[ui] step %zu: %s\n", g_UIScript.uiStep, token.c_str());
+
+		return ScancodeForToken(token);
+	}
+}
+
 Keyboard* Keyboard::s_pInstance = nullptr;
 
 Keyboard::Keyboard()
@@ -33,6 +135,11 @@ Keyboard::State Keyboard::GetState() const
 
 	if (pKeys == nullptr)
 		return state;
+
+	/* --ui-script overlays one key onto the snapshot - see the top of this file.
+	   Applied to the built state at the bottom rather than to SDL's array, which
+	   SDL owns and which the rest of this function is reading. */
+	const SDL_Scancode scripted = StepUIScript();
 
 	state.A = pKeys[SDL_SCANCODE_A];
 	state.Add = pKeys[SDL_SCANCODE_KP_PLUS];
@@ -143,6 +250,17 @@ Keyboard::State Keyboard::GetState() const
 	state.X = pKeys[SDL_SCANCODE_X];
 	state.Y = pKeys[SDL_SCANCODE_Y];
 	state.Z = pKeys[SDL_SCANCODE_Z];
+
+	switch (scripted)
+	{
+	case SDL_SCANCODE_UP:     state.Up = true; break;
+	case SDL_SCANCODE_DOWN:   state.Down = true; break;
+	case SDL_SCANCODE_LEFT:   state.Left = true; break;
+	case SDL_SCANCODE_RIGHT:  state.Right = true; break;
+	case SDL_SCANCODE_RETURN: state.Enter = true; break;
+	case SDL_SCANCODE_ESCAPE: state.Escape = true; break;
+	default: break;
+	}
 
 	return state;
 }

@@ -169,19 +169,23 @@ public:
 	// Maximum queued frames on the GPU
 	static const uint32_t m_uiFrameCount = 2;
 
-	/* Side of the square sun shadow map - RENDERING_PLAN.md 7.1a.
+	/* The side of the square sun shadow map is Settings::GetSunShadowResolution
+	   now, not a constant here - RENDERING_PLAN.md 7.1a, and Settings.h's
+	   ShadowQuality for the two sizes and why there are two.
+
+	   The sizing argument that used to live here, kept because it is what
+	   picked those numbers: the 768x128x768 window projects to roughly
+	   1065 x 877 world units perpendicular to the light, so 1024 is close to one
+	   texel per voxel and 512 is one per two. A depth map records the nearest
+	   blocker per texel, so a coarser map makes a one-voxel post cast a shadow
+	   wider than itself rather than losing it - erring thick, which is the right
+	   direction here (phase 6.2 could not make thin occluders read at all).
+
 	   Its cost is one brick-DDA march per texel and is *independent of screen
 	   resolution*, which is the whole reason the sun stopped being a per-pixel
 	   ray: at 3840x2160 a single shadow ray per pixel measures ~9.45 ms, and
-	   the entire lighting budget is 3 ms.
-
-	   Sizing: the 768x128x768 window projects to roughly 1065 x 877 world units
-	   perpendicular to the light, so 1024 is close to one texel per voxel and
-	   512 is one per two. A depth map records the nearest blocker per texel, so
-	   a coarser map makes a one-voxel post cast a shadow wider than itself
-	   rather than losing it - erring thick, which is the right direction here
-	   (phase 6.2 could not make thin occluders read at all). */
-	static constexpr uint32_t k_uiSunShadowResolution = 1024;
+	   the entire lighting budget is 3 ms. It is also why the map's size is the
+	   only thing that moves its cost, and so why it is a setting. */
 
 	virtual ~RenderContext();
 
@@ -409,6 +413,22 @@ public:
 
 	/* Resizes the context, buffers and window */
 	virtual bool OnResize(uint32_t uiWidth, uint32_t uiHeight);
+
+	/* Re-applies the render settings to things a per-frame uniform cannot
+	   carry. Subscribed to Settings::RenderQualityChanged in Initialize, so
+	   nothing has to remember to call it.
+
+	   Almost every render setting reaches the shaders through the camera
+	   constant buffer and needs nothing here - see CameraData.hlsl's
+	   renderQuality. Exactly two are sizes of GPU images and so cannot:
+	   ShadowQuality decides how large the sun shadow map is, and
+	   ResolutionScale decides how large the Voxel and Particle targets are.
+	   Both mean reallocating attachments, which means idling the device, which
+	   is why this is an event on a settings change rather than a per-frame
+	   comparison.
+
+	   The base does nothing: a context with no passes has nothing to resize. */
+	virtual void ApplyRenderSettings() {}
 
 	/* The app is about to lose (or has just regained) the window/surface -
 	   Android's onPause/onResume. Desktop never calls these; the default does

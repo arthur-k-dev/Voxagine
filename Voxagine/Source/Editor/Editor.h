@@ -69,6 +69,7 @@ public:
 	std::string GeEditorWorld() const { return m_sWorldFilePath; }
 
 	Application* GetApplication();
+	float GetUiScale() const { return m_fUiScale; }
 
 	void SetSelectedEntity(Entity* pNewSelectedEntity);
 	void ResetSelectedEntity();
@@ -98,6 +99,7 @@ private:
 
 	void InitializeButtons();
 	void InitializeTextures();
+	void UpdateUiScale();
 
 	void SetWorldFilePath(std::string sWorldFilePath);
 
@@ -182,6 +184,7 @@ private:
 	ConsoleLog m_ConsoleLog;
 
 	RenderContext* m_pRenderContext = nullptr;
+	float m_fUiScale = 1.0f;
 
 	std::unordered_map<std::string, TextureReference*> m_Textures;
 	std::unordered_map<std::string, EditorButton*> m_Buttons;

@@ -8,6 +8,7 @@
 #include "Core/LoggingSystem/LoggingSystem.h"
 #include "External/imgui/imgui.h"
 #include "Editor/Editor.h"
+#include "Editor/EditorLayout.h"
 #include "Core/Application.h"
 #include "Core/Platform/Rendering/RenderContext.h"
 #include <Core/Platform/Platform.h>
@@ -40,12 +41,15 @@ void ConsoleLog::Initialize(Editor * pTargetEditor)
 
 	// Set Window information first
 	UVector2 renderRes = GetEditor()->GetApplication()->GetPlatform().GetRenderContext()->GetRenderResolution();
+	const float fUiScale = GetEditor()->GetUiScale();
+	const float fSidePanelWidth = EditorLayout::SidePanelWidth * fUiScale;
+	const float fConsoleHeight = EditorLayout::ConsoleHeight * fUiScale;
 
-	SetPosition(ImVec2(290.0f, (float)renderRes.y - 250));
-	SetSize(ImVec2((float)renderRes.x - 290.0f - 290.0f, 250));
+	SetPosition(ImVec2(fSidePanelWidth, static_cast<float>(renderRes.y) - fConsoleHeight));
+	SetSize(ImVec2(static_cast<float>(renderRes.x) - fSidePanelWidth * 2.0f, fConsoleHeight));
 
-	m_uiWindowWidth = static_cast<unsigned int>(GetSize().x - 10.f);
-	m_uiWindowHeight = static_cast<unsigned int>(GetSize().y - 82.f);
+	m_uiWindowWidth = static_cast<unsigned int>(GetSize().x - 10.0f * fUiScale);
+	m_uiWindowHeight = static_cast<unsigned int>(GetSize().y - 82.0f * fUiScale);
 
 	SetName("");
 
@@ -85,11 +89,14 @@ void ConsoleLog::UnInitialize()
 
 void ConsoleLog::OnContextResize(uint32_t a_uiWidth, uint32_t a_uiHeight, IVector2 deltaResolution)
 {
-	SetSize(ImVec2((float)a_uiWidth - 290.0f - 290.0f, 250));
-	SetPosition(ImVec2(290.0f, (float)a_uiHeight - 250));
+	const float fUiScale = GetEditor()->GetUiScale();
+	const float fSidePanelWidth = EditorLayout::SidePanelWidth * fUiScale;
+	const float fConsoleHeight = EditorLayout::ConsoleHeight * fUiScale;
+	SetSize(ImVec2(static_cast<float>(a_uiWidth) - fSidePanelWidth * 2.0f, fConsoleHeight));
+	SetPosition(ImVec2(fSidePanelWidth, static_cast<float>(a_uiHeight) - fConsoleHeight));
 
-	m_uiWindowWidth = static_cast<unsigned int>(GetSize().x - 10.f);
-	m_uiWindowHeight = static_cast<unsigned int>(GetSize().y - 86.f);
+	m_uiWindowWidth = static_cast<unsigned int>(GetSize().x - 10.0f * fUiScale);
+	m_uiWindowHeight = static_cast<unsigned int>(GetSize().y - 86.0f * fUiScale);
 
 	ImGui::SetWindowPos(GetName().data(), GetPosition());
 	ImGui::SetWindowSize(GetName().data(), GetSize());
@@ -103,8 +110,9 @@ bool ConsoleLog::IsScrollToBottumEnabled() const
 void ConsoleLog::OnPreRender(float fDeltaTime)
 {
 	Window::OnPreRender(fDeltaTime);
+	const float fUiScale = GetEditor()->GetUiScale();
 
-	ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(17.0f, 2.0f));
+	ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(17.0f * fUiScale, 2.0f * fUiScale));
 	ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.f);
 
 	ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.135f, 0.165f, 0.204f, 0.9f));
@@ -119,6 +127,7 @@ void ConsoleLog::OnPreRender(float fDeltaTime)
 
 void ConsoleLog::OnRender(float fDeltaTime)
 {
+	const float fUiScale = GetEditor()->GetUiScale();
 	ImGui::PopStyleVar(1);
 
 	/* Title */
@@ -131,11 +140,11 @@ void ConsoleLog::OnRender(float fDeltaTime)
 
 	if (!fpsString.empty())
 	{
-		ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0.0f, -10.0f));
+		ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0.0f, -10.0f * fUiScale));
 
 		ImVec2 textSize = ImGui::CalcTextSize(fpsString.c_str());
 
-		ImGui::SameLine(m_uiWindowWidth - textSize.x - 7.0f);
+		ImGui::SameLine(m_uiWindowWidth - textSize.x - 7.0f * fUiScale);
 		ImGui::TextUnformatted(fpsString.c_str());
 
 		ImGui::PopStyleVar();
@@ -156,10 +165,11 @@ void ConsoleLog::OnPostRender(float fDeltaTime)
 
 void ConsoleLog::RenderCustomToolBar()
 {
-	ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(5.0f, 7.0f));
+	const float fUiScale = GetEditor()->GetUiScale();
+	ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(5.0f * fUiScale, 7.0f * fUiScale));
 
 	// Combo for selecting category for filtering log events
-	ImGui::PushItemWidth(150);
+	ImGui::PushItemWidth(150.0f * fUiScale);
 
 	if (ImGui::BeginCombo("##CategoryFilterCombo", "Category Filters"))
 	{
@@ -176,7 +186,7 @@ void ConsoleLog::RenderCustomToolBar()
 	}
 
 	ImGui::SameLine();
-	ImGui::PushItemWidth(150);
+	ImGui::PushItemWidth(150.0f * fUiScale);
 
 	if (ImGui::BeginCombo("##LogLevelFilterCombo", "Filter Levels"))
 	{
@@ -194,7 +204,7 @@ void ConsoleLog::RenderCustomToolBar()
 
 	// Input text box for the search functionality
 	ImGui::SameLine();
-	ImGui::PushItemWidth(static_cast<float>(m_uiWindowWidth) - 150.f - 150.f - 93.f);
+	ImGui::PushItemWidth(static_cast<float>(m_uiWindowWidth) - (150.0f + 150.0f + 93.0f) * fUiScale);
 	if (ImGui::InputText("###ConsoleLogSearch", (char*)m_TempSearchString.c_str(), m_TempSearchString.capacity(), ImGuiInputTextFlags_EnterReturnsTrue))
 		SearchEventLog();
 

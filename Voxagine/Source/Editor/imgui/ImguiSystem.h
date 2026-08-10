@@ -22,12 +22,17 @@ public:
 
 	ImContext* GetContext() const { return m_pContext; }
 	void SetContext(ImContext* pContext) { m_pContext = pContext; };
+	float GetDpiScale() const { return m_fDpiScale; }
 
 protected:
 	void InitStyle();
+	void UpdateDpiScale();
 
 	RenderContext* m_pRenderContext = nullptr;
 
 	ImPlatform* m_pPlatform = nullptr;
 	ImContext* m_pContext = nullptr;
+
+	float m_fDpiScale = 1.0f;
+	float m_fFontDpiScale = 1.0f;
 };

@@ -37,3 +37,16 @@ void SDLImPlatform::NewFrame()
 	io.MouseDown[1] = (buttons & SDL_BUTTON_RMASK) != 0;
 	io.MouseDown[2] = (buttons & SDL_BUTTON_MMASK) != 0;
 }
+
+float SDLImPlatform::GetDisplayScale() const
+{
+	if (m_pWindow == nullptr)
+		return 1.0f;
+
+	SDL_Window* pWindow = static_cast<SDL_Window*>(m_pWindow->GetHandle());
+	if (pWindow == nullptr)
+		return 1.0f;
+
+	const float fDisplayScale = SDL_GetWindowDisplayScale(pWindow);
+	return fDisplayScale > 0.0f ? fDisplayScale : 1.0f;
+}

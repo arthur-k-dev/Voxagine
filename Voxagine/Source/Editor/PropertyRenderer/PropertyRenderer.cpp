@@ -50,7 +50,7 @@ void PropertyRenderer::Render(rttr::instance & rInstance, rttr::property & rProp
 		return;
 
 	ImGui::Columns(2, "##EntityInspector_", true);  // 3-ways, no border
-	ImGui::PushItemWidth(200.0f);
+	ImGui::PushItemWidth(200.0f * m_pEditor->GetUiScale());
 
 	rttr::variant PropertyValueVar = rProperty.get_value(rInstance);
 
@@ -1272,13 +1272,14 @@ void PropertyRenderer::RenderArrayProperty(rttr::instance& rInstance, rttr::prop
 		{
 			const bool isVClass = rRenderType == VClassType;
 			const float customSize = (isVClass) ? arrView.get_value_type().get_properties().size() * 10.0f * arrView.get_size() : 0.0f;
+			const float fUiScale = m_pEditor->GetUiScale();
 
 			// ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(50.0f, 50.0f));
 			ImGui::PushStyleColor(ImGuiCol_ChildWindowBg, ImVec4(0.f, 0.f, 0.f, 0.f));
 			ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
-			ImGui::BeginChild(("##ScrollingRegion_" + rInstance.get_derived_type().get_raw_type().get_name().to_string() + "_" + arrView.get_value_type().get_name().to_string() + "_" + rProperty.get_name().to_string()).c_str(), ImVec2(0.0f, customSize + ContainerSize * 20.0f), false);
+			ImGui::BeginChild(("##ScrollingRegion_" + rInstance.get_derived_type().get_raw_type().get_name().to_string() + "_" + arrView.get_value_type().get_name().to_string() + "_" + rProperty.get_name().to_string()).c_str(), ImVec2(0.0f, (customSize + ContainerSize * 20.0f) * fUiScale), false);
 			ImGui::Columns(2, ("ContentColumns_" + rInstance.get_derived_type().get_raw_type().get_name().to_string() + "_" + arrView.get_value_type().get_name().to_string() + "_" + rProperty.get_name().to_string()).c_str(), false);
-			ImGui::SetColumnWidth(0, 20.0f);
+			ImGui::SetColumnWidth(0, 20.0f * fUiScale);
 			ImGui::SetColumnWidth(1, ImGui::GetWindowSize().x);
 
 			for (unsigned int i = 0; i < static_cast<unsigned int>(ContainerSize); ++i)
@@ -1389,7 +1390,7 @@ void PropertyRenderer::RenderMapProperty(rttr::instance& rInstance, rttr::proper
 		// Let us make the add button with two empty values
 		ImGui::PushStyleColor(ImGuiCol_ChildWindowBg, ImVec4(0.f, 0.f, 0.f, 0.f));
 
-		ImGui::BeginChild(("##ScrollingRegion_" + rInstance.get_derived_type().get_raw_type().get_name().to_string() + "_" + arrView.get_value_type().get_name().to_string() + "_" + rProperty.get_name().to_string()).c_str(), ImVec2(0, ContainerSize * 30.0f + 60.0f), false);
+		ImGui::BeginChild(("##ScrollingRegion_" + rInstance.get_derived_type().get_raw_type().get_name().to_string() + "_" + arrView.get_value_type().get_name().to_string() + "_" + rProperty.get_name().to_string()).c_str(), ImVec2(0, (ContainerSize * 30.0f + 60.0f) * m_pEditor->GetUiScale()), false);
 		ImGui::Columns(3, ("ContentColumns_" + rInstance.get_derived_type().get_raw_type().get_name().to_string() + "_" + arrView.get_value_type().get_name().to_string() + "_" + rProperty.get_name().to_string()).c_str(), false);
 
 		ImGui::Text("%s", std::string("Key ").data());
@@ -1597,9 +1598,10 @@ void PropertyRenderer::RenderArrayResource(const std::string & ResourceExtension
 			// ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(50.0f, 50.0f));
 			ImGui::PushStyleColor(ImGuiCol_ChildWindowBg, ImVec4(0.f, 0.f, 0.f, 0.f));
 			ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
-			ImGui::BeginChild(("##ScrollingRegion_" + rInstance.get_derived_type().get_raw_type().get_name().to_string() + "_" + arrView.get_value_type().get_name().to_string() + "_" + rProperty.get_name().to_string()).c_str(), ImVec2(0.0f, ContainerSize * 20.0f), false);
+			const float fUiScale = m_pEditor->GetUiScale();
+			ImGui::BeginChild(("##ScrollingRegion_" + rInstance.get_derived_type().get_raw_type().get_name().to_string() + "_" + arrView.get_value_type().get_name().to_string() + "_" + rProperty.get_name().to_string()).c_str(), ImVec2(0.0f, ContainerSize * 20.0f * fUiScale), false);
 			ImGui::Columns(2, ("ContentColumns_" + rInstance.get_derived_type().get_raw_type().get_name().to_string() + "_" + arrView.get_value_type().get_name().to_string() + "_" + rProperty.get_name().to_string()).c_str(), false);
-			ImGui::SetColumnWidth(0, 20.0f);
+			ImGui::SetColumnWidth(0, 20.0f * fUiScale);
 			ImGui::SetColumnWidth(1, ImGui::GetWindowSize().x);
 
 			for (unsigned int i = 0; i < static_cast<unsigned int>(ContainerSize); ++i)

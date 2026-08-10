@@ -2,8 +2,10 @@
 #include "EntityHierarchy.h"
 
 #include "Editor/Editor.h"
+#include "Editor/EditorLayout.h"
 #include "Core/ECS/Entity.h"
 #include "Core/Application.h"
+#include "Core/Platform/Rendering/RenderContext.h"
 #include "Core/ECS/WorldManager.h"
 #include "Editor/EditorWorld.h"
 #include "Editor/EditorButton.h"
@@ -29,8 +31,11 @@ void EntityHierarchy::Initialize(Editor* pTargetEditor)
 
 	SetName("Entity Hierarchy");
 
-	SetPosition(ImVec2(0, 27.0f));
-	SetSize(ImVec2(290.0f, 720.0f - 26.f));
+	const float fUiScale = GetEditor()->GetUiScale();
+	const UVector2 renderResolution = GetEditor()->GetApplication()->GetPlatform().GetRenderContext()->GetRenderResolution();
+	SetPosition(ImVec2(0.0f, EditorLayout::MenuBarHeight * fUiScale));
+	SetSize(ImVec2(EditorLayout::SidePanelWidth * fUiScale,
+	               static_cast<float>(renderResolution.y) - EditorLayout::MenuBarBackgroundHeight * fUiScale));
 
 	SetWindowFlag(ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoMove);
 }
@@ -42,8 +47,10 @@ void EntityHierarchy::UnInitialize()
 
 void EntityHierarchy::OnContextResize(uint32_t a_uiWidth, uint32_t a_uiHeight, IVector2 deltaResolution)
 {
-	SetSize(ImVec2(GetSize().x, static_cast<float>(a_uiHeight) - 26.f));
-	SetPosition(ImVec2(0.0f, 27.0f));
+	const float fUiScale = GetEditor()->GetUiScale();
+	SetSize(ImVec2(EditorLayout::SidePanelWidth * fUiScale,
+	               static_cast<float>(a_uiHeight) - EditorLayout::MenuBarBackgroundHeight * fUiScale));
+	SetPosition(ImVec2(0.0f, EditorLayout::MenuBarHeight * fUiScale));
 
 	ImGui::SetWindowPos(GetName().data(), GetPosition());
 	ImGui::SetWindowSize(GetName().data(), GetSize());
@@ -56,7 +63,8 @@ void EntityHierarchy::Tick(float fDeltaTime)
 
 void EntityHierarchy::OnPreRender(float fDeltaTime)
 {
-	ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(17.0f, 5.0f));
+	const float fUiScale = GetEditor()->GetUiScale();
+	ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(17.0f * fUiScale, 5.0f * fUiScale));
 }
 
 void EntityHierarchy::OnRender(float fDeltaTime)
@@ -80,11 +88,13 @@ void EntityHierarchy::OnSearch()
 
 void EntityHierarchy::RenderCustomToolBar()
 {
+	const float fUiScale = GetEditor()->GetUiScale();
+
 	// Render function for custom toolbar
-	ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(5.0f, 7.0f));
+	ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(5.0f * fUiScale, 7.0f * fUiScale));
 
 	// Input text box for the search functionality
-	ImGui::PushItemWidth(205);
+	ImGui::PushItemWidth(205.0f * fUiScale);
 	if (ImGui::InputText("###EntityHierarchySearch", &m_TempSearchString, ImGuiInputTextFlags_EnterReturnsTrue))
 	{
 		OnSearch();
@@ -145,7 +155,7 @@ void EntityHierarchy::RenderPopUpWindow()
 	if (RenderCreateCustomEntity)
 	{
 
-		ImGui::SetNextWindowSize(ImVec2(0.0f, 17.f * 10.f));
+		ImGui::SetNextWindowSize(ImVec2(0.0f, 17.0f * GetEditor()->GetUiScale() * 10.0f));
 
 		if (!ImGui::IsPopupOpen("CreateCustomEntity"))
 			ImGui::OpenPopup("CreateCustomEntity");

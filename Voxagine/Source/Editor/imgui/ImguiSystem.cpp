@@ -21,6 +21,14 @@
 #include <External/imguizmo/ImGuizmo.h>
 #include "External/optick/optick.h"
 
+#include <cmath>
+
+namespace
+{
+	constexpr float kDefaultFontSize = 13.0f;
+	constexpr float kDpiScaleEpsilon = 0.01f;
+}
+
 void ImguiSystem::Initialize(RenderContext* pRenderContext)
 {
 #ifndef _ORBIS
@@ -34,9 +42,20 @@ void ImguiSystem::Initialize(RenderContext* pRenderContext)
 	//io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;  // Enable Keyboard Controls
 
 	io.WantCaptureKeyboard = true;
+	m_pPlatform->Initialize();
+
+	/* Rasterize at the window's native DPI instead of magnifying ImGui's
+	   13-pixel default atlas. This keeps text sharp on high-density displays. */
+	m_fDpiScale = m_pPlatform->GetDisplayScale();
+	m_fFontDpiScale = m_fDpiScale;
+
+	ImFontConfig fontConfig;
+	fontConfig.SizePixels = kDefaultFontSize * m_fFontDpiScale;
+	io.Fonts->AddFontDefault(&fontConfig);
 
 	// Setup style
 	InitStyle();
+	ImGui::GetStyle().ScaleAllSizes(m_fDpiScale);
 
  	// Bind mappings
 	io.KeyMap[ImGuiKey_::ImGuiKey_Tab] = IK_TAB;
@@ -71,6 +90,7 @@ void ImguiSystem::Update()
 	OPTICK_EVENT();
 #ifndef _ORBIS
 	// Start the Dear ImGui frame
+	UpdateDpiScale();
 	m_pContext->NewFrame();
 	m_pPlatform->NewFrame();
 
@@ -119,6 +139,24 @@ void ImguiSystem::Update()
 //
 //	ImGui::End();
 //#endif
+#endif
+}
+
+void ImguiSystem::UpdateDpiScale()
+{
+#ifndef _ORBIS
+	const float fDpiScale = m_pPlatform->GetDisplayScale();
+	if (std::fabs(fDpiScale - m_fDpiScale) <= kDpiScaleEpsilon)
+		return;
+
+	/* Rebuild the style from its unscaled values to avoid rounding drift as a
+	   window moves repeatedly between monitors. The font atlas is baked for
+	   the startup monitor; FontGlobalScale preserves the correct physical size
+	   on a monitor with a different scale. */
+	m_fDpiScale = fDpiScale;
+	InitStyle();
+	ImGui::GetStyle().ScaleAllSizes(m_fDpiScale);
+	ImGui::GetIO().FontGlobalScale = m_fDpiScale / m_fFontDpiScale;
 #endif
 }
 

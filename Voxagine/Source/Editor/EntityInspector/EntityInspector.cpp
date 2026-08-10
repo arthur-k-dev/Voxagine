@@ -6,6 +6,7 @@
 #include "rttr/filter_item.h"
 
 #include "Editor/Editor.h"
+#include "Editor/EditorLayout.h"
 #include "Editor/PropertyRenderer/PropertyRenderer.h"
 
 #include "Core/ECS/Entity.h"
@@ -42,9 +43,12 @@ void EntityInspector::Initialize(Editor * pTargetEditor)
 
 	RenderContext* pRenderContext = GetEditor()->GetApplication()->GetPlatform().GetRenderContext();
 	const UVector2 renderRes = pRenderContext->GetRenderResolution();
+	const float fUiScale = GetEditor()->GetUiScale();
 
-	SetSize(ImVec2(290.0f, static_cast<float>(renderRes.y) - 20.0f));
-	SetPosition(ImVec2(static_cast<float>(renderRes.x) - GetSize().x, 26.0f));
+	SetSize(ImVec2(EditorLayout::SidePanelWidth * fUiScale,
+	               static_cast<float>(renderRes.y) - 20.0f * fUiScale));
+	SetPosition(ImVec2(static_cast<float>(renderRes.x) - GetSize().x,
+	                   EditorLayout::MenuBarBackgroundHeight * fUiScale));
 
 	SetWindowFlag(ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus);
 }
@@ -60,8 +64,11 @@ void EntityInspector::Tick(float fDeltaTime)
 
 void EntityInspector::OnContextResize(uint32_t a_uiWidth, uint32_t a_uiHeight, IVector2 /* deltaResolution */)
 {
-	SetSize(ImVec2(GetSize().x, static_cast<float>(a_uiHeight) - 20.0f));
-	SetPosition(ImVec2(static_cast<float>(a_uiWidth) - GetSize().x, 26.0f));
+	const float fUiScale = GetEditor()->GetUiScale();
+	SetSize(ImVec2(EditorLayout::SidePanelWidth * fUiScale,
+	               static_cast<float>(a_uiHeight) - 20.0f * fUiScale));
+	SetPosition(ImVec2(static_cast<float>(a_uiWidth) - GetSize().x,
+	                   EditorLayout::MenuBarBackgroundHeight * fUiScale));
 
 	ImGui::SetWindowPos(GetName().data(), GetPosition());
 	ImGui::SetWindowSize(GetName().data(), GetSize());
@@ -89,7 +96,8 @@ void EntityInspector::RenderSelectedEntityProperty(rttr::instance& rInstance, rt
 
 void EntityInspector::OnPreRender(float /* fDeltaTime */ )
 {
-	ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(17.0f, 5.0f));
+	const float fUiScale = GetEditor()->GetUiScale();
+	ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(17.0f * fUiScale, 5.0f * fUiScale));
 
 	if (GetEditor()->HasSelectedEntity())
 	{
@@ -168,20 +176,23 @@ void EntityInspector::OnRender(float /* fDeltaTime */)
 
 	if (GetEditor()->HasSelectedEntity())
 	{
+		const float fUiScale = GetEditor()->GetUiScale();
 		Entity* SelectedEntity = GetEditor()->GetSelectedEntity();
 		std::vector<Component*> InspectedComponents = SelectedEntity->GetComponents();
 		InspectedComponents.erase(std::remove(InspectedComponents.begin(), InspectedComponents.end(), SelectedEntity->GetTransform()), InspectedComponents.end());
 
 		if (ImGui::CollapsingHeader(("Transform##" + std::to_string(SelectedEntity->GetId())).data(), &m_bRenderDefaultCategory, ImGuiTreeNodeFlags_DefaultOpen))
 		{
-			if (ImGui::Selectable("World", GetEditor()->IsTransformWorldModus(), 0, ImVec2(130, 16)))
+			if (ImGui::Selectable("World", GetEditor()->IsTransformWorldModus(), 0,
+			                      ImVec2(130.0f * fUiScale, 16.0f * fUiScale)))
 			{
 				GetEditor()->SetTransformWorldModus(true);
 			}
 
 			ImGui::SameLine();
 
-			if (ImGui::Selectable("Local", !GetEditor()->IsTransformWorldModus(), 0, ImVec2(130, 16)))
+			if (ImGui::Selectable("Local", !GetEditor()->IsTransformWorldModus(), 0,
+			                      ImVec2(130.0f * fUiScale, 16.0f * fUiScale)))
 			{
 				GetEditor()->SetTransformWorldModus(false);
 			}
@@ -213,7 +224,7 @@ void EntityInspector::OnRender(float /* fDeltaTime */)
 		ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.5f, 0.605f, 0.343f, 0.9f));
 		ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.3f, 0.405f, 0.143f, 0.9f));
 
-		if (ImGui::Button("Add Component", ImVec2(275, 32)))
+		if (ImGui::Button("Add Component", ImVec2(275.0f * fUiScale, 32.0f * fUiScale)))
 		{
 			m_bRenderAddComponentWindow = !m_bRenderAddComponentWindow;
 			m_SearchStringAddComponent.clear();
@@ -227,7 +238,7 @@ void EntityInspector::OnRender(float /* fDeltaTime */)
 		if (m_bRenderAddComponentWindow)
 		{
 			ImGui::SetNextWindowPos(ImVec2(ButtonMin.x, ButtonMax.y));
-			ImGui::SetNextWindowSize(ImVec2(ButtonMax.x - ButtonMin.x, 128));
+			ImGui::SetNextWindowSize(ImVec2(ButtonMax.x - ButtonMin.x, 128.0f * fUiScale));
 
 			if (ImGui::BeginPopup("EntityInspector_Add_Component"))
 			{

@@ -109,8 +109,8 @@ void Platform::Initialize()
 
 	/* Setup imGui */
 	m_ImguiSystem.SetContext(pImContext);
-	m_ImguiSystem.Initialize(m_pRenderContext);
 	m_ImguiSystem.SetPlatform(pImPlatform);
+	m_ImguiSystem.Initialize(m_pRenderContext);
 }
 
 void Platform::Deinitialize()

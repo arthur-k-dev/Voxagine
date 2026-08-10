@@ -13,6 +13,7 @@ public:
 
 	virtual void Initialize() override;
 	virtual void NewFrame() override;
+	virtual float GetDisplayScale() const override;
 
 private:
 	SDLWindowContext* m_pWindow = nullptr;

@@ -24,6 +24,8 @@ public:
 	void OnClick(std::function<void(void)> function);
 
 private:
+	Application* m_pApplication = nullptr;
+
 	bool m_bIsHovered = false;
 	bool m_bIsClicked = false;
 	bool m_bIsUp = false;

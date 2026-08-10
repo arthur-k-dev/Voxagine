@@ -28,6 +28,9 @@ struct QuadInstanceRef
 {
 	uint InstanceIndex;
 	uint QuadIndex;
+	
+	uint _Pad0;
+	uint _Pad1;
 };
 
 STRUCTURED_BUFFER(ModelInstance) modelInstances : register(t0);

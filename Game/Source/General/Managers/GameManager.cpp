@@ -29,6 +29,21 @@
 #include "Gameplay/States/GM_LoadoutState.h"
 #include "UI/States/MenuState.h"
 
+namespace rttr::detail
+{
+	template<>
+	struct template_type_trait<std::array<Player*, 2>> : std::true_type
+	{
+		static std::vector<::rttr::type> get_template_arguments() { return {}; }
+	};
+
+	template<>
+	struct template_type_trait<std::array<Entity*, 2>> : std::true_type
+	{
+		static std::vector<::rttr::type> get_template_arguments() { return {}; }
+	};
+}
+
 RTTR_REGISTRATION
 {
 	/*

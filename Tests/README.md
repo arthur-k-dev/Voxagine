@@ -19,6 +19,29 @@ All three run in CI on both configurations. Each takes an optional substring
 filter — `voxagine_tests scenarios diagonal`, `voxagine_tests checks VoxelGrid`
 — which is what you want while chasing one failure.
 
+## Opt-in GPU integration test
+
+`Tests/Rendering/DestructionSyncStress.cpp` is a separate executable because it
+needs the real game world, chunk jobs, Vulkan renderer and a desktop GPU. It is
+not part of the CPU suite or CI, and its fixture lives entirely under `Tests/`.
+
+```bash
+cmake --preset game -DVOXAGINE_BUILD_GPU_TESTS=ON
+cmake --build --preset game --target voxagine_gpu_destruction_stress
+ctest --test-dir Build/Linux/Game/Debug -R gpu_destruction_sync_stress --output-on-failure
+```
+
+The fixture alternates the resident window between two positions, first in
+Fishing Village Beat 1 and then in Beat 2 after switching levels through the
+game's real asynchronous replace-world path. It waits for all nine chunk
+mappings to commit, restricts each new phase to chunks that entered the window,
+and accepts a burst only when a live destructible model voxel is removed
+immediately. Whole application-loop intervals have separate hard hitch limits
+for steady destruction, chunk-window changes, and level replacement. It also
+fails if the Vulkan direct timeline stops advancing while submissions are
+outstanding. The CTest timeout remains the backstop for a main thread blocked
+inside a fence wait.
+
 ## Layout
 
 Directories name the **system under test**, not the engine directory the header

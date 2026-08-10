@@ -54,4 +54,7 @@ struct ModelQuadInstance
 {
 	uint32_t InstanceIndex = 0;
 	uint32_t QuadIndex = 0;
+	
+	uint32_t _Pad0 = 0;
+	uint32_t _Pad1 = 0;
 };

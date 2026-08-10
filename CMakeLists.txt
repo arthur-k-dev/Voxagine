@@ -23,6 +23,7 @@ set(VOXAGINE_AUDIO_BACKEND "MINIAUDIO" CACHE STRING
 set_property(CACHE VOXAGINE_AUDIO_BACKEND PROPERTY STRINGS MINIAUDIO NONE)
 option(VOXAGINE_ENABLE_OPTICK "Enable Optick profiling" OFF)
 option(VOXAGINE_BUILD_TESTS   "Build the gtest suite (needs VOXAGINE_BUILD_ENGINE)" OFF)
+option(VOXAGINE_BUILD_GPU_TESTS "Build the opt-in headless GPU integration test" OFF)
 option(VOXAGINE_PROFILE_DEFAULT "Default the frame profiler on in an optimised build" OFF)
 set(VOXAGINE_ASSET_VERSION "dev" CACHE STRING
     "Stamped into the extracted mobile asset tree; a change re-extracts it")
@@ -228,8 +229,6 @@ if(VOXAGINE_BUILD_ENGINE)
     endif()
 
     if(VOXAGINE_ANDROID)
-        # AAssetManager, for unpacking the APK's assets on first launch
-        # (Core/System/MobileAssets.cpp), and __android_log_print.
         target_link_libraries(voxagine PRIVATE android log)
     endif()
 
@@ -385,6 +384,38 @@ if(VOXAGINE_BUILD_ENGINE)
     # still links; it just cannot render until someone compiles the shaders.
     if(TARGET voxagine_shaders_game)
         add_dependencies(BitBuster voxagine_shaders_game)
+    endif()
+
+    # A separate executable on purpose: this is a renderer integration test,
+    # not part of Tests/Framework's CPU-only suite. Its fixture owns the test
+    # application and drives real destruction; VoxApp remains production-only.
+    if(VOXAGINE_BUILD_GPU_TESTS AND NOT VOXAGINE_BUILD_EDITOR)
+        set(VOXAGINE_GPU_TEST_SOURCES ${VOXAGINE_GAME_SOURCES})
+        list(REMOVE_ITEM VOXAGINE_GPU_TEST_SOURCES
+            ${CMAKE_CURRENT_SOURCE_DIR}/Game/Source/main.cpp)
+
+        add_executable(voxagine_gpu_destruction_stress
+            ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Rendering/DestructionSyncStress.cpp
+            ${VOXAGINE_GPU_TEST_SOURCES})
+        target_include_directories(voxagine_gpu_destruction_stress PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/Game/Source)
+        target_link_libraries(voxagine_gpu_destruction_stress PRIVATE
+            "$<LINK_LIBRARY:WHOLE_ARCHIVE,voxagine>"
+            voxagine_warnings)
+
+        if(TARGET voxagine_shaders_game)
+            add_dependencies(voxagine_gpu_destruction_stress voxagine_shaders_game)
+        endif()
+
+        add_test(NAME gpu_destruction_sync_stress
+            COMMAND voxagine_gpu_destruction_stress
+                --hidden --uncapped --size 640x360 --frames 6000
+                --map Content/Worlds/Fishing_Village/Fishing_Village_Beat1.wld)
+        set_tests_properties(gpu_destruction_sync_stress PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/Game
+            LABELS "gpu;integration"
+            RUN_SERIAL TRUE
+            TIMEOUT 180)
     endif()
 endif()
 

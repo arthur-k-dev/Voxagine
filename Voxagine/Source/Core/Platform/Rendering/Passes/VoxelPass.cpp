@@ -15,7 +15,9 @@ VoxelPass::VoxelPass(
 	PRenderContext* pContext, Shader* pVertex, Shader* pPixel,
 	Sampler* pSampler, Sampler* pPyramidSampler,
 	Mapper* pVoxelMapper, Mapper* pBrickMapper, Buffer* pCameraBuffer, Buffer* pAABBBuffer,
-	View* pParticleTexture, View* pParticleDepthTexture, View* pSunShadowTexture,
+	View* pParticleTexture, View* pParticleDepthTexture,
+	View* pModelTexture, View* pModelDepthTexture,
+	View* pSunShadowTexture,
 	View* pPyramidTexture
 ) : PRenderPass(pContext)
 {
@@ -58,14 +60,23 @@ VoxelPass::VoxelPass(
 	RenderPassData.m_Textures.push_back(pParticleTexture);
 	RenderPassData.m_Textures.push_back(pParticleDepthTexture);
 
-	/* Sun shadow map at t3, when shadows are enabled. The ShadowLess variant
-	   declares nothing at t3, and pushing a texture a shader never names would
+	/* Dynamic model pass output, t3/t4 - DYNAMIC_MODELS_PLAN.md phase 2.
+	   Unconditional like the particle pair above it, not gated on shadow
+	   settings: both voxel pixel shader variants composite dynamic renderers
+	   the same way regardless of ShadowQuality, so both declare these two and
+	   the registers after them shift by two from what they were before this
+	   pass existed. */
+	RenderPassData.m_Textures.push_back(pModelTexture);
+	RenderPassData.m_Textures.push_back(pModelDepthTexture);
+
+	/* Sun shadow map at t5, when shadows are enabled. The ShadowLess variant
+	   declares nothing at t5, and pushing a texture a shader never names would
 	   put a descriptor in the layout with no binding to match it. */
 	if (pSunShadowTexture != nullptr)
 		RenderPassData.m_Textures.push_back(pSunShadowTexture);
 
-	/* The coverage pyramid, last before the bindless array - so t4 with the
-	   shadow map in front of it and t3 without, which is what each variant
+	/* The coverage pyramid, last before the bindless array - so t6 with the
+	   shadow map in front of it and t5 without, which is what each variant
 	   declares. RENDERING_PLAN.md 7.1b route B. */
 	RenderPassData.m_Textures.push_back(pPyramidTexture);
 

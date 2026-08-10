@@ -24,6 +24,22 @@ public:
 
 	void Report(const std::string& name, double fMilliseconds);
 
+	/* A count of things done, not a duration - voxels stamped, renderers
+	   re-baked, quads submitted.
+	 *
+	 * Separate from Report because it answers a different question and answers
+	 * it *reliably*: a count is exact and machine-independent, so it is valid
+	 * on a machine that is running something else, and two builds that disagree
+	 * on it disagree about the work rather than about the weather. Timings on
+	 * this tree have already been wrong twice for environmental reasons - a
+	 * vsync-locked GPU clock (RENDERING_PLAN.md 7.3) and a compositor-chosen
+	 * window size (CLAUDE.md) - and `Tests/` is built on exactly this split:
+	 * work metrics gate CI, timings only report.
+	 *
+	 * Logged under [work] with a per-second total and peak, so a per-frame
+	 * counter reads as a rate and a one-shot cost still shows its spike. */
+	void ReportCount(const std::string& name, double fCount);
+
 	/* Call once per frame; logs and resets every accumulator roughly once a
 	   second. No-op when disabled. */
 	void Tick(float fDeltaTime);
@@ -39,6 +55,12 @@ private:
 		double fPeakMs = 0.0;
 
 		uint32_t uiSamples = 0;
+
+		/* Reported by ReportCount rather than Report, so Tick knows to print it
+		   as a total under [work] instead of an average under [timing]. A name
+		   belongs to one channel or the other; mixing them would average counts
+		   and total milliseconds, both of which are meaningless. */
+		bool bIsCount = false;
 	};
 
 	bool m_bEnabled = false;

@@ -40,8 +40,41 @@ void VoxelBaker::Bake()
 
 	m_fRepairMilliseconds = 0.0;
 
+	/* DYNAMIC_MODELS_PLAN.md phase 0. The whole plan turns on how much of this
+	   pass is spent re-voxelizing things that move, and the aggregate counter
+	   above cannot say - a world load's static stamping and a walking
+	   character's per-frame re-stamp land in the same number.
+
+	   Counted as well as timed, and the counts are the ones to quote: they are
+	   exact and machine-independent, so they are valid on a busy machine and
+	   comparable between two builds. See FrameProfiler::ReportCount. */
+	double fStaticMs = 0.0;
+	double fDynamicMs = 0.0;
+
+	uint32_t uiStaticRenderers = 0;
+	uint32_t uiDynamicRenderers = 0;
+
+	uint32_t uiStaticVoxels = 0;
+	uint32_t uiDynamicVoxels = 0;
+
 	for (VoxRenderer* pRenderer : m_pRenderSystem->m_VoxRenderers)
 	{
+		/* DYNAMIC_MODELS_PLAN.md phase 3. A dynamic renderer is never stamped -
+		   RenderSystem::OnComponentAdded skips its initial Occupy the same
+		   way - so there is nothing here for it: no clear, no repair scan,
+		   none of the swap/generation bookkeeping below, which exists only to
+		   answer "does the voxel buffer still hold what was stamped" for a
+		   renderer that was in fact stamped. It renders through
+		   VoxelModelPass now (phase 2). Left with everything false/reset so a
+		   renderer that is *later* made static starts clean rather than
+		   inheriting a stale Updated flag. */
+		if (!pRenderer->GetOwner()->IsStatic())
+		{
+			pRenderer->m_BakeData.Updated = false;
+			pRenderer->m_bUpdateRequested = false;
+			continue;
+		}
+
 		bool bEnabled = pRenderer->IsEnabled();
 
 		bool bIsStaticChunkLoaded = pRenderer->IsChunkInstanceLoaded() && pRenderer->GetOwner()->IsStatic();
@@ -110,6 +143,29 @@ void VoxelBaker::Bake()
 		}
 
 
+		/* Past every skip above, so this renderer is genuinely being re-baked
+		   and its cost belongs to one side of the split. Recorded at both exits
+		   below - a disabled renderer clears without stamping, which is real
+		   work and would otherwise vanish from the count. */
+		const bool bRendererStatic = pRenderer->GetOwner()->IsStatic();
+
+		const std::chrono::steady_clock::time_point rendererStart =
+			bProfiling ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
+
+		const auto fAccount = [&](uint32_t uiVoxels)
+		{
+			(bRendererStatic ? uiStaticRenderers : uiDynamicRenderers) += 1;
+			(bRendererStatic ? uiStaticVoxels : uiDynamicVoxels) += uiVoxels;
+
+			if (!bProfiling)
+				return;
+
+			const double fMs = std::chrono::duration<double, std::milli>(
+				std::chrono::steady_clock::now() - rendererStart).count();
+
+			(bRendererStatic ? fStaticMs : fDynamicMs) += fMs;
+		};
+
 		/* Remove old voxels. A bake that is itself a repair does not start
 		   another one - see NotifyClearedRegion. */
 		const bool bRepairOnly = pRenderer->m_BakeData.RepairOnly;
@@ -123,6 +179,8 @@ void VoxelBaker::Bake()
 			   changes. Leaving these set is what made the clear repeat. */
 			pRenderer->m_BakeData.Updated = false;
 			pRenderer->m_bUpdateRequested = false;
+
+			fAccount(0);
 
 			continue;
 		}
@@ -144,14 +202,33 @@ void VoxelBaker::Bake()
 
 		/* Occupy new voxels if position is in bounds */
 		Occupy(pRenderer, &pRenderer->m_BakeData);
+
+		fAccount(pRenderer->m_BakeData.Size);
 	}
 
 	if (bProfiling)
 	{
+		/* Counts and timings both go behind the same guard - the profiler's
+		   contract is that a disabled build reads no clock and calls no
+		   Report, and four string-keyed lookups a frame is exactly the cost it
+		   exists to avoid. What makes the counts more trustworthy than the
+		   timings is that they do not vary with what else the machine is
+		   doing, not that they are free. */
+		FrameProfiler::Get().ReportCount("Bake renderers (static)", uiStaticRenderers);
+		FrameProfiler::Get().ReportCount("Bake renderers (dynamic)", uiDynamicRenderers);
+		FrameProfiler::Get().ReportCount("Bake voxels (static)", uiStaticVoxels);
+		FrameProfiler::Get().ReportCount("Bake voxels (dynamic)", uiDynamicVoxels);
+
 		const double fMilliseconds =
 			std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
 
 		FrameProfiler::Get().Report("CPU VoxelBaker::Bake", fMilliseconds);
+
+		/* The two halves of that number. They do not sum to it - the skip tests
+		   above run for every renderer whether or not it is re-baked, and that
+		   remainder is the part DYNAMIC_MODELS_PLAN.md does *not* remove. */
+		FrameProfiler::Get().Report("CPU Bake (static)", fStaticMs);
+		FrameProfiler::Get().Report("CPU Bake (dynamic)", fDynamicMs);
 
 		/* Reported beside it rather than inside it: the repair scan is the one
 		   part of the bake whose cost is a function of how many renderers exist
@@ -491,6 +568,24 @@ void VoxelBaker::NotifyClearedRegion(VoxRenderer* pCleared, const Vector3& v3Gri
 void VoxelBaker::Clear(VoxRenderer* pRenderer, VoxRenderer::BakeData* pBakeData, bool bNotify)
 {
 	if (pRenderer->GetWorld()->GetApplication()->IsShuttingDown())
+		return;
+
+	/* DYNAMIC_MODELS_PLAN.md phase 6. A dynamic renderer that has never been
+	   baked (which, since phase 3, is every dynamic renderer - VoxelBaker::Bake
+	   and RenderSystem::OnComponentAdded both skip Occupy for one) has nothing
+	   in the voxel buffer or the physics grid to remove. Without this,
+	   OnComponentDestroyed's call into here for a despawning dynamic renderer
+	   (a dead monster, a bullet) falls through to the "else" branch below and
+	   pays for a grid.GetChunk() scan of its whole bounding box to discover
+	   that, which it does on every dynamic despawn in the game. Guarded on
+	   Positions being null rather than IsStatic() alone so a renderer that was
+	   static and toggled dynamic still gets its real cleanup - OnComponentAdded's
+	   StaticPropertyChanged handler already runs this Clear while the renderer
+	   is still static, before the toggle, so Positions is null here precisely
+	   when there is truly nothing left to do. */
+	const VoxRenderer::BakeData& existingBakeData = pBakeData ? *pBakeData : pRenderer->m_BakeData;
+
+	if (!pRenderer->GetOwner()->IsStatic() && existingBakeData.Positions == nullptr)
 		return;
 
 	VoxelGrid& grid = m_pPhysicsSystem->m_VoxelGrid;

@@ -6,6 +6,7 @@
 
 #include "Core/ECS/Systems/Rendering/Buffers/RenderBuffer.h"
 #include "Core/ECS/Systems/Rendering/Buffers/Structures/StructuredVoxelBuffer.h"
+#include "Core/ECS/Systems/Rendering/Buffers/Structures/ModelInstanceData.h"
 
 #include "Core/Platform/Rendering/RenderDefines.h"
 #include "Core/Platform/Rendering/Managers/ModelManagerInc.h"
@@ -40,6 +41,7 @@ class WindowContext;
 class RenderPass;
 
 class ParticlePass;
+class VoxelModelPass;
 
 class Settings;
 class Camera;
@@ -212,6 +214,18 @@ public:
 
 	virtual void Submit(StructuredVoxelBuffer& renderData);
 
+	/* DYNAMIC_MODELS_PLAN.md phase 2. One dynamic (non-static) VoxRenderer's
+	   continuous world transform this frame - see ModelInstanceData.h for why
+	   it is not VoxelStamp.h's quantized VoxelStampTransform. Returns the
+	   index SubmitModelQuads needs to reference it; both lists are cleared
+	   once a frame the same way m_AABBList already is. */
+	uint32_t SubmitModelInstance(const ModelInstanceData& instance);
+
+	/* Expands ModelMeshStore's [uiFirstQuad, uiFirstQuad + uiQuadCount) into
+	   this frame's quad-instance list, each entry naming uiInstanceIndex - the
+	   return value of the SubmitModelInstance call for the same renderer. */
+	void SubmitModelQuads(uint32_t uiInstanceIndex, uint32_t uiFirstQuad, uint32_t uiQuadCount);
+
 	void SortAABBs();
 
 	void EnableDebugLines(bool bEnabled);
@@ -312,6 +326,16 @@ public:
 	   the engine that records the voxel pass and before it opens - the pass
 	   samples the result. See m_pPyramidView. */
 	void UploadVoxelPyramid(PCommandEngine* pEngine);
+
+	/* DYNAMIC_MODELS_PLAN.md phase 2. Grows m_pModelMeshMapper to match
+	   ModelMeshStore's current quad count and re-uploads it, but only when
+	   that count has grown since the last call - the common case once a
+	   level's dynamic models have all been seen once. Called from Present
+	   inside the same "GPU is not still reading last frame's data" guard the
+	   AABB buffer's own per-frame rebuild already relies on (RenderContext.cpp,
+	   "AABB buffer" comment) - a plain CPU write into mapped memory, so unlike
+	   UploadVoxelPyramid it needs no command engine. */
+	void SyncModelMeshStore();
 
 	/* Reads the coverage texture back and checks it against the mirror the CPU
 	   maintains, plus every coarser mip against the average of its children.
@@ -521,6 +545,24 @@ protected:
 
 	// Frontend resources
 	std::vector<StructuredVoxelBuffer> m_AABBList;
+
+	/* DYNAMIC_MODELS_PLAN.md phase 2. This frame's dynamic-renderer transforms
+	   and the quads that reference them - filled by SubmitModelInstance/
+	   SubmitModelQuads, cleared once a frame the same place m_AABBList is,
+	   uploaded to pModelInstanceBuffer/pModelQuadInstanceBuffer in Present the
+	   same way m_AABBList is uploaded to the AABB buffer. */
+	std::vector<ModelInstanceData> m_ModelInstances;
+	std::vector<ModelQuadInstance> m_ModelQuadInstances;
+
+	/* The shared greedy-mesh quad store (ModelMeshStore, VoxelMesher.h) mirrored
+	   to the GPU. Grows across a session as new model frames are first meshed,
+	   never shrinks - SyncModelMeshStore in Present resizes and re-uploads the
+	   whole thing only when ModelMeshStore's own count has grown since the last
+	   sync, which is rare after the first few seconds of a level. */
+	Mapper* m_pModelMeshMapper = nullptr;
+	uint32_t m_uiModelMeshUploadedQuads = 0;
+
+	VoxelModelPass* m_pVoxelModelPass = nullptr;
 
 	std::vector<RenderData> m_RenderList;
 	std::vector<SpriteData> m_SpriteList;

@@ -23,6 +23,7 @@
 
 #include "Core/ECS/Systems/Rendering/Buffers/RenderData.h"
 #include "Core/ECS/Systems/Rendering/VoxelStamp.h"
+#include "Core/ECS/Systems/Rendering/ModelMeshStore.h"
 
 #include "Core/Platform/Rendering/RenderContext.h"
 #include "Core/Platform/Rendering/FrameProfiler.h"
@@ -214,6 +215,69 @@ void RenderSystem::PostTick(float fDeltaTime)
 		}
 
 		m_pRenderContext->Submit(buffer);
+
+		/* DYNAMIC_MODELS_PLAN.md phase 2. A dynamic renderer is still baked as
+		   well, at this point in the plan (phase 3 removes that) - this is the
+		   redundant-but-verifiable overlay the phase's acceptance criteria
+		   asks for. Static renderers are unaffected: ModelMeshStore was built
+		   for every frame in phase 1, but only non-static ones are submitted
+		   to the model pass here. */
+		if (!pRenderer->GetOwner()->IsStatic())
+		{
+			const VoxelMesher::Result mesh = ModelMeshStore::Get().EnsureMeshed(pFrame);
+
+			if (mesh.m_uiQuadCount > 0)
+			{
+				/* Shared with VoxFrameEmitter (DYNAMIC_MODELS_PLAN.md phase
+				   3) so the two can never disagree about where this
+				   renderer's model actually is - VoxelStamp.h. */
+				Vector3 worldOrigin(0.f);
+				Quaternion quat;
+				Vector3 scale(1.f);
+
+				if (ComputeContinuousModelTransform(pRenderer, worldOrigin, quat, scale) &&
+				    std::isfinite(worldOrigin.x + worldOrigin.y + worldOrigin.z))
+				{
+					ModelInstanceData instance;
+					instance.Rotation = Vector4(quat.x, quat.y, quat.z, quat.w);
+					instance.Scale = scale;
+					instance.WorldOrigin = worldOrigin;
+					instance.OverrideColor = pRenderer->GetOverrideColor().inst.Color;
+					instance.Tag = VoxelStateTag(pRenderer->GetState(), pRenderer->IsEmissive());
+
+					const uint32_t uiInstanceIndex = m_pRenderContext->SubmitModelInstance(instance);
+					m_pRenderContext->SubmitModelQuads(uiInstanceIndex, mesh.m_uiFirstQuad, mesh.m_uiQuadCount);
+
+					static const bool s_bModelDebug = std::getenv("VOXAGINE_MODEL_DEBUG") != nullptr;
+					static int s_iPrinted = 0;
+					if (s_bModelDebug && s_iPrinted < 6)
+					{
+						s_iPrinted++;
+						const std::vector<uint32_t>& quads = ModelMeshStore::Get().GetQuads();
+						const uint32_t uiStoreTotal = ModelMeshStore::Get().GetTotalQuadCount();
+
+						fprintf(stderr, "[model] '%s' static=%d frame=%p firstQuad=%u count=%u storeTotal=%u instIdx=%u rot=(%.3f %.3f %.3f %.3f) origin=(%.2f %.2f %.2f) scale=(%.2f %.2f %.2f)\n",
+							pRenderer->GetOwner()->GetName().c_str(), pRenderer->GetOwner()->IsStatic(),
+							(const void*)pFrame, mesh.m_uiFirstQuad, mesh.m_uiQuadCount, uiStoreTotal, uiInstanceIndex,
+							quat.x, quat.y, quat.z, quat.w,
+							worldOrigin.x, worldOrigin.y, worldOrigin.z,
+							scale.x, scale.y, scale.z);
+
+						for (uint32_t q = mesh.m_uiFirstQuad; q < mesh.m_uiFirstQuad + std::min(mesh.m_uiQuadCount, 5u); q++)
+						{
+							const uint32_t w0 = quads[q * 3 + 0];
+							const uint32_t w1 = quads[q * 3 + 1];
+							const uint32_t w2 = quads[q * 3 + 2];
+
+							fprintf(stderr, "  quad %u: origin=(%u,%u,%u) axis=%u sign=%u extent=(%u,%u) colour=0x%08x\n",
+								q, w0 & 0xFFu, (w0 >> 8) & 0xFFu, (w0 >> 16) & 0xFFu,
+								(w0 >> 24) & 0x3u, (w0 >> 26) & 0x1u,
+								w1 & 0xFFu, (w1 >> 8) & 0xFFu, w2);
+						}
+					}
+				}
+			}
+		}
 
 		if (s_bCoverageAudit)
 		{
@@ -650,7 +714,14 @@ void RenderSystem::OnComponentAdded(Component* pComponent)
 		   When disabled, because the bake would only clear it again - and the
 		   bake can no longer be relied on to do that, since it now skips a
 		   renderer whose recorded stamp is still current. */
-		if (m_bStarted && !pRenderer->IsChunkInstanceLoaded() && pRenderer->IsEnabled())
+		/* DYNAMIC_MODELS_PLAN.md phase 3: a dynamic renderer is never stamped,
+		   here or in VoxelBaker::Bake - it renders through VoxelModelPass
+		   (phase 2) instead, from RenderSystem::PostTick's own continuous
+		   transform. bakeData above still gets recorded (WorldOffset,
+		   LastLocation/Rotation/Scale, IsEnabled) since CheckRendererChange
+		   still reads some of those fields regardless of IsStatic; only the
+		   voxel write is skipped. */
+		if (m_bStarted && !pRenderer->IsChunkInstanceLoaded() && pRenderer->IsEnabled() && pRenderer->GetOwner()->IsStatic())
 		{
 			/* Reported separately because it is *not* inside VoxelBaker::Bake,
 			   and that gap is misleading: this is where a world load's stamping
@@ -668,8 +739,25 @@ void RenderSystem::OnComponentAdded(Component* pComponent)
 
 			if (bProfiling)
 			{
-				FrameProfiler::Get().Report("CPU VoxelBaker::Occupy (added)",
-					std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+				const double fMs =
+					std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+
+				FrameProfiler::Get().Report("CPU VoxelBaker::Occupy (added)", fMs);
+
+				/* Split by IsStatic for DYNAMIC_MODELS_PLAN.md phase 0, same as
+				   VoxelBaker::Bake. This one is almost entirely static - it is
+				   the world-load stamp - so the interest here is the *dynamic*
+				   line staying near zero, which is what says the per-frame cost
+				   of a moving character is in Bake and not spread across two
+				   counters. */
+				const bool bRendererStatic = pRenderer->GetOwner()->IsStatic();
+
+				FrameProfiler::Get().Report(
+					bRendererStatic ? "CPU Occupy added (static)" : "CPU Occupy added (dynamic)", fMs);
+
+				FrameProfiler::Get().ReportCount(
+					bRendererStatic ? "Added voxels (static)" : "Added voxels (dynamic)",
+					pRenderer->m_BakeData.Size);
 			}
 		}
 	}

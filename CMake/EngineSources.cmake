@@ -60,8 +60,10 @@ set(VOXAGINE_ENGINE_SOURCES
     ${VOXAGINE_SOURCE_DIR}/Core/ECS/Systems/Physics/Sphere.cpp
     ${VOXAGINE_SOURCE_DIR}/Core/ECS/Systems/Physics/VoxelGrid.cpp
     ${VOXAGINE_SOURCE_DIR}/Core/ECS/Systems/Rendering/DebugRenderer.cpp
+    ${VOXAGINE_SOURCE_DIR}/Core/ECS/Systems/Rendering/ModelMeshStore.cpp
     ${VOXAGINE_SOURCE_DIR}/Core/ECS/Systems/Rendering/RenderSystem.cpp
     ${VOXAGINE_SOURCE_DIR}/Core/ECS/Systems/Rendering/VoxelBaker.cpp
+    ${VOXAGINE_SOURCE_DIR}/Core/ECS/Systems/Rendering/VoxelMesher.cpp
     ${VOXAGINE_SOURCE_DIR}/Core/ECS/Systems/ScriptSystem.cpp
     ${VOXAGINE_SOURCE_DIR}/Core/ECS/World.cpp
     ${VOXAGINE_SOURCE_DIR}/Core/ECS/WorldManager.cpp
@@ -116,6 +118,9 @@ set(VOXAGINE_ENGINE_SOURCES
     ${VOXAGINE_SOURCE_DIR}/Core/Platform/Rendering/Passes/VoxelBakePass.cpp
     ${VOXAGINE_SOURCE_DIR}/Core/Platform/Rendering/Passes/SunShadowPass.cpp
     ${VOXAGINE_SOURCE_DIR}/Core/Platform/Rendering/Passes/VoxelPass.cpp
+    ${VOXAGINE_SOURCE_DIR}/Core/Platform/Rendering/Passes/VoxelModelPass.cpp
+    ${VOXAGINE_SOURCE_DIR}/Core/Platform/Rendering/Passes/SunShadowModelPass.cpp
+    ${VOXAGINE_SOURCE_DIR}/Core/Platform/Rendering/Passes/SunShadowCombinePass.cpp
     ${VOXAGINE_SOURCE_DIR}/Core/Platform/Rendering/RenderContext.cpp
     ${VOXAGINE_SOURCE_DIR}/Core/Platform/Rendering/VoxelBrickGrid.cpp
     ${VOXAGINE_SOURCE_DIR}/Core/Platform/Rendering/FarFieldVolume.cpp

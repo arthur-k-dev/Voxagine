@@ -18,17 +18,24 @@ RW_STRUCTURED_BUFFER(uint) voxelBrickData : register(u1);
 Texture2D<float4> particlePass : register(t1);
 Texture2D<float> particleDepthPass : register(t2);
 
-/* Light-space sun shadow map - RENDERING_PLAN.md 7.1a. Third texture pushed by
-   VoxelPass, so t3; the bindless model array below stays at t4. */
-Texture2D<float> sunShadowMap : register(t3);
+/* Dynamic model pass output - DYNAMIC_MODELS_PLAN.md phase 2, VoxelModelPass.
+   Same composited-by-depth idea as the particle pair above, t3/t4, pushed
+   unconditionally by VoxelPass so every register after this shifted by two
+   from what it was before this pass existed. */
+Texture2D<float4> modelPass : register(t3);
+Texture2D<float> modelDepthPass : register(t4);
+
+/* Light-space sun shadow map - RENDERING_PLAN.md 7.1a. Pushed after the model
+   pair, so t5; the bindless model array below stays at t6. */
+Texture2D<float> sunShadowMap : register(t5);
 
 /* Coverage and radiance pyramid - RENDERING_PLAN.md 7.1b route B and 7.3. Mip
    L is pyramid level L over the resident window: alpha is the occupied fraction
    of a cell and RGB its linear albedo premultiplied by that fraction, so one
    SampleLevel is a cone step for both the occlusion and the bounce, filter
-   included. Fourth texture pushed by VoxelPass, so t4, and the bindless model
-   array moves up to t5. */
-Texture3D<float4> voxelPyramid : register(t4);
+   included. Pushed after the shadow map, so t6, and the bindless model array
+   moves up to t7. */
+Texture3D<float4> voxelPyramid : register(t6);
 
 /* The unbounded `VOXEL_BUFFER voxelModelData[] : register(tN)` that used to be
    here is gone. It was never read - it belonged to a GPU-baker path that was
@@ -57,6 +64,7 @@ struct PS_in
 #include "Lighting.hlsl"
 #include "AmbientCone.hlsl"
 #include "Fog.hlsl"
+#include "ShadeVoxelSurface.hlsl"
 
 FORCE_DEPTH_TEST
 float4 main(PS_in IN) : TAR_OUT
@@ -65,6 +73,12 @@ float4 main(PS_in IN) : TAR_OUT
     float2 particleUV = IN.NormScreenPosition.xy / (viewport.xy * voxelRenderScale);
     float4 particleColor = particlePass.Sample(s0, particleUV);
     float particleDepth = particleDepthPass.Sample(s0, particleUV);
+
+    /* Dynamic model pass output - DYNAMIC_MODELS_PLAN.md phase 2. Same UV as
+       the particle pair: VoxelModelPass follows resolution scale identically
+       (VoxelModelPass.cpp), so the footprint the two were rendered at agrees. */
+    float4 modelColor = modelPass.Sample(s0, particleUV);
+    float modelDepth = modelDepthPass.Sample(s0, particleUV);
 
     /* March diffuse color */
     float3 rayOrigin = IN.WorldPosition - camOffset.xyz;
@@ -86,11 +100,33 @@ float4 main(PS_in IN) : TAR_OUT
 		primaryBrickSteps
 	);
 
-    if (particleDepth < distance(marchDiffuse.SmoothPosition + camOffset.xyz, camPosition.xyz) && particleColor.a != 0.0)
+    /* Nearest of {model, particle, world hit} wins - DYNAMIC_MODELS_PLAN.md
+       piece 3. bWorldHit gates worldDistance out of every comparison on a
+       miss, structurally rather than by relying on its value - the original
+       particle-only check compared against worldDistance unconditionally,
+       trusting a MarchResult on the miss path whose SmoothPosition nothing
+       sets. That is a latent quirk of the code being extended, not something
+       this change is here to fix, but a three-way version cannot silently
+       inherit "depends on uninitialized memory" without saying so: gating on
+       bWorldHit is the minimal, deliberate correction, not a rewrite of the
+       miss path's behaviour. */
+    float worldDistance = distance(marchDiffuse.SmoothPosition + camOffset.xyz, camPosition.xyz);
+    bool bWorldHit = marchDiffuse.Color.a != 0.0;
+
+    bool bHasModel = modelColor.a != 0.0;
+    bool bHasParticle = particleColor.a != 0.0;
+
+    bool bModelWins = bHasModel && (!bWorldHit || modelDepth < worldDistance) && (!bHasParticle || modelDepth <= particleDepth);
+    bool bParticleWins = !bModelWins && bHasParticle && (!bWorldHit || particleDepth < worldDistance);
+
+    if (bModelWins)
+        return modelColor;
+
+    if (bParticleWins)
     {
         return particleColor;
     }
-	
+
     /* Return transparent when not marched against anything. Sky and endless
        ground are composited in PostProcessing.ps.hlsl instead of here - this
        pass only rasterizes AABB proxy cubes (see RENDERING_PLAN.md phase 1
@@ -220,30 +256,17 @@ float4 main(PS_in IN) : TAR_OUT
     if (AO_CONE_ENABLED)
         skyVisibility *= GetConeAmbient(marchDiffuse.SmoothPosition, marchDiffuse.Normal, IN.NormScreenPosition.xy, bounce);
 
-    /* Linear radiance from here to EncodeSceneColor below - RENDERING_PLAN.md
-       phase 7.2, and Color.hlsl for why the encode is here rather than at
-       present. */
-    float3 v3Radiance = ShadeSurface(marchDiffuse.Color.xyz, marchDiffuse.Normal, sunVisibility, skyVisibility, bounce);
+    /* Linear radiance until ShadeVoxelHit's EncodeSceneColor at the end -
+       RENDERING_PLAN.md phase 7.2, and Color.hlsl for why the encode happens
+       here rather than at present. The tail from here on is shared with
+       VoxelRenderer.ShadowLess.ps.hlsl and the dynamic model pass
+       (DYNAMIC_MODELS_PLAN.md phase 2, ShadeVoxelSurface.hlsl) - only
+       sunVisibility and skyVisibility above it differ per caller. */
+    float fRawRimBoost = GetShineLine(marchDiffuse.Position, marchDiffuse.Normal, marchDiffuse.UV, lightDirection.xyz, difference);
 
-    /* Environment specular - RENDERING_PLAN.md 7.4. Added rather than folded
-       into ShadeSurface's parentheses: it is light reflected *off* this
-       surface, so the albedo does not multiply it. */
-    v3Radiance += GetConeSpecular(marchDiffuse.SmoothPosition, marchDiffuse.Normal, rayDirection);
-
-    /* Fake specular "shine line" on lit voxel edges - see GetShineLine in
-       AmbientOcclusion.hlsl. It returns 1.0 for anything the sun does not
-       reach, so applying it to the whole shaded result rather than to the sun
-       term alone only ever brightens a rim that is already lit. Its gain was
-       tuned against the encoded image, hence the conversion. */
-    v3Radiance *= GammaGainToLinear(GetShineLine(marchDiffuse.Position, marchDiffuse.Normal, marchDiffuse.UV, lightDirection.xyz, difference));
-
-    /* Aerial perspective - RENDERING_PLAN.md 6.1. From the *camera*, not
-       marchDiffuse.Distance: this pass rasterizes AABB proxies and the ray
-       started where its own box was entered, so the marcher's distance is not
-       the one fog is a function of. */
-    v3Radiance = ApplyAerialPerspective(v3Radiance, distance(marchDiffuse.SmoothPosition + camOffset.xyz, camPosition.xyz));
-
-    marchDiffuse.Color.xyz = EncodeSceneColor(v3Radiance);
+    marchDiffuse.Color.xyz = ShadeVoxelHit(
+        marchDiffuse.Color.xyz, marchDiffuse.Normal, marchDiffuse.SmoothPosition,
+        rayDirection, sunVisibility, skyVisibility, bounce, fRawRimBoost);
     marchDiffuse.Color.a = 1.0;
 
 #ifdef MARCH_STEP_DEBUG

@@ -13,7 +13,9 @@ public:
 		PRenderContext* pContext, Shader* pVertex, Shader* pPixel,
 		Sampler* pSampler, Sampler* pPyramidSampler,
 		Mapper* pVoxelMapper, Mapper* pBrickMapper, Buffer* pCameraBuffer, Buffer* pAABBBuffer,
-		View* pParticleTexture, View* pParticleDepthTexture, View* pSunShadowTexture,
+		View* pParticleTexture, View* pParticleDepthTexture,
+		View* pModelTexture, View* pModelDepthTexture,
+		View* pSunShadowTexture,
 		View* pPyramidTexture
 	);
 

@@ -2,6 +2,7 @@
 #include "Core/ECS/Components/VoxRenderer.h"
 
 #include "Core/Resources/Formats/VoxModel.h"
+#include "Core/ECS/Systems/Rendering/ModelMeshStore.h"
 
 #include <rttr/registration>
 #include <rttr/policy.h>
@@ -82,6 +83,16 @@ void VoxRenderer::SetFrame(const VoxFrame* pFrame, bool bIncrementRef)
 
 	m_pFrame = pFrame;
 	m_modelFilePath = m_pFrame ? m_pFrame->GetModel()->GetRefPath() : "";
+
+	/* DYNAMIC_MODELS_PLAN.md phase 1: cache this frame's greedy mesh the first
+	   time anything asks for it. Unconditional rather than gated on
+	   IsStatic() - meshing is idempotent and cheap after the first call for a
+	   given frame, distinct frames number in the hundreds for the whole game
+	   (phase 0), and a renderer's static/dynamic status is not settled yet at
+	   construction time this call can run at. Nothing reads the result until
+	   phase 2 wires a pass to it. */
+	if (m_pFrame != nullptr)
+		ModelMeshStore::Get().EnsureMeshed(m_pFrame);
 
 	FrameChanged(this);
 }

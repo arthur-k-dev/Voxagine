@@ -171,6 +171,79 @@ inline bool ComputeVoxelStampTransform(
 	return true;
 }
 
+/* DYNAMIC_MODELS_PLAN.md phase 2/3. The continuous (unrounded) equivalent of
+ * ComputeVoxelStampTransform above, for a renderer that is drawn as a mesh
+ * rather than stamped into a grid - no rotation quantization, no
+ * grid-alignment floor (which exists above only to land a *voxelized* stamp
+ * on an integer cell and has no meaning for a rasterized quad), no
+ * RoundedScale fill loop (a mesh's vertex shader scales continuously; there
+ * is no gap to fill).
+ *
+ * Two callers as of phase 3: RenderSystem::PostTick, which needs it to place
+ * and bound the mesh, and VoxFrameEmitter, which needs it to place a dying
+ * dynamic renderer's particles now that VoxelBaker never stamps one (so
+ * BakeData::Positions - the old source - is always null for it). Kept here
+ * rather than duplicated so the two can never disagree about where a
+ * renderer's model actually is. */
+/* Whether a dynamic renderer's yaw snaps to the nearest of 8 compass
+ * directions (45 degree steps) rather than rendering the transform's true,
+ * continuous heading. Settled with the user 2026-08-10: on by default -
+ * these are voxel-art models authored with a handful of canonical facings in
+ * mind, and a continuously turning character reads as unnatural between
+ * them (faceting that was never meant to be seen head-on). Only yaw snaps;
+ * pitch and roll (a knockback tumble, say) stay continuous.
+ *
+ * Not a Settings-exposed option yet - a function-local static reference is
+ * the whole toggle, flip it with `ModelYawSnapEnabled() = false;` until
+ * product wants a real setting. Function-local rather than a plain global to
+ * sidestep static-initialization-order questions across translation units. */
+inline bool& ModelYawSnapEnabled()
+{
+	static bool s_bEnabled = true;
+	return s_bEnabled;
+}
+
+inline bool ComputeContinuousModelTransform(
+	VoxRenderer* pRenderer, Vector3& o_v3WorldOrigin, Quaternion& o_qRotation, Vector3& o_v3Scale)
+{
+	const VoxFrame* pFrame = pRenderer->GetFrame();
+
+	if (!pFrame)
+		return false;
+
+	Transform* pTransform = pRenderer->GetTransform();
+
+	o_qRotation = pTransform->GetRotation();
+	o_v3Scale = pTransform->GetScale();
+
+	if (ModelYawSnapEnabled())
+	{
+		/* Same extraction ComputeVoxelStampTransform's own quantization uses
+		   above - kept to a single well-understood idiom in this file rather
+		   than a second one, just applied to one axis instead of three. */
+		Vector3 v3Euler = StableEulerAnglesDegrees(o_qRotation);
+		v3Euler.y = std::round(v3Euler.y / 45.f) * 45.f;
+
+		o_qRotation = glm::quat(v3Euler * DEG2RAD);
+	}
+
+	const Vector3 size = pFrame->GetFittedSize();
+	const Vector3 offset = -size * 0.5f;
+	Vector3 offsetCen(0.f);
+
+	if (pFrame->GetModel()->GetFrameCount() > 1)
+	{
+		const VoxFrame* pFirstFrame = pFrame->GetModel()->GetFrame(0);
+		offsetCen = -(pFirstFrame->GetFitSizeOffset() - pFrame->GetFitSizeOffset()) * 0.5f
+			+ ((pFrame->GetFitSizeOffset() + pFrame->GetFittedSize()) - (pFirstFrame->GetFitSizeOffset() + pFirstFrame->GetFittedSize())) * 0.5f;
+		offsetCen.y *= -1.f;
+	}
+
+	o_v3WorldOrigin = pTransform->GetPosition() + o_v3Scale * glm::rotate(o_qRotation, offset - offsetCen);
+
+	return true;
+}
+
 /* The grid-space box ForEachStampedVoxel below writes into, without walking a
  * voxel to find it: the model's own extent, scaled the way the walk scales it,
  * rotated by the same quantized rotation, placed at the same origin.

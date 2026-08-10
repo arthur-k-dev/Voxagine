@@ -39,8 +39,12 @@
 #include "Core/Platform/Rendering/Passes/SunShadowPass.h"
 #include "Core/Platform/Rendering/Passes/VoxelPass.h"
 #include "Core/Platform/Rendering/Passes/VoxelBakePass.h"
+#include "Core/Platform/Rendering/Passes/VoxelModelPass.h"
+#include "Core/Platform/Rendering/Passes/SunShadowModelPass.h"
+#include "Core/Platform/Rendering/Passes/SunShadowCombinePass.h"
 
 #include "Core/ECS/Components/VoxRenderer.h"
+#include "Core/ECS/Systems/Rendering/ModelMeshStore.h"
 #include "External/optick/optick.h"
 
 #include "Editor/imgui/Contexts/ImContext.h"
@@ -225,6 +229,42 @@ void RenderContext::Submit(StructuredVoxelBuffer& renderData)
 {
 	renderData.Distance = glm::distance(Vector3(renderData.Position), Vector3(m_CameraData.m_WorldPos));
 	m_AABBList.push_back(renderData);
+}
+
+uint32_t RenderContext::SubmitModelInstance(const ModelInstanceData& instance)
+{
+	m_ModelInstances.push_back(instance);
+	return static_cast<uint32_t>(m_ModelInstances.size() - 1);
+}
+
+void RenderContext::SubmitModelQuads(uint32_t uiInstanceIndex, uint32_t uiFirstQuad, uint32_t uiQuadCount)
+{
+	m_ModelQuadInstances.reserve(m_ModelQuadInstances.size() + uiQuadCount);
+
+	for (uint32_t i = 0; i < uiQuadCount; i++)
+		m_ModelQuadInstances.push_back({ uiInstanceIndex, uiFirstQuad + i });
+}
+
+void RenderContext::SyncModelMeshStore()
+{
+	const ModelMeshStore& store = ModelMeshStore::Get();
+	const uint32_t uiCurrentQuads = store.GetTotalQuadCount();
+
+	if (uiCurrentQuads == m_uiModelMeshUploadedQuads)
+		return;
+
+	/* 3 uint32_t words per quad (VoxelMesher.h) - the mapper's own element
+	   unit is one uint32_t, same granularity every other Mapper in this
+	   engine uses. Grown, never shrunk: ModelMeshStore never removes a quad
+	   once meshed. */
+	m_pModelMeshMapper->Resize(uiCurrentQuads * 3u, sizeof(uint32_t));
+
+	std::memcpy(
+		m_pModelMeshMapper->GetData(),
+		store.GetQuads().data(),
+		static_cast<size_t>(uiCurrentQuads) * 3u * sizeof(uint32_t));
+
+	m_uiModelMeshUploadedQuads = uiCurrentQuads;
 }
 
 void RenderContext::SortAABBs()
@@ -621,6 +661,11 @@ void RenderContext::Clear()
 	m_RenderList.clear();
 	m_AABBList.clear();
 
+	/* DYNAMIC_MODELS_PLAN.md phase 2 - cleared alongside the AABB list they
+	   are submitted next to, in RenderSystem::PostTick. */
+	m_ModelInstances.clear();
+	m_ModelQuadInstances.clear();
+
 #if defined(EDITOR) || defined(_DEBUG)
 	m_DebugDrawLines.clear();
 #endif
@@ -736,8 +781,15 @@ bool RenderContext::Present()
 
 	Buffer* pSpriteBuffer = m_mBuffers["Sprite Data"].get();
 
+	/* DYNAMIC_MODELS_PLAN.md phase 2. */
+	Buffer* pModelInstanceBuffer = m_mBuffers["Model Instance Data"].get();
+	Buffer* pModelQuadInstanceBuffer = m_mBuffers["Model Quad Instance Data"].get();
+
 	PRenderPass* pParticlePass = m_pRenderPasses["Particles"].get();
 	PRenderPass* pSunShadowPass = m_pRenderPasses["Sun Shadow"].get();
+	PRenderPass* pSunShadowModelPass = m_pRenderPasses["Sun Shadow Models"].get();
+	PRenderPass* pSunShadowCombinePass = m_pRenderPasses["Sun Shadow Combine"].get();
+	PRenderPass* pVoxelModelPass = m_pRenderPasses["Voxel Models"].get();
 	PRenderPass* pVoxelPass = m_pRenderPasses["Voxel"].get();
 	PRenderPass* pUIPass = m_pRenderPasses["UI Renderer"].get();
 	PRenderPass* pPostProcessingPass = m_pRenderPasses["Post Processing"].get();
@@ -1005,6 +1057,25 @@ bool RenderContext::Present()
 			pAABBBuffer->Allocate();
 		}
 
+		/* Model instance / quad-instance buffers - DYNAMIC_MODELS_PLAN.md
+		   phase 2, same "rebuild every frame, not worth guarding" reasoning as
+		   the AABB buffer just above. The mesh quad store itself is synced
+		   separately (SyncModelMeshStore) since it only needs to grow when a
+		   genuinely new model frame is first meshed, not every frame. */
+		{
+			pModelInstanceBuffer->Clear();
+			pModelInstanceBuffer->AddStructuredData(
+				m_ModelInstances.data(), sizeof(ModelInstanceData), m_ModelInstances.size(), false);
+			pModelInstanceBuffer->Allocate();
+
+			pModelQuadInstanceBuffer->Clear();
+			pModelQuadInstanceBuffer->AddStructuredData(
+				m_ModelQuadInstances.data(), sizeof(ModelQuadInstance), m_ModelQuadInstances.size(), false);
+			pModelQuadInstanceBuffer->Allocate();
+
+			SyncModelMeshStore();
+		}
+
 		if (pVDirectEngine->GetValue() > 0)
 		{
 			pVDirectEngine->AdvanceFrame();
@@ -1042,7 +1113,27 @@ bool RenderContext::Present()
 			pVDirectEngine->Begin(pSunShadowPass);
 			pVDirectEngine->Draw(pSunShadowPass);
 			pVDirectEngine->End(pSunShadowPass);
+
+			/* DYNAMIC_MODELS_PLAN.md phase 4: dynamic renderers' own
+			   light-space depth, then the combine pass that min()s it against
+			   pSunShadowPass's target above - each has to be complete before
+			   the next reads it, same one-render-pass-instance-per-pass rule
+			   as everything else in this sequence. */
+			pVDirectEngine->Begin(pSunShadowModelPass);
+			pVDirectEngine->Draw(pSunShadowModelPass);
+			pVDirectEngine->End(pSunShadowModelPass);
+
+			pVDirectEngine->Begin(pSunShadowCombinePass);
+			pVDirectEngine->Draw(pSunShadowCombinePass);
+			pVDirectEngine->End(pSunShadowCombinePass);
 		}
+
+		/* Dynamic models - DYNAMIC_MODELS_PLAN.md phase 2. The voxel pass
+		   samples this one's colour and depth targets (t3/t4), same ordering
+		   constraint as particles and the sun shadow map above. */
+		pVDirectEngine->Begin(pVoxelModelPass);
+		pVDirectEngine->Draw(pVoxelModelPass);
+		pVDirectEngine->End(pVoxelModelPass);
 
 		pVDirectEngine->Begin(pVoxelPass);
 		pVDirectEngine->Draw(pVoxelPass);
@@ -1166,6 +1257,9 @@ void RenderContext::InitializeRenderLoop()
 	Mapper* pParticleMapper = nullptr;
 	Buffer* pSpriteBuffer = nullptr;
 
+	Buffer* pModelInstanceBuffer = nullptr;
+	Buffer* pModelQuadInstanceBuffer = nullptr;
+
 	Sampler* pLinearSampler = nullptr;
 	Sampler* pPointSampler = nullptr;
 	Sampler* pPyramidSampler = nullptr;
@@ -1214,6 +1308,29 @@ void RenderContext::InitializeRenderLoop()
 		pSpriteBuffer = m_mBuffers[spriteBufInfo.m_Name].get();
 	}
 
+	/* Model instance / quad-instance buffers - DYNAMIC_MODELS_PLAN.md phase 2.
+	   Rebuilt every frame from m_ModelInstances/m_ModelQuadInstances, same
+	   pattern as the AABB buffer just above (RenderContext::Present, "AABB
+	   buffer" comment): the lists are rebuilt whether or not anything moved,
+	   so gating the upload on a dirty flag is not worth it at this size. */
+	{
+		Buffer::Info modelInstanceBufInfo;
+		modelInstanceBufInfo.m_Name = "Model Instance Data";
+		modelInstanceBufInfo.m_Type = Buffer::E_STRUCTURED;
+
+		m_mBuffers.emplace(modelInstanceBufInfo.m_Name, std::make_unique<Buffer>(Get(), modelInstanceBufInfo));
+		pModelInstanceBuffer = m_mBuffers[modelInstanceBufInfo.m_Name].get();
+	}
+
+	{
+		Buffer::Info modelQuadInstanceBufInfo;
+		modelQuadInstanceBufInfo.m_Name = "Model Quad Instance Data";
+		modelQuadInstanceBufInfo.m_Type = Buffer::E_STRUCTURED;
+
+		m_mBuffers.emplace(modelQuadInstanceBufInfo.m_Name, std::make_unique<Buffer>(Get(), modelQuadInstanceBufInfo));
+		pModelQuadInstanceBuffer = m_mBuffers[modelQuadInstanceBufInfo.m_Name].get();
+	}
+
 #if defined(_DEBUG) || defined(EDITOR)
 	// Debug line buffer
 	{
@@ -1239,6 +1356,27 @@ void RenderContext::InitializeRenderLoop()
 		pointSamplerDesc.m_FilterMode = E_POINT;
 		m_pSamplers.push_back(std::make_unique<Sampler>(Get(), pointSamplerDesc));
 		pPointSampler = m_pSamplers.back().get();
+	}
+
+	/* Model mesh quad mapper - DYNAMIC_MODELS_PLAN.md phase 2, the GPU mirror
+	   of ModelMeshStore's CPU quad list. E_UNKNOWN colour format so it binds
+	   as a plain structured buffer rather than an image (VKPassBindings.cpp's
+	   AddMappers, same test the brick mapper's own comment already explains);
+	   E_READ_ONLY because only the CPU ever writes it - SyncModelMeshStore in
+	   Present. One element and no back buffer: nothing is resident until the
+	   first dynamic model is meshed, and unlike the voxel/brick mappers this
+	   is never read back mid-frame by anything the GPU wrote, so there is
+	   nothing to double-buffer against. */
+	{
+		Mapper::Info modelMeshMapperDesc;
+		modelMeshMapperDesc.m_Name = "Model Mesh Quads";
+		modelMeshMapperDesc.m_ColorFormat = E_UNKNOWN;
+		modelMeshMapperDesc.m_GPUAccessType = E_READ_ONLY;
+		modelMeshMapperDesc.m_uiElementCount = 1;
+		modelMeshMapperDesc.m_uiElementSize = sizeof(uint32_t);
+
+		m_pMappers.push_back(std::make_unique<Mapper>(Get(), modelMeshMapperDesc, false));
+		m_pModelMeshMapper = m_pMappers.back().get();
 	}
 
 	// 3D voxel mapper
@@ -1433,6 +1571,15 @@ void RenderContext::InitializeRenderLoop()
 	   reads. */
 	SunShadowPass* pSunShadowPass = nullptr;
 
+	/* DYNAMIC_MODELS_PLAN.md phase 4: dynamic renderers' own light-space
+	   depth, and the pass that combines it with the world map above into one
+	   texture shaped like pSunShadowPass's own - see SunShadowModel.vs.hlsl's
+	   header for why a separate combine pass rather than either producer
+	   writing into the other's target. VoxelPass below binds the *combined*
+	   result as its shadow map, not pSunShadowPass's raw target. */
+	SunShadowModelPass* pSunShadowModelPass = nullptr;
+	SunShadowCombinePass* pSunShadowCombinePass = nullptr;
+
 	if (settings.IsShadowEnabled())
 	{
 		Shader::Info vertexShader;
@@ -1454,6 +1601,86 @@ void RenderContext::InitializeRenderLoop()
 			pCameraBuffer, m_pVoxelMapper, m_pBrickMapper);
 
 		m_pRenderPasses.emplace(pSunShadowPass->GetData().m_Name, std::unique_ptr<SunShadowPass>(pSunShadowPass));
+
+		{
+			Shader::Info modelVertexShader;
+			modelVertexShader.m_FilePath = "Engine/Assets/Shaders/SunShadowModel.vs";
+			modelVertexShader.m_Type = Shader::E_VERTEX;
+
+			m_pShaders.push_back(std::make_unique<Shader>(Get(), modelVertexShader));
+			Shader* pModelVertexShader = m_pShaders.back().get();
+
+			Shader::Info modelPixelShader;
+			modelPixelShader.m_FilePath = "Engine/Assets/Shaders/SunShadowModel.ps";
+			modelPixelShader.m_Type = Shader::E_PIXEL;
+
+			m_pShaders.push_back(std::make_unique<Shader>(Get(), modelPixelShader));
+			Shader* pModelPixelShader = m_pShaders.back().get();
+
+			pSunShadowModelPass = new SunShadowModelPass(
+				Get(), pModelVertexShader, pModelPixelShader,
+				m_pModelMeshMapper, pCameraBuffer, pModelInstanceBuffer, pModelQuadInstanceBuffer);
+
+			m_pRenderPasses.emplace(pSunShadowModelPass->GetData().m_Name, std::unique_ptr<SunShadowModelPass>(pSunShadowModelPass));
+		}
+
+		{
+			Shader::Info combineVertexShader;
+			combineVertexShader.m_FilePath = "Engine/Assets/Shaders/ScreenQuad.vs";
+			combineVertexShader.m_Type = Shader::E_VERTEX;
+
+			m_pShaders.push_back(std::make_unique<Shader>(Get(), combineVertexShader));
+			Shader* pCombineVertexShader = m_pShaders.back().get();
+
+			Shader::Info combinePixelShader;
+			combinePixelShader.m_FilePath = "Engine/Assets/Shaders/SunShadowCombine.ps";
+			combinePixelShader.m_Type = Shader::E_PIXEL;
+
+			m_pShaders.push_back(std::make_unique<Shader>(Get(), combinePixelShader));
+			Shader* pCombinePixelShader = m_pShaders.back().get();
+
+			pSunShadowCombinePass = new SunShadowCombinePass(
+				Get(), pCombineVertexShader, pCombinePixelShader, pPointSampler,
+				pSunShadowPass->GetTargetView(), pSunShadowModelPass->GetTargetView());
+
+			m_pRenderPasses.emplace(pSunShadowCombinePass->GetData().m_Name, std::unique_ptr<SunShadowCombinePass>(pSunShadowCombinePass));
+		}
+	}
+
+	/* Voxel Models pass - DYNAMIC_MODELS_PLAN.md phase 2, self-shadowing added
+	   as a phase 4 follow-up. Before the voxel pass, which composites its
+	   target the same way it already composites particles' - see
+	   VoxelRenderer.ps.hlsl's composite branch and this file's per-frame
+	   instance ordering comment ("the voxel pass samples the particle
+	   targets, so particles draw first"). Built unconditionally, unlike the
+	   sun shadow passes: dynamic renderers exist regardless of ShadowQuality.
+	   Selects between two pixel shader variants exactly like the world voxel
+	   pass does (rule 8) - the ShadowLess one when there is no combined
+	   shadow map to sample. */
+	{
+		Shader::Info vertexShader;
+		vertexShader.m_FilePath = "Engine/Assets/Shaders/VoxelModel.vs";
+		vertexShader.m_Type = Shader::E_VERTEX;
+
+		m_pShaders.push_back(std::make_unique<Shader>(Get(), vertexShader));
+		Shader* pVertexShader = m_pShaders.back().get();
+
+		Shader::Info pixelShader;
+		pixelShader.m_FilePath = settings.IsShadowEnabled()
+			? "Engine/Assets/Shaders/VoxelModel.ps"
+			: "Engine/Assets/Shaders/VoxelModel.ShadowLess.ps";
+		pixelShader.m_Type = Shader::E_PIXEL;
+
+		m_pShaders.push_back(std::make_unique<Shader>(Get(), pixelShader));
+		Shader* pPixelShader = m_pShaders.back().get();
+
+		m_pVoxelModelPass = new VoxelModelPass(
+			Get(), pVertexShader, pPixelShader, pPointSampler, pPyramidSampler,
+			m_pModelMeshMapper, pCameraBuffer, pModelInstanceBuffer, pModelQuadInstanceBuffer,
+			m_pPyramidView,
+			pSunShadowCombinePass != nullptr ? pSunShadowCombinePass->GetTargetView() : nullptr);
+
+		m_pRenderPasses.emplace(m_pVoxelModelPass->GetData().m_Name, std::unique_ptr<VoxelModelPass>(m_pVoxelModelPass));
 	}
 
 	// Voxel Pass
@@ -1475,11 +1702,16 @@ void RenderContext::InitializeRenderLoop()
 		Shader* pPixelShader = m_pShaders.back().get();
 
 		// Create screen render target from data
-		/* The shadow map goes in as the third texture, so t3 - see
+		/* The shadow map goes in as the fifth texture (t5) - see
 		   VoxelRenderer.ps.hlsl. Null under ShadowLess, where that variant
-		   declares no t3 and VoxelPass skips the binding. */
-		pVoxelPass = new VoxelPass(Get(), pVertexShader, pPixelShader, pPointSampler, pPyramidSampler, m_pVoxelMapper, m_pBrickMapper, pCameraBuffer, pAABBBuffer, m_pParticlePass->GetTargetView(0), m_pParticlePass->GetTargetView(1),
-			pSunShadowPass != nullptr ? pSunShadowPass->GetTargetView() : nullptr, m_pPyramidView);
+		   declares no t5 and VoxelPass skips the binding.
+		   DYNAMIC_MODELS_PLAN.md phase 4: this is pSunShadowCombinePass's
+		   target, not pSunShadowPass's own raw one - the combined map already
+		   folds in what dynamic renderers cast. */
+		pVoxelPass = new VoxelPass(Get(), pVertexShader, pPixelShader, pPointSampler, pPyramidSampler, m_pVoxelMapper, m_pBrickMapper, pCameraBuffer, pAABBBuffer,
+			m_pParticlePass->GetTargetView(0), m_pParticlePass->GetTargetView(1),
+			m_pVoxelModelPass->GetTargetView(0), m_pVoxelModelPass->GetTargetView(1),
+			pSunShadowCombinePass != nullptr ? pSunShadowCombinePass->GetTargetView() : nullptr, m_pPyramidView);
 		m_pRenderPasses.emplace(pVoxelPass->GetData().m_Name, std::unique_ptr<VoxelPass>(pVoxelPass));
 	}
 

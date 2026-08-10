@@ -13,12 +13,20 @@ RW_STRUCTURED_BUFFER(uint) voxelBrickData : register(u1);
 
 Texture2D<float4> particlePass : register(t1);
 
-/* t2 is the particle depth target, which this variant does not read; the pass
-   binds it either way, so the register is spoken for. */
+/* Was unread ("the register is spoken for" but never declared) until
+   DYNAMIC_MODELS_PLAN.md phase 2 needed a fair comparison between the
+   particle and model overlays below - see main(). */
+Texture2D<float> particleDepthPass : register(t2);
+
+/* Dynamic model pass output - DYNAMIC_MODELS_PLAN.md phase 2, VoxelModelPass.
+   Pushed unconditionally by VoxelPass regardless of shadow settings, so t3/t4
+   here exactly as in VoxelRenderer.ps.hlsl. */
+Texture2D<float4> modelPass : register(t3);
+Texture2D<float> modelDepthPass : register(t4);
 
 /* Coverage and radiance pyramid - RENDERING_PLAN.md 7.1b route B and 7.3, and
-   t3 rather than t4 because this variant has no shadow map in front of it. */
-Texture3D<float4> voxelPyramid : register(t3);
+   t5 rather than t6 because this variant has no shadow map in front of it. */
+Texture3D<float4> voxelPyramid : register(t5);
 
 /* The unbounded `VOXEL_BUFFER voxelModelData[] : register(tN)` that used to be
    here is gone. It was never read - it belonged to a GPU-baker path that was
@@ -44,14 +52,32 @@ struct PS_in
 #include "Lighting.hlsl"
 #include "AmbientCone.hlsl"
 #include "Fog.hlsl"
+#include "ShadeVoxelSurface.hlsl"
 
 FORCE_DEPTH_TEST
 float4 main(PS_in IN) : TAR_OUT
 {
-    /* Check particle color */
-    float4 particleColor = particlePass.Sample(s0, IN.NormScreenPosition.xy / (viewport.xy * voxelRenderScale));
+    /* Check particle and model colour. Nearest of the two present wins,
+       matching this file's existing "overlay wins outright, no world-distance
+       check" convention rather than importing VoxelRenderer.ps.hlsl's
+       stricter one - DYNAMIC_MODELS_PLAN.md piece 3. particleDepthPass was
+       bound but unread before this; it is what makes "nearest of the two"
+       possible instead of a fixed model-over-particle priority. */
+    float2 overlayUV = IN.NormScreenPosition.xy / (viewport.xy * voxelRenderScale);
 
-    if (particleColor.a != 0.0)
+    float4 particleColor = particlePass.Sample(s0, overlayUV);
+    float particleDepth = particleDepthPass.Sample(s0, overlayUV);
+
+    float4 modelColor = modelPass.Sample(s0, overlayUV);
+    float modelDepth = modelDepthPass.Sample(s0, overlayUV);
+
+    bool bHasModel = modelColor.a != 0.0;
+    bool bHasParticle = particleColor.a != 0.0;
+
+    if (bHasModel && (!bHasParticle || modelDepth <= particleDepth))
+        return modelColor;
+
+    if (bHasParticle)
         return particleColor;
 
     /* March diffuse color */
@@ -118,25 +144,16 @@ float4 main(PS_in IN) : TAR_OUT
     if (AO_CONE_ENABLED)
         skyVisibility *= GetConeAmbient(marchDiffuse.SmoothPosition, marchDiffuse.Normal, IN.NormScreenPosition.xy, bounce);
 
-    /* Linear radiance until EncodeSceneColor - RENDERING_PLAN.md phase 7.2. */
-    float3 v3Radiance = ShadeSurface(marchDiffuse.Color.xyz, marchDiffuse.Normal, 1.0, skyVisibility, bounce);
+    /* Linear radiance until ShadeVoxelHit's EncodeSceneColor at the end -
+       RENDERING_PLAN.md phase 7.2. The tail is shared with
+       VoxelRenderer.ps.hlsl and the dynamic model pass
+       (DYNAMIC_MODELS_PLAN.md phase 2, ShadeVoxelSurface.hlsl); sunVisibility
+       is the literal 1.0 this variant has always used - no shadow map here. */
+    float fRawRimBoost = GetShineLine(marchDiffuse.Position, marchDiffuse.Normal, marchDiffuse.UV, lightDirection.xyz, difference);
 
-    /* Environment specular - RENDERING_PLAN.md 7.4. Added rather than folded
-       into ShadeSurface's parentheses: it is light reflected *off* this
-       surface, so the albedo does not multiply it. */
-    v3Radiance += GetConeSpecular(marchDiffuse.SmoothPosition, marchDiffuse.Normal, rayDirection);
-
-    /* Fake specular "shine line" on lit voxel edges - see GetShineLine in
-       AmbientOcclusion.hlsl. */
-    v3Radiance *= GammaGainToLinear(GetShineLine(marchDiffuse.Position, marchDiffuse.Normal, marchDiffuse.UV, lightDirection.xyz, difference));
-
-    /* Aerial perspective - RENDERING_PLAN.md 6.1. From the *camera*, not
-       marchDiffuse.Distance: this pass rasterizes AABB proxies and the ray
-       started where its own box was entered, so the marcher's distance is not
-       the one fog is a function of. */
-    v3Radiance = ApplyAerialPerspective(v3Radiance, distance(marchDiffuse.SmoothPosition + camOffset.xyz, camPosition.xyz));
-
-    marchDiffuse.Color.xyz = EncodeSceneColor(v3Radiance);
+    marchDiffuse.Color.xyz = ShadeVoxelHit(
+        marchDiffuse.Color.xyz, marchDiffuse.Normal, marchDiffuse.SmoothPosition,
+        rayDirection, 1.0, skyVisibility, bounce, fRawRimBoost);
     marchDiffuse.Color.a = 1.0;
 
 #ifdef MARCH_STEP_DEBUG

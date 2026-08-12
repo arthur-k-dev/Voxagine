@@ -1,6 +1,8 @@
 #include "pch.h"
 #include "ChunkSystem.h"
 #include "Core/ECS/Systems/Chunk/Chunk.h"
+#include "Core/ECS/Systems/Chunk/StreamingBudgets.h"
+#include "Core/ECS/Systems/Chunk/StreamingCounters.h"
 #include "Core/ECS/Components/ChunkViewer.h"
 #include "Core/ECS/Entities/Camera.h"
 #include "Core/ECS/Systems/Physics/PhysicsSystem.h"
@@ -9,15 +11,30 @@
 #include "Core/Platform/Platform.h"
 #include "Core/Platform/Rendering/FrameProfiler.h"
 #include "Core/Platform/Rendering/RenderContext.h"
+#include "Core/Platform/Rendering/RenderDefines.h"
+#include "Core/Voxels/VoxelWindow.h"
 #include "Core/ECS/World.h"
 #include "Core/Application.h"
+#include <cassert>
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include "External/optick/optick.h"
+
+/* Shares VOXAGINE_CHUNK_IO_TIMINGS with Chunk's encode/decode reporting: one
+   switch for "tell me what streaming costs in wall clock", read once because
+   both sides of it are on paths that run per chunk. */
+static bool ChunkIoTimingsEnabled()
+{
+	static const bool s_bEnabled = std::getenv("VOXAGINE_CHUNK_IO_TIMINGS") != nullptr;
+	return s_bEnabled;
+}
 
 ChunkSystem::ChunkSystem(World* pWorld, std::unordered_map<uint32_t, Chunk*> chunks, UVector2 chunkSize, UVector2 worldSize) :
 	ComponentSystem(pWorld)
 {
 	m_pVoxelGrid = m_pWorld->GetPhysics()->GetVoxelGrid();
+	m_pVoxelWindow = pWorld->GetRenderContext();
 	m_Chunks = chunks;
 	m_WorldSize = worldSize;
 	m_ChunkSize = chunkSize;
@@ -84,9 +101,9 @@ void ChunkSystem::Start()
 		case ChunkUpdateGroup::Item::Target::T_MOVE:
 		{
 			m_pVoxelGrid->SetChunkVolumeAt(item.GridTargetIndex, item.pChunk->GetVoxelData(), item.pChunk->GetOwnerVolume());
-			if (!item.pChunk->IsFirstLoad())
+			if (!item.pChunk->IsFirstLoad() && m_pVoxelWindow != nullptr)
 			{
-				RenderChunk(item, m_pWorld->GetApplication()->GetPlatform().GetRenderContext()->GetVoxelData(), false);
+				RenderChunk(item, m_pVoxelWindow->GetFrontData(), false);
 			}
 			item.pChunk->SetGridTarget(item.GridTargetIndex);
 			break;
@@ -103,12 +120,39 @@ void ChunkSystem::Start()
 	   with this system and the voxel grid sized, both of which are only true
 	   once the system exists - and it is the chunk window's own limit that the
 	   far field exists to work around, so this is where it belongs. */
-	m_pWorld->GetApplication()->GetPlatform().GetRenderContext()->BuildFarField(m_pWorld);
+	if (RenderContext* pRenderContext = m_pWorld->GetRenderContext())
+		pRenderContext->BuildFarField(m_pWorld);
 }
 
 bool ChunkSystem::CanProcessComponent(Component* pComponent)
 {
 	return false;
+}
+
+void ChunkSystem::Tick(float fDeltaTime)
+{
+	/* Chunk I/O and reflected entity construction are streaming work, not
+	   simulation, so an outstanding group advances per *display* frame rather
+	   than per fixed tick. FixedTick still creates groups - that is a question
+	   about where the camera is - but advancing an existing one only at 60 Hz
+	   leaves every display frame above that idle while the player crosses into
+	   a window that has not arrived yet.
+
+	   **One state per display frame, and that is the point.** The advance used
+	   to be at the end of FixedTick; leaving it there as well would let the
+	   commit and the entity pass land in the same frame, which is the pile-up
+	   this phase exists to break up. Every state later phases add carries its
+	   own budget on top (StreamingBudgets.h).
+
+	   **A host that calls FixedTick must call this too.** Splitting the two
+	   made that a requirement where it never used to be one, and EditorWorld
+	   promptly failed it: in edit mode it hand-picks the systems it ticks, and
+	   it named the chunk system in FixedTick and PostTick but not here - so the
+	   editor created update groups and never advanced one, and moving the
+	   camera stopped loading chunks entirely. Fixed there; stated here because
+	   the next such host will not read EditorWorld.cpp. */
+	if (!m_UpdateGroups.empty())
+		UpdateGroup(m_UpdateGroups.front());
 }
 
 void ChunkSystem::FixedTick(const GameTimer& fixedTimer)
@@ -166,15 +210,17 @@ void ChunkSystem::FixedTick(const GameTimer& fixedTimer)
 		}
 	}
 
-	if (!m_UpdateGroups.empty())
-	{
-		UpdateGroup(m_UpdateGroups[0]);
-	}
+	/* Creating the group is this method's whole job now; advancing it belongs
+	   to Tick - see there. Advancing from both would let a state and its
+	   successor land in the same frame, which is exactly the pile-up the commit
+	   was split out of. */
 }
 
 void ChunkSystem::PostTick(float fDeltaTime)
 {
 #if defined(EDITOR) || defined(_DEBUG)
+	if (m_pWorld->GetDebugRenderer() == nullptr)
+		return;
 
 	uint32_t numHorizontalLines = m_uiNumChunkY - 1;
 	uint32_t numVerticalLines = m_uiNumChunkX - 1;
@@ -271,6 +317,78 @@ void ChunkSystem::UpdateChunks(IVector2 gridOffset, ChunkUpdateGroup& group, boo
 		}
 	}
 
+	/* Item order is an accident of the world grid's x-major loop otherwise, and
+	   that decides which chunk's entities are constructed first. It is inert
+	   today - everything after the commit still runs to completion in one pass
+	   - but it is where the order belongs, it is cheap, and it is far easier to
+	   verify now than woven through three budgeted states in phase 3.
+
+	   Two keys. Loads before moves before unloads, because a chunk arriving in
+	   front of the player is worth more than one leaving behind them; then
+	   nearest first, measured from where the camera is *looking* on the ground
+	   plane rather than from the camera itself. A top-down camera's own
+	   position ranks the chunk under the player first even when the player is
+	   walking towards a boundary and the interesting chunk is two ahead.
+	   Stable, so equal distances keep grid order and the sequence is
+	   reproducible. */
+	Camera* pMainCamera = m_pWorld->GetMainCamera();
+	const Vector3 cameraPosition = pMainCamera->GetTransform()->GetPosition();
+	const Vector3 cameraForward = pMainCamera->GetTransform()->GetForward();
+
+	Vector3 groundFocus = cameraPosition;
+
+	if (std::abs(cameraForward.y) > 0.0001f)
+	{
+		const float fGroundDistance = (R_GROUND_PLANE_HEIGHT - cameraPosition.y) / cameraForward.y;
+
+		if (fGroundDistance >= 0.f && std::isfinite(fGroundDistance))
+			groundFocus += cameraForward * fGroundDistance;
+	}
+
+	/* Window-local, because GridTargetIndex is a slot in the incoming window
+	   and the offset that window will have is the group's, not the live one. */
+	const Vector3 localFocus = groundFocus - group.GetWorldOffset();
+
+	auto targetPriority = [](ChunkUpdateGroup::Item::Target target)
+	{
+		switch (target)
+		{
+		case ChunkUpdateGroup::Item::Target::T_ASYNC_LOAD:
+		case ChunkUpdateGroup::Item::Target::T_LOAD:
+			return 0;
+		case ChunkUpdateGroup::Item::Target::T_MOVE:
+			return 1;
+		case ChunkUpdateGroup::Item::Target::T_ASYNC_UNLOAD:
+			return 2;
+		}
+
+		return 3;
+	};
+
+	auto distanceSquared = [&](const ChunkUpdateGroup::Item& item)
+	{
+		const float fCenterX = (static_cast<float>(item.GridTargetIndex.x) + 0.5f) * m_ChunkSize.x;
+		const float fCenterZ = (static_cast<float>(item.GridTargetIndex.y) + 0.5f) * m_ChunkSize.y;
+		const float fDeltaX = fCenterX - localFocus.x;
+		const float fDeltaZ = fCenterZ - localFocus.z;
+
+		return fDeltaX * fDeltaX + fDeltaZ * fDeltaZ;
+	};
+
+	std::vector<ChunkUpdateGroup::Item>& items = group.GetItems();
+
+	std::stable_sort(items.begin(), items.end(),
+		[&](const ChunkUpdateGroup::Item& left, const ChunkUpdateGroup::Item& right)
+		{
+			const int iLeftPriority = targetPriority(left.ItemTarget);
+			const int iRightPriority = targetPriority(right.ItemTarget);
+
+			if (iLeftPriority != iRightPriority)
+				return iLeftPriority < iRightPriority;
+
+			return distanceSquared(left) < distanceSquared(right);
+		});
+
 	if (bProfiling)
 	{
 		const double fMilliseconds =
@@ -282,6 +400,8 @@ void ChunkSystem::UpdateChunks(IVector2 gridOffset, ChunkUpdateGroup& group, boo
 
 void ChunkSystem::UpdateGroup(ChunkUpdateGroup& group)
 {
+	group.CountAdvance();
+
 	switch (group.GetState())
 	{
 	case ChunkUpdateGroup::UpdateState::US_INIT:
@@ -314,130 +434,143 @@ void ChunkSystem::UpdateGroup(ChunkUpdateGroup& group)
 		if (group.IsRendering()) break;
 		group.SetRendering(true);
 
-		uint32_t* viewPortData = m_pWorld->GetApplication()->GetPlatform().GetRenderContext()->GetVoxelBackData();
+		/* Null where there is no render context at all - a backend that failed
+		   to start, or a headless test. The group still has to reach the commit
+		   or the state machine wedges; the commit's render half simply does
+		   nothing. */
+		uint32_t* viewPortData = m_pVoxelWindow != nullptr ? m_pVoxelWindow->GetBackData() : nullptr;
 
 		JobQueue* pJobQueue = m_pWorld->GetJobQueue();
 		if (pJobQueue)
 		{
 			pJobQueue->Enqueue<bool>([this, &group, viewPortData]()
 			{
+				/* The whole incoming window is built here, on a worker, into a
+				   buffer nothing else reads. That is what lets the publish be a
+				   swap rather than a copy. */
+				VoxelBrickGrid* pBrickGrid =
+					m_pVoxelWindow != nullptr ? &m_pVoxelWindow->GetBrickGrid() : nullptr;
+
+				if (pBrickGrid != nullptr)
+					pBrickGrid->BeginBackBufferBuild();
+
 				for (ChunkUpdateGroup::Item& item : group.GetItems())
 				{
 					if (item.ItemTarget != ChunkUpdateGroup::Item::Target::T_ASYNC_UNLOAD)
 						RenderChunk(item, viewPortData, true);
 				}
+
+				/* And the occupancy hierarchy over it, here rather than on the
+				   main thread. This job owns the back buffer for its whole
+				   length, so this is the only place the pyramid over it can be
+				   rebuilt from settled data; the per-frame FlushDirty walks the
+				   front buffer only and so cannot race it (M1). */
+				if (pBrickGrid != nullptr)
+				{
+					pBrickGrid->FlushDirtyBackBuffer();
+					pBrickGrid->EndBackBufferBuild();
+				}
+
 				return true;
-			}, [this, &group](bool bFinished)
+			}, [&group](bool bFinished)
 			{
-				/* This callback is the *main thread* - JobQueue runs the body
-				   above on a worker and the completion here - so everything in
-				   it is a frame stall, and a chunk becoming resident for the
-				   first time is the expensive case. Measured per phase rather
-				   than as a total, because the candidates behave differently:
-				   LoadEntities pulls models and textures off disk and each
-				   texture costs a GPU round trip (CLAUDE.md), while the physics
-				   and entity-update loops are pure CPU.
-
-				   Guarded so a disabled profiler pays one branch, as elsewhere.
-				   FrameProfiler has no mutex, which is why nothing reports from
-				   the worker body. */
-				const bool bProfiling = FrameProfiler::Get().IsEnabled();
-
-				auto now = []() { return std::chrono::steady_clock::now(); };
-				auto since = [](const std::chrono::steady_clock::time_point& start)
-				{
-					return std::chrono::duration<double, std::milli>(
-						std::chrono::steady_clock::now() - start).count();
-				};
-
-				std::chrono::steady_clock::time_point phase =
-					bProfiling ? now() : std::chrono::steady_clock::time_point();
-
-				//Update physics first
-				for (ChunkUpdateGroup::Item& item : group.GetItems())
-				{
-					if (item.ItemTarget != ChunkUpdateGroup::Item::Target::T_ASYNC_UNLOAD)
-						m_pVoxelGrid->SetChunkVolumeAt(item.GridTargetIndex, item.pChunk->GetVoxelData(), item.pChunk->GetOwnerVolume());
-				}
-
-				if (bProfiling)
-				{
-					FrameProfiler::Get().Report("CPU Chunk SetChunkVolumeAt", since(phase));
-					phase = now();
-				}
-
-				//Load new entities
-				uint32_t uiLoaded = 0;
-
-				for (ChunkUpdateGroup::Item& item : group.GetItems())
-				{
-					if (item.ItemTarget == ChunkUpdateGroup::Item::Target::T_ASYNC_LOAD)
-					{
-						item.pChunk->LoadEntities();
-						item.pChunk->m_bIsLoaded = true;
-						item.pChunk->m_bFirstLoad = false;
-
-						++uiLoaded;
-					}
-					if (item.ItemTarget == ChunkUpdateGroup::Item::Target::T_MOVE)
-					{
-						item.pChunk->UpdateEntities();
-						item.pChunk->SetGridTarget(item.GridTargetIndex);
-					}
-				}
-
-				if (bProfiling)
-				{
-					FrameProfiler::Get().Report(
-						uiLoaded > 0 ? "CPU Chunk LoadEntities" : "CPU Chunk UpdateEntities", since(phase));
-					phase = now();
-				}
-
-				// Update offsets
-				m_pWorld->GetPhysics()->GetVoxelGrid()->SetWorldOffset(group.GetWorldOffset());
-				m_pWorld->GetApplication()->GetPlatform().GetRenderContext()->GetVoxelMapper()->SwapBuffer();
-
-				// Update camera
-				Camera* pMainCamera = m_pWorld->GetMainCamera();
-				pMainCamera->SetCameraOffset(group.GetWorldOffset());
-				pMainCamera->GetTransform()->SetFromMatrix(pMainCamera->GetTransform()->GetMatrix());
-				pMainCamera->Recalculate();
-				pMainCamera->ForceUpdate();
-
-				if (bProfiling)
-				{
-					FrameProfiler::Get().Report("CPU Chunk Offsets", since(phase));
-					phase = now();
-				}
-
-				// Unload chunk with entities
-				for (ChunkUpdateGroup::Item& item : group.GetItems())
-				{
-					if (item.ItemTarget == ChunkUpdateGroup::Item::Target::T_ASYNC_UNLOAD)
-					{
-						/* Detach before enqueuing, not after it finishes.
-						   UnloadAsync's job body calls EncodeVoxels, which
-						   frees this chunk's voxel vector and owner volume on
-						   a worker thread - and the grid still pointed at both,
-						   so a main-thread GetCell could read freed storage
-						   (ledger P7). Nulling the slot here, on this thread,
-						   before the job exists, means a reader sees "not
-						   resident" instead. Every grid accessor already
-						   handles that; since phase 1 they all check for it. */
-						m_pVoxelGrid->DetachChunkStorage(&item.pChunk->GetVoxelData());
-
-						item.bIsDone = false;
-						item.pChunk->UnloadAsync(&item, std::bind(&ChunkSystem::OnChunkUnloaded, this, std::placeholders::_1));
-					}
-				}
-
-				if (bProfiling)
-					FrameProfiler::Get().Report("CPU Chunk Unload", since(phase));
-
-				group.SetState(ChunkUpdateGroup::UpdateState::US_UNLOADING);
+				/* Completion callbacks run on the *main thread*. Master did the
+				   entire rest of the transition in here - physics pointers,
+				   every incoming chunk's entities, the offset, the swap, and
+				   the outgoing chunks' serialization - which is why a window
+				   slide read as one visible stop. It now only advances the
+				   state; the commit is its own transaction on its own tick. */
+				group.SetState(ChunkUpdateGroup::UpdateState::US_COMMIT);
 				group.SetRendering(false);
 			});
 		}
+		break;
+	}
+	case ChunkUpdateGroup::UpdateState::US_COMMIT:
+	{
+		CommitWindow(group);
+		group.SetState(ChunkUpdateGroup::UpdateState::US_LOADING_ENTITIES);
+		break;
+	}
+	case ChunkUpdateGroup::UpdateState::US_LOADING_ENTITIES:
+	{
+		/* Main-thread and, as of phase 1, still unbounded - 41.6 ms per
+		   incoming chunk (CHUNK_STREAMING_PLAN.md phase 0's baseline). Phases 2
+		   and 3 make it resumable against StreamingBudgets::EntityWork; this
+		   phase moved it rather than shrinking it.
+
+		   Moving it is not cosmetic. It runs *after* the commit now, so a
+		   first-load chunk's static renderers stamp against the world offset
+		   and the chunk slots they will actually be drawn at. Before, the
+		   callback repointed the grid's chunk slots, then stamped against the
+		   *outgoing* offset, then swapped the buffer those stamps went into. */
+		const bool bProfiling = FrameProfiler::Get().IsEnabled();
+
+		auto now = []() { return std::chrono::steady_clock::now(); };
+		auto since = [](const std::chrono::steady_clock::time_point& start)
+		{
+			return std::chrono::duration<double, std::milli>(
+				std::chrono::steady_clock::now() - start).count();
+		};
+
+		std::chrono::steady_clock::time_point phase =
+			bProfiling ? now() : std::chrono::steady_clock::time_point();
+
+		uint32_t uiLoaded = 0;
+		uint64_t uiRoots = 0;
+
+		for (ChunkUpdateGroup::Item& item : group.GetItems())
+		{
+			if (item.ItemTarget == ChunkUpdateGroup::Item::Target::T_ASYNC_LOAD)
+			{
+				uiRoots += item.pChunk->GetRootEntities().size();
+
+				item.pChunk->LoadEntities();
+				item.pChunk->m_bIsLoaded = true;
+				item.pChunk->m_bFirstLoad = false;
+
+				++uiLoaded;
+			}
+			if (item.ItemTarget == ChunkUpdateGroup::Item::Target::T_MOVE)
+				item.pChunk->UpdateEntities();
+		}
+
+		/* T4. Unbounded on master and unbounded now; the number is what phases
+		   2 and 3 ratchet down, and recording it here is what makes "bounded
+		   work per tick" a value CI can compare rather than a comment. */
+		StreamingCounters::RaiseMax(StreamingCounters::Get().MaxRootsPerEntityPass, uiRoots);
+
+		if (bProfiling)
+		{
+			FrameProfiler::Get().Report(
+				uiLoaded > 0 ? "CPU Chunk LoadEntities" : "CPU Chunk UpdateEntities", since(phase));
+			phase = now();
+		}
+
+		// Unload chunk with entities
+		for (ChunkUpdateGroup::Item& item : group.GetItems())
+		{
+			if (item.ItemTarget == ChunkUpdateGroup::Item::Target::T_ASYNC_UNLOAD)
+			{
+				/* Detach before enqueuing, not after it finishes. UnloadAsync's
+				   job body calls EncodeVoxels, which frees this chunk's voxel
+				   vector and owner volume on a worker thread - and the grid
+				   still pointed at both, so a main-thread GetCell could read
+				   freed storage (ledger P7). Nulling the slot here, on this
+				   thread, before the job exists, means a reader sees "not
+				   resident" instead. Every grid accessor already handles that;
+				   since phase 1 they all check for it. */
+				m_pVoxelGrid->DetachChunkStorage(&item.pChunk->GetVoxelData());
+
+				item.bIsDone = false;
+				item.pChunk->UnloadAsync(&item, std::bind(&ChunkSystem::OnChunkUnloaded, this, std::placeholders::_1));
+			}
+		}
+
+		if (bProfiling)
+			FrameProfiler::Get().Report("CPU Chunk Unload", since(phase));
+
+		group.SetState(ChunkUpdateGroup::UpdateState::US_UNLOADING);
 		break;
 	}
 	case ChunkUpdateGroup::UpdateState::US_UNLOADING:
@@ -464,6 +597,23 @@ void ChunkSystem::UpdateGroup(ChunkUpdateGroup& group)
 
 std::vector<ChunkUpdateGroup>::iterator ChunkSystem::RemoveUpdateGroup(const std::vector<ChunkUpdateGroup>::iterator& iter)
 {
+	/* R5. A group erased before it published is the walk-back: the player
+	   crossed a boundary and came straight back, so the window it was building
+	   is no longer the one wanted. Counted rather than merely allowed, so a
+	   cancellation scenario can assert it actually cancelled something instead
+	   of quietly racing the transition to completion. */
+	if (!iter->HasCommitted())
+		StreamingCounters::Get().CancelledGroups.fetch_add(1, std::memory_order_relaxed);
+
+	/* What the player actually waits: boundary crossed -> new chunks there.
+	   Off by default; see the comment on MillisecondsSinceCreated. */
+	if (ChunkIoTimingsEnabled())
+	{
+		fprintf(stderr, "[chunk] transition %s after %.1f ms over %u advances\n",
+			iter->HasCommitted() ? "completed" : "cancelled",
+			iter->MillisecondsSinceCreated(), iter->GetAdvanceCount());
+	}
+
 	for (ChunkUpdateGroup::Item& item : iter->GetItems())
 	{
 		if (item.ItemTarget == ChunkUpdateGroup::Item::Target::T_ASYNC_LOAD &&
@@ -483,27 +633,101 @@ std::vector<ChunkUpdateGroup>::iterator ChunkSystem::RemoveUpdateGroup(const std
 	return m_UpdateGroups.erase(iter);
 }
 
+void ChunkSystem::CommitWindow(ChunkUpdateGroup& group)
+{
+	/* R2: the voxel window is published atomically or not at all. Physics
+	   pointers, world offset, buffer swap and camera offset move together in
+	   one main-thread transaction, and nothing between them yields - so nothing
+	   can observe a half-window.
+
+	   The back buffer this publishes already holds the complete static voxel
+	   volume of every incoming chunk, built by the render job, so collision and
+	   rendering are both correct the instant this returns even though the
+	   incoming chunks' entities have not been admitted yet. */
+	assert(!group.HasCommitted() && "an update group published its window twice");
+
+	if (group.HasCommitted())
+	{
+		StreamingCounters::Get().PublishesOutsideCommit.fetch_add(1, std::memory_order_relaxed);
+		return;
+	}
+
+	const bool bProfiling = FrameProfiler::Get().IsEnabled();
+	const std::chrono::steady_clock::time_point start =
+		bProfiling ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
+
+	for (ChunkUpdateGroup::Item& item : group.GetItems())
+	{
+		if (item.ItemTarget == ChunkUpdateGroup::Item::Target::T_ASYNC_UNLOAD)
+			continue;
+
+		m_pVoxelGrid->SetChunkVolumeAt(item.GridTargetIndex, item.pChunk->GetVoxelData(), item.pChunk->GetOwnerVolume());
+		item.pChunk->SetGridTarget(item.GridTargetIndex);
+	}
+
+	m_pVoxelGrid->SetWorldOffset(group.GetWorldOffset());
+
+	if (m_pVoxelWindow != nullptr)
+	{
+		/* The swap reverses the two buffers' roles, so whatever the GPU is
+		   still fetching from becomes the CPU's next writable back buffer the
+		   moment it returns. Retiring the readers here is the only thing
+		   between that and streaming overwriting a buffer an in-flight
+		   submission is reading. Once per commit, not once per frame - E4 is
+		   the shape this is deliberately not. */
+		m_pVoxelWindow->WaitForReaders();
+		m_pVoxelWindow->Swap();
+	}
+
+	Camera* pMainCamera = m_pWorld->GetMainCamera();
+	pMainCamera->SetCameraOffset(group.GetWorldOffset());
+	pMainCamera->GetTransform()->SetFromMatrix(pMainCamera->GetTransform()->GetMatrix());
+	pMainCamera->Recalculate();
+	pMainCamera->ForceUpdate();
+
+	group.MarkCommitted();
+
+	StreamingCounters::Get().Commits.fetch_add(1, std::memory_order_relaxed);
+	StreamingCounters::Get().CommittedGroups.fetch_add(1, std::memory_order_relaxed);
+
+	if (bProfiling)
+	{
+		FrameProfiler::Get().Report("CPU Chunk Commit",
+			std::chrono::duration<double, std::milli>(
+				std::chrono::steady_clock::now() - start).count());
+	}
+}
+
 void ChunkSystem::RenderChunk(ChunkUpdateGroup::Item& updateItem, uint32_t* viewPortData, bool bBackBuffer)
 {
+	if (m_pVoxelWindow == nullptr || viewPortData == nullptr)
+		return;
+
 	UVector3 gridDimensions = m_pVoxelGrid->GetDimensions();
 	UVector2 chunkOffset = updateItem.GridTargetIndex * m_ChunkSize;
 	std::vector<Voxel>& voxelData = updateItem.pChunk->GetVoxelData();
 
-	RenderContext* pRenderContext = m_pWorld->GetApplication()->GetPlatform().GetRenderContext();
-
-	if (voxelData.size() > 0 && viewPortData != nullptr && pRenderContext->GetVoxelDataSize() == m_pVoxelGrid->GetNumVoxels())
+	if (voxelData.size() > 0 && m_pVoxelWindow->GetWordCount() == m_pVoxelGrid->GetNumVoxels())
 	{
 		/* This overwrites the chunk's slice of the window in full, so its
 		   occupancy bricks are rebuilt from the chunk's own CPU-side voxels
 		   rather than by diffing against the mapping. Diffing would mean
 		   reading eight million voxels back out of uncached host-visible
 		   memory, which costs far more than the write itself. */
-		VoxelBrickGrid& brickGrid = pRenderContext->GetBrickGrid();
+		VoxelBrickGrid& brickGrid = m_pVoxelWindow->GetBrickGrid();
 
 		const UVector3 v3RegionMin(chunkOffset.x, 0, chunkOffset.y);
 		const UVector3 v3RegionSize(m_ChunkSize.x, gridDimensions.y, m_ChunkSize.y);
 
 		brickGrid.BeginRegion(bBackBuffer, v3RegionMin, v3RegionSize);
+
+		/* A chunk that has never been admitted holds its ground row and nothing
+		   else - UpdateGroundPlane wrote y = 0 and the models have not been
+		   stamped yet, which happens after the commit. Scanning the other 127
+		   rows for occupancy only rediscovers that they are empty. The rows are
+		   still *written*, because the window slice they land in may hold the
+		   previous occupant's geometry. */
+		const bool bGroundOnly = updateItem.pChunk->IsFirstLoad();
 
 		for (uint32_t z = chunkOffset.y; z < m_ChunkSize.y + chunkOffset.y; ++z)
 		{
@@ -511,23 +735,33 @@ void ChunkSystem::RenderChunk(ChunkUpdateGroup::Item& updateItem, uint32_t* view
 			{
 				uint32_t* ptr = viewPortData + chunkOffset.x + y * gridDimensions.x + z * gridDimensions.x * gridDimensions.y;
 				Voxel* voxPtr = &voxelData[y * m_ChunkSize.x + (z - chunkOffset.y) * m_ChunkSize.x * gridDimensions.y];
-				for (uint32_t x = chunkOffset.x; x < m_ChunkSize.x + chunkOffset.x; ++x)
+
+				/* The mapping is write-combined memory. A word at a time gives
+				   the CPU nothing to burst, and a Voxel is exactly one uint32_t
+				   with a static_assert holding it there (RENDERING_PLAN.md 4d),
+				   so a row is a contiguous transfer. */
+				std::memcpy(ptr, voxPtr, sizeof(uint32_t) * m_ChunkSize.x);
+
+				if (bGroundOnly && y != 0)
+					continue;
+
+				for (uint32_t x = 0; x < m_ChunkSize.x; ++x)
 				{
-					const uint32_t uiColor = voxPtr->Color;
-					*ptr = uiColor;
+					const uint32_t uiColor = voxPtr[x].Color;
 
 					/* Occupancy is alpha > 0 (rule 3) - the byte is a
 					   rendererState tag, not an opacity. */
 					if ((uiColor >> 24) != 0)
-						brickGrid.AddVoxel(bBackBuffer, x, y, z, uiColor);
-
-					++ptr;
-					++voxPtr;
+						brickGrid.AddVoxel(bBackBuffer, chunkOffset.x + x, y, z, uiColor);
 				}
 			}
 		}
 
 		brickGrid.EndRegion(bBackBuffer, v3RegionMin, v3RegionSize);
+
+		StreamingCounters::Get().ChunkRegionsWritten.fetch_add(1, std::memory_order_relaxed);
+		StreamingCounters::Get().VoxelWordsWritten.fetch_add(
+			uint64_t(m_ChunkSize.x) * m_ChunkSize.y * gridDimensions.y, std::memory_order_relaxed);
 	}
 }
 
@@ -538,9 +772,9 @@ void ChunkSystem::ClearChunk(UVector2 gridTargetIndex)
 
 	UVector3 gridDimensions = m_pVoxelGrid->GetDimensions();
 	UVector2 chunkOffset = gridTargetIndex * m_ChunkSize;
-	uint32_t* viewportColorData = m_pWorld->GetApplication()->GetPlatform().GetRenderContext()->GetVoxelData();
+	uint32_t* viewportColorData = m_pVoxelWindow != nullptr ? m_pVoxelWindow->GetFrontData() : nullptr;
 
-	if (viewportColorData != nullptr && m_pWorld->GetApplication()->GetPlatform().GetRenderContext()->GetVoxelDataSize() == m_pVoxelGrid->GetNumVoxels())
+	if (viewportColorData != nullptr && m_pVoxelWindow->GetWordCount() == m_pVoxelGrid->GetNumVoxels())
 	{
 		for (uint32_t z = chunkOffset.y; z < m_ChunkSize.y + chunkOffset.y; ++z)
 		{
@@ -578,8 +812,6 @@ void ChunkSystem::OnChunkUnloaded(ChunkUpdateGroup::Item* pUpdateItem)
 
 void ChunkSystem::OnWorldResumed(World* pWorld)
 {
-	RenderContext* pRenderContext = m_pWorld->GetApplication()->GetPlatform().GetRenderContext();
-
 	/* The far field belongs to the render context, not to a world, so whichever
 	   world is on top owns it. A pushed menu world's ChunkSystem::Start builds
 	   its own - and since every menu world is a single chunk, "its own" is
@@ -587,9 +819,10 @@ void ChunkSystem::OnWorldResumed(World* pWorld)
 	   so opening the pause menu once removed the horizon for the rest of the
 	   session. It is a full rebuild (~215 ms); streaming it is phase 4 of
 	   Docs/CHUNK_STREAMING_PLAN.md. */
-	pRenderContext->BuildFarField(m_pWorld);
+	if (RenderContext* pRenderContext = m_pWorld->GetRenderContext())
+		pRenderContext->BuildFarField(m_pWorld);
 
-	uint32_t* viewPortData = pRenderContext->GetVoxelData();
+	uint32_t* viewPortData = m_pVoxelWindow != nullptr ? m_pVoxelWindow->GetFrontData() : nullptr;
 	for (auto& iter : m_Chunks)
 	{
 		if (iter.second->IsLoaded())

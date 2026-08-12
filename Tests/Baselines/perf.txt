@@ -9,6 +9,10 @@
 #
 # <system>/<benchmark>/<metric>  <value>  <kind>  [unit]
 
+# Re-recorded 2026-08-09: VoxelBrickGrid::k_uiBrickShift went 3 -> 2, so a
+# brick is 4^3 voxels rather than 8^3 and eight times as many of them cover
+# the same volume. Exactly 8x, and set-writes/clear-writes did not move - the
+# same voxels are written, the counter's unit shrank. Not a work regression.
 Destruction/BurstIntoSolidRock/bursts                                 49.0000  work
 Destruction/BurstIntoSolidRock/integrity-seeds                    205898.0000  work
 Destruction/BurstIntoSolidRock/representation-disagreements            0.0000  work
@@ -37,11 +41,17 @@ Particles/SimulationSweep/baked-50000                                  0.0000  w
 Particles/SimulationSweep/peak-alive-150000                       150000.0000  work
 Particles/SimulationSweep/peak-alive-5000                           5000.0000  work
 Particles/SimulationSweep/peak-alive-50000                         50000.0000  work
+Streaming/WindowSlideAndReturn/back-buffer-flush-races                 0.0000  work
+Streaming/WindowSlideAndReturn/chunk-regions-written                  19.0000  work
+Streaming/WindowSlideAndReturn/commits                                 2.0000  work
+Streaming/WindowSlideAndReturn/committed-groups                        2.0000  work
+Streaming/WindowSlideAndReturn/occupancy-disagreements                 0.0000  work
+Streaming/WindowSlideAndReturn/publishes-outside-commit                0.0000  work
+Streaming/WindowSlideAndReturn/resident-chunks                         9.0000  work
+Streaming/WindowSlideAndReturn/roots-per-entity-pass                   6.0000  work
+Streaming/WindowSlideAndReturn/voxel-words-written                622592.0000  work
+Streaming/WindowSlideAndReturn/window-swaps                            2.0000  work
 VoxelEditing/ScatteredWrites/clear-writes                         400000.0000  work
-# Re-recorded 2026-08-09: VoxelBrickGrid::k_uiBrickShift went 3 -> 2, so a
-# brick is 4^3 voxels rather than 8^3 and eight times as many of them cover
-# the same volume. Exactly 8x, and set-writes/clear-writes did not move - the
-# same voxels are written, the counter's unit shrank. Not a work regression.
 VoxelEditing/ScatteredWrites/dirty-bricks                          16384.0000  work
 VoxelEditing/ScatteredWrites/representation-disagreements              0.0000  work
 VoxelEditing/ScatteredWrites/set-writes                           400000.0000  work

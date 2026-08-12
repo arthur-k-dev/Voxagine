@@ -35,6 +35,12 @@ public:
 	JobManager& GetJobManager() { return m_JobManager; }
 	FileSystem* GetFileSystem() { return m_pFileSystem; }
 	const GameTimer& GetTimer() const { return *m_Platform.GetGameTimer(); }
+
+	/* Null until Platform::Initialize has run, which is never for an
+	   Application that exists only to own a serializer and a job manager -
+	   the streaming harness (CHUNK_STREAMING_PLAN.md T1). Anything that runs
+	   both before startup and during the frame has to ask this way. */
+	const GameTimer* TryGetTimer() const { return m_Platform.GetGameTimer(); }
 	const GameTimer& GetFixedTimer() const { return *m_Platform.GetFixedTimer(); }
 
 	bool IsSuspended() const { return m_bSuspended; }

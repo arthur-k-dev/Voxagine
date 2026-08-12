@@ -38,6 +38,16 @@ public:
 	void ShelveJobQueue(QueueHandle handle);
 	void UnShelveJobQueue(QueueHandle handle);
 
+	/* The worker pool's lifetime and the point at which completion callbacks
+	   run on this thread. Public because Application::Run is not the only
+	   legitimate driver of a job system any more: the streaming harness runs
+	   one with no Application loop behind it (CHUNK_STREAMING_PLAN.md T1), and
+	   "when do callbacks fire" is exactly the question a deterministic test has
+	   to be able to answer. */
+	void Initialize();
+	void Deinitialize();
+	void ProcessFinishedJobs();
+
 private:
 	moodycamel::ConcurrentQueue<Job*> m_FinishedJobQueue;
 	std::vector<JobThread*> m_WorkerThreads;
@@ -48,10 +58,6 @@ private:
 	std::atomic_bool m_bKillThreads = { false };
 	bool m_bAcceptingQueues = true;
 
-	void Initialize();
-	void Deinitialize();
-
-	void ProcessFinishedJobs();
 	void WaitForJob(Job* pJob);
 
 	void ThreadLoop(JobThread* pThrea);

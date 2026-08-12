@@ -80,7 +80,8 @@ void World::Initialize()
 	for (ComponentSystem* pSystem : m_Systems)
 		pSystem->Start();
 
-	m_pRenderSystem->Start();
+	if (m_pRenderSystem != nullptr)
+		m_pRenderSystem->Start();
 
 	if (!m_GroundTexturePath.empty())
 		SetGroundTexturePath(m_GroundTexturePath);
@@ -105,7 +106,7 @@ bool World::PreLoad(const std::string& filePath)
 	return false;
 }
 
-void World::PreLoad()
+void World::PreLoad(bool bCreateRenderSystem)
 {
 	OPTICK_EVENT();
 	m_bPreLoaded = true;
@@ -120,7 +121,8 @@ void World::PreLoad()
 	if (m_pChunkSystem)
 		m_Systems.push_back(m_pChunkSystem);
 
-	SetRenderSystem(new RenderSystem(this));
+	if (bCreateRenderSystem)
+		SetRenderSystem(new RenderSystem(this));
 }
 
 void World::Unload()
@@ -280,7 +282,12 @@ void World::RegisterComponent(Component* pComponent)
 			pSystem->AddComponent(pComponent);
 	}
 
-	if (m_pRenderSystem->CanProcessComponent(pComponent))
+	/* A world with no RenderSystem is not a broken world - it is a world built
+	   without a render context, which is how the streaming harness drives a
+	   real ChunkSystem with no GPU (CHUNK_STREAMING_PLAN.md T1). Every other
+	   system is optional here already; the render system was the only one
+	   assumed. */
+	if (m_pRenderSystem != nullptr && m_pRenderSystem->CanProcessComponent(pComponent))
 		m_pRenderSystem->AddComponent(pComponent);
 }
 
@@ -295,7 +302,7 @@ void World::RegisterComponents(const std::vector<Component*>& components)
 				pSystem->AddComponent(pComponent);
 		}
 
-		if (m_pRenderSystem->CanProcessComponent(pComponent))
+		if (m_pRenderSystem != nullptr && m_pRenderSystem->CanProcessComponent(pComponent))
 			m_pRenderSystem->AddComponent(pComponent);
 	}
 }
@@ -346,9 +353,16 @@ Entity* World::SpawnEntity(rttr::type entityType, Vector3 position, Quaternion r
 	return pEntity;
 }
 
+RenderContext* World::GetRenderContext() const
+{
+	return m_pApplication != nullptr ? m_pApplication->GetPlatform().GetRenderContext() : nullptr;
+}
+
 DebugRenderer* World::GetDebugRenderer() const
 {
-	return &m_pRenderSystem->GetDebugRenderer();
+	/* Null with no RenderSystem - see RegisterComponent. Every caller in the
+	   tree is inside an EDITOR/_DEBUG gizmo block and can simply not draw. */
+	return m_pRenderSystem != nullptr ? &m_pRenderSystem->GetDebugRenderer() : nullptr;
 }
 
 Entity* World::FindEntity(std::string name)

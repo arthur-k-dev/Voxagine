@@ -39,7 +39,13 @@ Canvas::~Canvas()
 
 	OnDisabled();
 
-	GetWorld()->GetApplication()->GetPlatform().GetInputContext()->UnBindAction(m_InputBindings);
+	/* Null with no platform behind the application - see Awake, which has
+	   checked since it was written. World's constructor builds a throwaway
+	   Canvas to keep the linker from dropping it, so this runs for every world
+	   in the process, including the render-context-less ones the streaming
+	   harness builds (CHUNK_STREAMING_PLAN.md T1). */
+	if (InputContextNew* pInput = GetWorld()->GetApplication()->GetPlatform().GetInputContext())
+		pInput->UnBindAction(m_InputBindings);
 }
 
 void Canvas::Awake()
@@ -266,8 +272,13 @@ void Canvas::OnEnabled()
 	ChangeFocus(GetDefaultFocus());
 	
 	// Change the binding map to the UI layer.
-	m_PreviousBindingMap = GetWorld()->GetApplication()->GetPlatform().GetInputContext()->GetActiveBindingMap(BindingMapType::BMT_PLAYERCONTROLLERS)->Name;
-	GetWorld()->GetApplication()->GetPlatform().GetInputContext()->SetActiveBindingMap(UI_INPUT_LAYER, BindingMapType::BMT_PLAYERCONTROLLERS);
+	InputContextNew* pInput = GetWorld()->GetApplication()->GetPlatform().GetInputContext();
+
+	if (pInput == nullptr)
+		return;
+
+	m_PreviousBindingMap = pInput->GetActiveBindingMap(BindingMapType::BMT_PLAYERCONTROLLERS)->Name;
+	pInput->SetActiveBindingMap(UI_INPUT_LAYER, BindingMapType::BMT_PLAYERCONTROLLERS);
 }
 void Canvas::OnDisabled()
 {
@@ -276,10 +287,12 @@ void Canvas::OnDisabled()
 	if (!IsNavigatable())
 		return;
 
-	if (m_PreviousBindingMap != "")
+	InputContextNew* pInput = GetWorld()->GetApplication()->GetPlatform().GetInputContext();
+
+	if (pInput != nullptr && m_PreviousBindingMap != "")
 	{
 		// Change the binding map to the previous layer.
-		GetWorld()->GetApplication()->GetPlatform().GetInputContext()->SetActiveBindingMap(m_PreviousBindingMap, BindingMapType::BMT_PLAYERCONTROLLERS);
+		pInput->SetActiveBindingMap(m_PreviousBindingMap, BindingMapType::BMT_PLAYERCONTROLLERS);
 		m_PreviousBindingMap = "";
 	}
 }

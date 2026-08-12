@@ -7,6 +7,7 @@
 
 class Chunk;
 class ChunkViewer;
+class IVoxelWindow;
 class ChunkSystem : public ComponentSystem
 {
 public:
@@ -15,12 +16,14 @@ public:
 
 	virtual void Start() override;
 	virtual bool CanProcessComponent(Component* pComponent) override;
+	virtual void Tick(float fDeltaTime) override;
 	virtual void FixedTick(const GameTimer& fixedTimer) override;
 	virtual void PostTick(float fDeltaTime) override;
 
 	void SetGroundPlane(const std::string& texturePath);
 
 	UVector2 GetWorldSize() { return m_WorldSize; }
+	UVector2 GetChunkSize() const { return m_ChunkSize; }
 	const std::unordered_map<uint32_t, Chunk*>& GetChunks() { return m_Chunks; }
 
 	/* Is any part of the resident window still moving? Today that is an
@@ -33,6 +36,15 @@ public:
 	void SetCameraLoadOffset(Vector3 offset) { m_CameraLoadOffset = offset; }
 	Vector3 GetCameraLoadOffset() const { return m_CameraLoadOffset; }
 
+	/* The resident window this system builds into. Defaults to the render
+	   context; a test replaces it with two plain vectors, which is the whole
+	   reason the seam exists (CHUNK_STREAMING_PLAN.md T1, Core/Voxels/
+	   VoxelWindow.h). Null where the process has no render context at all -
+	   every use here checks, because that is also the state a backend that
+	   failed to start leaves behind. */
+	IVoxelWindow* GetVoxelWindow() const { return m_pVoxelWindow; }
+	void SetVoxelWindow(IVoxelWindow* pWindow) { m_pVoxelWindow = pWindow; }
+
 protected:
 	virtual void OnComponentAdded(Component* pComponent) override;
 	virtual void OnComponentDestroyed(Component* pComponent) override;
@@ -42,6 +54,13 @@ protected:
 
 	void UpdateGroup(ChunkUpdateGroup& group);
 	std::vector<ChunkUpdateGroup>::iterator RemoveUpdateGroup(const std::vector<ChunkUpdateGroup>::iterator& iter);
+
+	/* The one main-thread transaction that publishes a window (R2): physics
+	   volumes, grid targets, world offset, buffer swap and camera, in that
+	   order, with nothing between them that can yield. Split out of
+	   UpdateGroup so that there is exactly one place to read, one place to
+	   assert about, and one place a future phase can add to. */
+	void CommitWindow(ChunkUpdateGroup& group);
 
 	/* bBackBuffer says which of the voxel mapper's two buffers viewPortData
 	   points at. The occupancy bricks are per-buffer, so writing voxels into
@@ -57,6 +76,7 @@ protected:
 
 private:
 	VoxelGrid* m_pVoxelGrid;
+	IVoxelWindow* m_pVoxelWindow = nullptr;
 	std::unordered_map<uint32_t, Chunk*> m_Chunks;
 
 	std::vector<ChunkUpdateGroup> m_UpdateGroups;

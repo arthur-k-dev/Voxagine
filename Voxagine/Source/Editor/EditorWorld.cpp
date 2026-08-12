@@ -137,6 +137,17 @@ void EditorWorld::Tick(float fDeltaTime)
 {
 	if (GetEditor()->GetEditorModus() == EditorModus::EM_PLAY)
 		World::Tick(fDeltaTime);
+	else if (m_pChunkSystem)
+	{
+		/* Edit mode ticks no gameplay, but the world still streams: the editor
+		   camera moves the resident window exactly as a player does. FixedTick
+		   below is where a window transition is *decided*; this is where it is
+		   *advanced*, one state per display frame, and a world that only got the
+		   first of the two created update groups it never processed
+		   (CHUNK_STREAMING_PLAN.md phase 1). Every other edit-mode tick here
+		   hand-picks its systems the same way. */
+		m_pChunkSystem->Tick(fDeltaTime);
+	}
 
 	if (IsMainCameraEditorCamera())
 		GetEditorCamera()->Tick(fDeltaTime);

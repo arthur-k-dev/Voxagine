@@ -29,22 +29,30 @@ Camera::Camera(World* pWorld) :
 {
 	m_cameraOffset = Vector3(0, 0, 0);
 
-	if (pWorld != nullptr)
-		GetWorld()->GetApplication()->GetPlatform().GetRenderContext()->SizeChanged += Event<uint32_t, uint32_t, IVector2>::Subscriber(std::bind(&Camera::CalculateProjection, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), this);
+	/* No render context is an ordinary state: a backend that failed to start,
+	   and the headless streaming harness (CHUNK_STREAMING_PLAN.md T1). A camera
+	   without one keeps its transform and its offset, which is all chunk
+	   streaming asks of it, and simply never recalculates its projection. */
+	if (RenderContext* pRenderContext = pWorld != nullptr ? pWorld->GetRenderContext() : nullptr)
+		pRenderContext->SizeChanged += Event<uint32_t, uint32_t, IVector2>::Subscriber(std::bind(&Camera::CalculateProjection, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3), this);
 }
 
 Camera::~Camera()
 {
-	if (GetWorld() != nullptr)
-		GetWorld()->GetApplication()->GetPlatform().GetRenderContext()->SizeChanged -= this;
+	if (RenderContext* pRenderContext = GetWorld() != nullptr ? GetWorld()->GetRenderContext() : nullptr)
+		pRenderContext->SizeChanged -= this;
 }
 
 void Camera::Awake()
 {
 	Entity::Awake();
 
-	UVector2 windowSize = GetWorld()->GetApplication()->GetPlatform().GetRenderContext()->GetRenderResolution();
-	CalculateProjection(uint32_t(windowSize.x), uint32_t(windowSize.y), IVector2(0, 0));
+	if (RenderContext* pRenderContext = GetWorld() != nullptr ? GetWorld()->GetRenderContext() : nullptr)
+	{
+		const UVector2 windowSize = pRenderContext->GetRenderResolution();
+		CalculateProjection(uint32_t(windowSize.x), uint32_t(windowSize.y), IVector2(0, 0));
+	}
+
 	Recalculate();
 }
 
@@ -93,8 +101,11 @@ void Camera::SetOrthographic(bool bIsOrthographic)
 
 	m_bIsOrthographic = bIsOrthographic;
 
-	UVector2 renderResolution = GetWorld()->GetApplication()->GetPlatform().GetRenderContext()->GetRenderResolution();
-	CalculateProjection(renderResolution.x, renderResolution.y, IVector2(0, 0));
+	if (RenderContext* pRenderContext = GetWorld() != nullptr ? GetWorld()->GetRenderContext() : nullptr)
+	{
+		const UVector2 renderResolution = pRenderContext->GetRenderResolution();
+		CalculateProjection(renderResolution.x, renderResolution.y, IVector2(0, 0));
+	}
 
 	m_bIsRecalculated = true;
 }

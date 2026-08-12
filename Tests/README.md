@@ -11,12 +11,16 @@ ctest --test-dir Build/Linux/Editor/Release --output-on-failure
 
 | mode | what it is | cost (Release / Debug) |
 |---|---|---|
-| `checks` | assertions about one unit at a time | 0.1 s / 0.7 s |
+| `checks` | assertions about one unit at a time | 11 s / 132 s |
 | `scenarios` | every scenario × every invariant, each run twice | 3.3 s / 36 s |
 | `perf` | every benchmark, compared against a baseline | 1.1 s / 8.4 s |
 
-All three run in CI on both configurations. Each takes an optional substring
-filter — `voxagine_tests scenarios diagonal`, `voxagine_tests checks VoxelGrid`
+All three run in CI on both configurations, and the whole suite also runs under
+ASan+UBSan (`.github/workflows/build.yml`'s `sanitizers` job). Almost all of
+`checks`' wall time is one case - `ModelMeshUpload` is 10.9 of the 11 seconds -
+so a filter is cheap: `Streaming` is 0.18 s, `VoxelStorage` 13 ms.
+
+Each takes an optional substring filter — `voxagine_tests scenarios diagonal`, `voxagine_tests checks VoxelGrid`
 — which is what you want while chasing one failure.
 
 ## Opt-in GPU integration test
@@ -49,9 +53,13 @@ happens to live in.
 
 ```
 Framework/     the runner, the four registries, the assertion macros, the baseline format
-Harness/       a whole voxel world with no GPU, and the destruction pipeline driven once
+Harness/       a whole voxel world with no GPU (VoxelWorldHarness), the destruction
+               pipeline driven once (DestructionRun), and a whole chunk-streaming
+               world with no render context (StreamingHarness)
+Fixtures/      synthetic .wld worlds the streaming harness loads
 Baselines/     the checked-in perf baseline
 
+Streaming/     ChunkSystem - the window commit transaction and what survives a slide
 VoxelStorage/  VoxelGrid, VoxelBrickGrid, owner slots
 VoxelEditing/  VoxelEditBatch — the one voxel write path
 Destruction/   SphericalDestruction, plus the scenarios and invariants

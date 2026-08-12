@@ -108,7 +108,13 @@ target_compile_options(voxagine_warnings INTERFACE
 # DateTime test, each with its own main - which ran without the engine and so
 # without VOXAGINE_BUILD_TESTS. Both are checks in the one suite now; a second
 # way to write a test is a way that gets forgotten.
-include(CTest)
+# enable_testing(), not include(CTest). The module is CDash machinery: it adds
+# twenty-eight custom targets - Continuous*, Nightly*, Experimental* - that
+# submit builds to a dashboard this project does not have. Nothing here uses
+# them, and they are not free: an IDE reading the CMake model turns every one
+# into a run configuration, which buried the four real ones (Game, Editor and
+# friends) under the auto-generated list. `ctest` and `add_test` need only this.
+enable_testing()
 
 # ---------------------------------------------------------------------------
 # Vulkan backend
@@ -683,8 +689,12 @@ if(VOXAGINE_BUILD_TESTS)
     # still compiled in, cannot be written against a made-up file. The game's
     # content root is passed in rather than resolved relative to the CWD,
     # because ctest runs the binary from the build directory.
+    # The streaming harness's synthetic worlds live beside the tests rather than
+    # in the content pack: a failure should name a five-entity world, not a
+    # thousand-entity one, and CI needs no shipped level to run them.
     target_compile_definitions(voxagine_tests PRIVATE
-        VOXAGINE_TEST_CONTENT_DIR="${CMAKE_CURRENT_SOURCE_DIR}/Game")
+        VOXAGINE_TEST_CONTENT_DIR="${CMAKE_CURRENT_SOURCE_DIR}/Game"
+        VOXAGINE_TEST_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/Tests/Fixtures")
 
     # Assertions about one unit at a time. Seconds.
     add_test(NAME checks COMMAND voxagine_tests checks)

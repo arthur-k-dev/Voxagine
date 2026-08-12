@@ -46,6 +46,8 @@ set(VOXAGINE_ENGINE_SOURCES
     ${VOXAGINE_SOURCE_DIR}/Core/ECS/Systems/Chunk/ChunkSystem.cpp
     ${VOXAGINE_SOURCE_DIR}/Core/ECS/Systems/Chunk/FarFieldBaker.cpp
     ${VOXAGINE_SOURCE_DIR}/Core/ECS/Systems/Chunk/ChunkUpdateGroup.cpp
+    ${VOXAGINE_SOURCE_DIR}/Core/ECS/Systems/Chunk/StreamingBudgets.cpp
+    ${VOXAGINE_SOURCE_DIR}/Core/ECS/Systems/Chunk/StreamingCounters.cpp
     ${VOXAGINE_SOURCE_DIR}/Core/ECS/Systems/Pathfinding/Grid/PathfindingChunk.cpp
     ${VOXAGINE_SOURCE_DIR}/Core/ECS/Systems/Pathfinding/Grid/PathfindingChunkGrid.cpp
     ${VOXAGINE_SOURCE_DIR}/Core/ECS/Systems/Pathfinding/Grid/PathfindingNode.cpp

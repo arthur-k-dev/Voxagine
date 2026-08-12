@@ -36,6 +36,7 @@
 #include "Core/Platform/Rendering/RenderAlignment.h"
 #include "Core/Platform/Rendering/VoxelBrickGrid.h"
 #include "Core/Platform/Rendering/FarFieldVolume.h"
+#include "Core/Voxels/VoxelWindow.h"
 
 class Platform;
 class WindowContext;
@@ -176,7 +177,10 @@ struct TextureReadData
 	UVector2 m_Dimensions = UVector2(0, 0);
 };
 
-class RenderContext
+/* IVoxelWindow is the seam chunk streaming reaches the resident window through
+   - see Core/Voxels/VoxelWindow.h. It carries no state and adds no cost here;
+   what it buys is a ChunkSystem that can be driven with no device behind it. */
+class RenderContext : public IVoxelWindow
 {
 public:
 	friend class TextureReference;
@@ -342,10 +346,24 @@ public:
 	Mapper* GetVoxelMapper() const { return m_pVoxelMapper; }
 	void ClearVoxels();
 
+	/* --- IVoxelWindow --------------------------------------------------------
+	   Forwarders, deliberately: the names above are what the rest of the engine
+	   has always called these and renaming 60 call sites to land a test seam
+	   would be the tail wagging the dog. */
+	uint32_t* GetFrontData() override { return GetVoxelData(); }
+	uint32_t* GetBackData() override { return GetVoxelBackData(); }
+	uint32_t GetWordCount() const override { return GetVoxelDataSize(); }
+	void WaitForReaders() override { WaitForVoxelReaders(); }
+	/* The brick grid, the brick mapper and the pyramid staging buffer all flip
+	   with the voxel mapper already - see the BufferSwapped subscriber in
+	   Initialize, which exists so that the four cannot get out of lockstep from
+	   a call site. So this really is just the one call. */
+	void Swap() override { m_pVoxelMapper->SwapBuffer(); }
+
 	/* Coarse occupancy over the same window, for the marcher's outer walk.
 	   Kept current by ModifyVoxel/ModifyVoxelFast above and, in bulk, by
 	   ChunkSystem::RenderChunk. See VoxelBrickGrid. */
-	VoxelBrickGrid& GetBrickGrid() { return m_BrickGrid; }
+	VoxelBrickGrid& GetBrickGrid() override { return m_BrickGrid; }
 	Mapper* GetBrickMapper() const { return m_pBrickMapper; }
 
 	/* Double-buffered per DESTRUCTION_PLAN.md P16: PhysicsSystem writes each

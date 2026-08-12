@@ -15,6 +15,7 @@
 #include "Editor/EditorWorld.h"
 #include "Core/ECS/Systems/Physics/VoxelGrid.h"
 #include "Core/ECS/Systems/Chunk/ChunkSystem.h"
+#include "Core/Platform/Rendering/RenderDefines.h"
 
 /* For the render resolution, which the pan needs to convert pixels of finger
    movement into world units at the focus distance. */
@@ -104,7 +105,41 @@ void EditorCamera::PostFixedTick(const GameTimer& timer)
 {
 	Entity::PostFixedTick(timer);
 
-	GetWorld()->GetChunkSystem()->SetCameraLoadOffset(Vector3(0.f));
+	/* The resident window follows what the camera is *looking at*, not where it
+	   is. An editor camera is pitched down and set back, so centring the window
+	   on its position puts the three loaded chunks behind and below the ground
+	   you are actually working on - which is why chunks appeared to arrive late
+	   here and not in the game. The game does the same thing by another route:
+	   CameraMultiplayer's load offset is the players' midpoint minus the camera
+	   position, so its window has always been centred on the focus.
+
+	   Clamped to one chunk, because the offset moves the window and not the
+	   camera: a shallow look angle projects the ground hit hundreds of units
+	   away, and past a chunk and a half the camera itself falls outside the 3x3
+	   window - where picking and physics have nothing resident to hit. */
+	Vector3 chunkLoadOffset(0.f);
+
+	const Vector3 cameraPosition = GetTransform()->GetPosition();
+	const Vector3 cameraForward = GetTransform()->GetForward();
+
+	if (std::abs(cameraForward.y) > 0.0001f)
+	{
+		const float fGroundDistance = (R_GROUND_PLANE_HEIGHT - cameraPosition.y) / cameraForward.y;
+
+		if (fGroundDistance > 0.f && std::isfinite(fGroundDistance))
+		{
+			chunkLoadOffset = cameraForward * fGroundDistance;
+			chunkLoadOffset.y = 0.f;
+
+			const UVector2 chunkSize = GetWorld()->GetChunkSystem()->GetChunkSize();
+			const float fMaxOffset = static_cast<float>(std::min(chunkSize.x, chunkSize.y));
+
+			if (glm::length(chunkLoadOffset) > fMaxOffset)
+				chunkLoadOffset = glm::normalize(chunkLoadOffset) * fMaxOffset;
+		}
+	}
+
+	GetWorld()->GetChunkSystem()->SetCameraLoadOffset(chunkLoadOffset);
 
 	if (m_bFrameLock || GetEditor()->IsModifyingSelectedEntityTransform())
 	{

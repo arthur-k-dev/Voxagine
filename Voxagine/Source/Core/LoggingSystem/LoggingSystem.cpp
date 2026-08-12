@@ -63,7 +63,13 @@ void LoggingSystem::Log(const LogLevel & level, const std::string & category, co
 	LogEvent& NewLogEvent = *m_LogEvents.back();
 	unsigned long NewLogEventID = static_cast<unsigned long>(m_LogEvents.size() - 1);
 
-	NewLogEvent.EventTime = m_pApplication->GetTimer().GetCurrentSystemTime();
+	/* There is not always a clock. A log line can be emitted before
+	   Platform::Initialize has created the game timer, and by a process that
+	   never creates one at all - which used to be a null dereference inside the
+	   logger, i.e. the one place least able to report it. */
+	const GameTimer* pTimer = m_pApplication != nullptr ? m_pApplication->TryGetTimer() : nullptr;
+
+	NewLogEvent.EventTime = pTimer != nullptr ? pTimer->GetCurrentSystemTime() : Time{ 0, 0, 0 };
 	NewLogEvent.Level = level;
 	NewLogEvent.Category = category;
 	NewLogEvent.Description = description;

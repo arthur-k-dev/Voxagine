@@ -34,7 +34,7 @@ world switch, and the loading screen.
 | Phase | Status | Session / commit | Notes |
 |---|---|---|---|
 | 0 — Foundations, baselines, standalone fixes | DONE except T1 | `chunk-streaming-phase-0`, PR #55 | Symptom recorded (E12), standalone fixes landed, hitch gate in with a 150 ms baseline, all numbers below, ASan lane green, 60 Hz feel and un-pausing confirmed on screen. **T1 (the streaming harness) is BLOCKED on a render-context seam — see the phase 0 notes; phase 1 owns it.** |
-| 1 — Atomic off-thread window commit | OPEN | | **Starts with T1's seam and skeleton** — see phase 0's T1 note |
+| 1 — Atomic off-thread window commit | DONE | `chunk-streaming-phase-1` | T1's seam and harness landed with it. Hitch gate **150.2 → 102.4–104.7 ms** peak, 7 → 2 violations; `FlushDirty` 68.8 → 0.001 ms peak on a slide. ASan + TSan clean. |
 | 2 — Bounded unload (serialize + encode) | OPEN | | **Also owns M7** — destroyed terrain respawning on chunk reload |
 | 3 — Bounded load and the gameplay contract | OPEN | | |
 | 4 — Streamed world switch behind the loading screen | OPEN | | |
@@ -155,16 +155,23 @@ Release at phase 0).
   `EncodeVoxels`; `FindEntitiesInChunk` + `SaveAndDeleteEntities` (full RTTR
   serialization) run on the main thread first. CLAUDE.md's "Chunk loading
   stalls the frame" ledger entry is this.
-- **M1 (data race + hitch, live on master): `VoxelBrickGrid::FlushDirty` walks
-  *both* buffers' dirty bits on the main thread every frame** while
-  `ChunkSystem::RenderChunk` writes back-buffer bits from the worker. The
-  experiment measured the resulting stall at **0.6–0.8 s** on a window slide
-  and calls it what it is, a data race (`VoxelBrickGrid.h` comment on
-  `FlushDirtyBackBuffer`). Phase 1 fixes this.
-- **M2: `RenderChunk` writes the mapped window one `uint32_t` at a time** into
-  write-combined memory, and scans all 128 rows of first-load chunks that
-  contain only the ground row. The experiment's row-`memcpy` + ground-only
-  fast path addresses it.
+- **M1 — FIXED (phase 1).** `VoxelBrickGrid::FlushDirty` walked *both*
+  buffers' dirty bits on the main thread every frame while
+  `ChunkSystem::RenderChunk` wrote back-buffer bits from the worker: a data
+  race, and 68.8 ms of main-thread stall in Release (0.6–0.8 s in the
+  experiment's Debug measurement). It walks the front buffer only now;
+  `FlushDirtyBackBuffer` runs at the end of the chunk render job, on the
+  thread that owns that buffer. Measured on a slide afterwards: **0.001 ms
+  peak.** `BeginBackBufferBuild`/`EndBackBufferBuild` plus
+  `StreamingCounters::BackBufferFlushRaces` make a repeat of it an assertion
+  in Debug and a baseline entry in Release (T5).
+- **M2 — FIXED (phase 1).** `RenderChunk` wrote the mapped window one
+  `uint32_t` at a time into write-combined memory and scanned all 128 rows of
+  first-load chunks that contain only the ground row. It publishes a row per
+  `memcpy` now and skips the occupancy scan above y = 0 for a chunk that has
+  never been admitted. Not separately attributable in the slide measurement —
+  it is inside the render job, which is off the main thread as of the same
+  phase — which is the honest statement of what a fix on a worker buys.
 - **M3 (pre-existing lifetime bug): `World::WorldConnectionInformation` holds
   a raw `rttr::instance`** of a possibly chunk-owned component; links are
   resolved once and dropped. The experiment's rework (source entity + component
@@ -391,7 +398,9 @@ not suggestions — each phase's Acceptance names which of them it extends.
   deep hierarchy, one gameplay root with cross-chunk links, one oversized
   scaled renderer) — not from shipping levels, so CI needs no content pack
   and a failure names a five-entity world, not a thousand-entity one.
-  The skeleton lands in phase 0; every later phase adds its scenarios to it.
+  The skeleton landed in phase 1 (phase 0 was blocked on the seam); every
+  later phase adds its scenarios to it. Read phase 1's "T1 — landed" note for
+  the two deviations from this description.
 - **T2 — Budgets are injectable, and tests budget by count, not by clock.**
   Wall-clock budgets are the right runtime behavior and the wrong test
   behavior (time is machine-dependent; the house perf gate exists because of
@@ -670,6 +679,12 @@ a guess. Phase 1 therefore owns T1's skeleton, the synthetic `.wld` fixtures,
 the inline job queue and the first work counters in `Tests/Baselines/perf.txt`,
 and its acceptance should not be signed off without them.
 
+**Done — see "T1 — landed" under the phase 1 notes.** The seam turned out to
+be `IVoxelWindow` plus `World::PreLoad(false)` and `World::GetRenderContext()`,
+and a stub `RenderContext` was indeed not needed. The prediction that a `World`
+would be the harder half was wrong: what actually cost time was four unrelated
+places that dereferenced a platform subsystem without checking it existed.
+
 Nothing else in phase 0 depended on the harness: the standalone fixes are
 covered by the existing suites, and the baselines above are all in-game
 measurements.
@@ -723,6 +738,133 @@ window back and forth in the real game (drive with
 number is recorded; scenarios/perf suites green. The editor slides windows
 through the same code — open the editor, move the camera across a boundary,
 confirm no validation errors (ask Joey to watch).
+
+#### Phase 1 notes — what landed, what it bought, what it did not
+
+All Release, headless, quiet machine (RTX 4070 SUPER). Compare against the
+phase 0 baseline table above, taken the same way.
+
+| What | Phase 0 | Phase 1 |
+|---|---|---|
+| **Peak frame across a Beat2 window transition** (`gpu_chunk_streaming_frame_budget`, three runs) | 150.2 / 150.2 / 153.6 ms | **104.7 / 102.6 / 102.4 ms** |
+| Violations of the 16.7 ms budget, per run | 7 of ~4,270 frames | **2 of ~3,760** |
+| `CPU VoxelBrickGrid::FlushDirty`, peak during a slide | **68.8 ms** (M1) | **0.001 ms** |
+| `CPU Chunk Commit` (the whole atomic publish) | did not exist | **0.002 ms** |
+| `CPU Chunk LoadEntities`, peak | 41.6 ms per chunk | 48.4 ms for the pass |
+| `CPU Occupy added (static)`, peak during a slide | 18.7 ms | 17.4 ms |
+| `CPU Chunk Unload`, peak | 2.63 ms | 2.70 ms |
+
+**The gate still fails, and the remaining 102 ms is entirely entity work.**
+Commit is 0.002 ms; the two frames that break the budget are
+`LoadEntities` (48.4) plus the admitted renderers' stamps (17.4) plus unload
+serialization (2.7) plus what the profiler does not name individually. That is
+exactly the work phases 2, 3 and 5 own, and it is now the *only* thing left in
+the transition frame — which is what this phase was for. Phase 3 flips the gate
+to a hard pass.
+
+**Two frames, not one, and that is deliberate.** The group advance moved from
+the end of `FixedTick` to `Tick`, so one state runs per display frame. Leaving
+it in both would let the commit and the entity pass land together again, which
+is the pile-up being broken up. The editor drives `World::Tick` unconditionally
+in edit mode, so nothing loses its advance.
+
+**Ordering, and why it is not cosmetic.** Entity work runs *after* the commit
+now. Master's callback repointed the grid's chunk slots, then loaded entities,
+then moved the world offset, then swapped the buffer. A first-load chunk's
+static renderers therefore reached the baker while the slots were new and the
+offset was old. Nothing stamps synchronously inside `LoadEntities` — components
+register on the next `PreTick` — so this was latent rather than live, but it
+was one deferred registration away from stamping into a window that was about
+to be retired.
+
+**Audits, in the real game.** `VOXAGINE_SYNC_AUDIT=4` and
+`VOXAGINE_PYRAMID_AUDIT=4` across a long Beat2 traversal
+(`--ui-script forward-on ... forward-off`): four of each, **0 of 75,497,472
+voxels disagree, 0 brick/bitmap disagreements, 0 of 10,785,024 pyramid texels
+disagree.** The `[stall]` line that run emits is the audit's own 20–32 s
+main-thread readback of the window over PCIe, which is documented expected
+behaviour; `journalctl -k | grep Xid` shows no GPU timeout, and a run without
+audits holds 60 fps with no stall.
+
+**Sanitizers.** The whole suite under ASan+UBSan: checks 530 s, scenarios 222 s,
+perf 33 s, **no reports** (T3). One TSan pass over the streaming checks and the
+streaming benchmark — the ones that actually run the chunk worker against the
+main thread — **no reports** (T3's phase-1 clause). The harness's job queue is
+the real one with real worker threads, so a TSan finding there would implicate
+real ordering rather than test scaffolding.
+
+#### T1 — landed, and where it deviates from the description
+
+`Tests/Harness/StreamingHarness.{h,cpp}` drives a real `ChunkSystem`, real
+`Chunk`s, the real `JsonSerializer`, a real `VoxelGrid` and `VoxelBrickGrid`
+with no GPU and no display. What unblocked it is `IVoxelWindow`
+(`Core/Voxels/VoxelWindow.h`): front, back, word count, brick grid, wait, swap.
+`RenderContext` implements it over its voxel mapper; the harness implements it
+over two `std::vector<uint32_t>`s. Nothing else should implement it — it is a
+seam, not an abstraction layer, and having exactly two implementations is what
+keeps it honest.
+
+The rest of the blockage was smaller than phase 0 feared and needed no new
+interface: `World::PreLoad(false)` builds a world with no `RenderSystem`, and
+`World::GetRenderContext()` is the one place that answers "or null". Four
+places crashed rather than degraded when there was no render context, input
+context or clock — `Camera`'s constructor, destructor, `Awake` and
+`SetOrthographic`; `Canvas`'s destructor and enable/disable (reached because
+`World`'s constructor builds a throwaway `Canvas` as a link anchor); and
+`LoggingSystem::Log`, which dereferenced a game timer that does not exist until
+`Platform::Initialize`. All four are guarded now, in the same shape `Camera::
+Awake` already used.
+
+**Two deviations, both recorded rather than papered over:**
+
+- **The job queue is the real one, not an inline queue.** T1 asked for a
+  synchronous inline queue; `JobQueue` is a concrete class whose enqueue is a
+  template, so inlining it means an interface and a virtual on the engine's
+  hottest dispatch path — more production change than the seam it would test.
+  What the assertions need is that *the state machine* advances only when the
+  test says so, and that holds: every state is entered from `FixedTick`/`Tick`
+  and every completion callback from `ProcessFinishedJobs`, all three called by
+  `StreamingHarness::Frame`. A worker taking longer changes how many `Frame()`
+  calls a transition needs and nothing else. Where a check must be *at* a
+  state it watches a `StreamingCounters` value rather than counting frames.
+  `JobManager::Initialize`/`Deinitialize`/`ProcessFinishedJobs` are public for
+  this.
+- **The single-step sweep (T2) has nothing to sweep yet.** `StreamingBudgets.h`
+  exists, is injectable as a unit count from day one, and names its budgets —
+  but phase 1 added no resumable loop, so every budget in it reads
+  `Unbounded()`. That is the honest description of the state of the machine,
+  and it makes the remaining unbounded work greppable. Phase 2 is the first
+  phase whose sweep means something.
+
+**The fixture is 5x5 chunks of 32 voxels** (`Tests/Fixtures/StreamingGrid5x5.wld`),
+so the resident window is 96x32x96 and there are three distinct window positions
+along x — the fewest that can express a walk-back, since cancelling a group
+requires overtaking one. Two roots per chunk, one of them three deep. No
+renderers: a `VoxRenderer` needs the resource stack, and phase 5 is where a
+stamping test belongs. The whole streaming suite is **0.18 s in Release, 0.37 s
+in Debug**.
+
+**What the seven checks assert** (`Tests/Streaming/WindowCommitChecks.cpp`):
+the initial window is resident before anything ticks; a slide publishes exactly
+once (commits, committed groups and window swaps all 1); *the window moves in
+one frame or not at all* — stepped frame by frame, with the offset, the camera
+offset and the swap count each required not to move until the frame the commit
+counter increments, and all three required to have moved on it; the occupancy
+pyramid agrees with the published window after a slide; a walk-back that
+overtakes a queued group cancels it and still reaches the terminal state the
+camera asks for; a slide and back leaves two commits and two swaps and every
+entity present once; and a chunk that leaves and returns keeps its voxels
+through `EncodeVoxels`/`DecodeVoxels` and back into the window.
+
+One finding worth carrying, surfaced by the first check rather than by
+reasoning: **`ChunkSystem::Start` pushes a chunk into the window only where it
+is a *move*.** The eight it loads outright never reach the mapping there. In
+the game the gap is invisible because `RenderSystem::Start` writes the whole
+window's y = 0 row itself (`RenderSystem::SetGroundPlane`); with no
+`RenderSystem` the harness sees one chunk's ground instead of nine. Not a
+defect today, but it means the initial window is assembled by two subsystems
+that do not know about each other, which phase 4 will have to reconcile when it
+streams a world switch.
 
 ### Phase 2 — Bounded unload (serialize + encode)
 

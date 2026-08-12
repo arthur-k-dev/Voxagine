@@ -12,6 +12,7 @@ class ComponentSystem;
 class Application;
 class Component;
 class RenderSystem;
+class RenderContext;
 class AudioSystem;
 class VoxelGrid;
 class Camera;
@@ -35,7 +36,16 @@ public:
 	/* Setup functions */
 	virtual void Initialize();
 	bool PreLoad(const std::string& filePath);
-	void PreLoad();
+
+	/* Build the systems for a world whose content is already deserialized.
+
+	   bCreateRenderSystem is false only for a world with no render context -
+	   the streaming harness (CHUNK_STREAMING_PLAN.md T1). Such a world can be
+	   Initialize()d, its systems Start()ed and its ChunkSystem driven, but it
+	   must not be run through World::Tick and friends: those dereference the
+	   render system unconditionally and deliberately, because every world that
+	   is actually ticked has one. */
+	void PreLoad(bool bCreateRenderSystem = true);
 	virtual void Unload();
 
 	/* Empty functions used in the future */
@@ -94,6 +104,15 @@ public:
 	RenderSystem* GetRenderSystem() const { return m_pRenderSystem; }
 	PhysicsSystem* GetPhysics() const { return m_pPhysicsSystem; }
 	DebugRenderer* GetDebugRenderer() const;
+
+	/* The render context, or null. Null is an ordinary state in two situations
+	   that both matter: a backend that failed to start (the world is already
+	   built by the time Application reports it), and a world constructed with
+	   no render context at all - which is how the streaming harness drives a
+	   real ChunkSystem with no GPU (CHUNK_STREAMING_PLAN.md T1). Ask through
+	   here rather than chaining Application -> Platform -> GetRenderContext, so
+	   the check is impossible to forget. */
+	RenderContext* GetRenderContext() const;
 
 	template <typename T>
 	std::vector<T*> FindEntitiesOfType();

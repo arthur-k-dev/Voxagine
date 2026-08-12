@@ -2,9 +2,11 @@
 
 #include "Core/Platform/Rendering/VoxelBrickGrid.h"
 
+#include "Core/ECS/Systems/Chunk/StreamingCounters.h"
 #include "Core/Platform/Rendering/FrameProfiler.h"
 
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -696,61 +698,90 @@ void VoxelBrickGrid::FlushDirty()
 	   as much a part of the picture as the world load where it is not. */
 	ScopedFrameTimer timer("CPU VoxelBrickGrid::FlushDirty");
 
-	for (uint32_t uiBuffer = 0; uiBuffer < 2; ++uiBuffer)
+	FlushDirtyBuffer(m_uiFront);
+}
+
+void VoxelBrickGrid::FlushDirtyBackBuffer()
+{
+	FlushDirtyBuffer(m_uiFront ^ 1u);
+}
+
+void VoxelBrickGrid::BeginBackBufferBuild()
+{
+	m_BackBuildThread = std::this_thread::get_id();
+	m_bBackBuildActive.store(true, std::memory_order_release);
+}
+
+void VoxelBrickGrid::EndBackBufferBuild()
+{
+	m_bBackBuildActive.store(false, std::memory_order_release);
+}
+
+void VoxelBrickGrid::FlushDirtyBuffer(uint32_t uiBuffer)
+{
+	/* T5. Walking the back buffer's dirty bits while its owner is still
+	   producing them is M1 - a data race whose visible form was a 68.8 ms
+	   main-thread stall rebuilding a hierarchy from half-written occupancy. */
+	if (uiBuffer != m_uiFront && m_bBackBuildActive.load(std::memory_order_acquire) &&
+		m_BackBuildThread != std::this_thread::get_id())
 	{
-		if (!m_bHasDirty[uiBuffer].exchange(false, std::memory_order_relaxed))
+		StreamingCounters::Get().BackBufferFlushRaces.fetch_add(1, std::memory_order_relaxed);
+		assert(false && "back-buffer pyramid flush raced the chunk render job");
+		return;
+	}
+
+	if (!m_bHasDirty[uiBuffer].exchange(false, std::memory_order_relaxed))
+		return;
+
+	const std::atomic<uint16_t>* pBricks = m_pLevels[k_uiBrickLevel][uiBuffer].get();
+
+	/* Coarse to fine within a cell, fine to coarse across levels: each
+	   level is rebuilt from the one below it, so the bricks have to be
+	   settled before level 2 is summed, and level 2 before level 3. */
+	for (uint32_t uiLevel = k_uiBrickLevel; uiLevel < k_uiPyramidLevels; ++uiLevel)
+	{
+		std::atomic<uint64_t>* pDirty = m_pDirty[uiLevel][uiBuffer].get();
+
+		if (pDirty == nullptr)
 			continue;
 
-		const std::atomic<uint16_t>* pBricks = m_pLevels[k_uiBrickLevel][uiBuffer].get();
-
-		/* Coarse to fine within a cell, fine to coarse across levels: each
-		   level is rebuilt from the one below it, so the bricks have to be
-		   settled before level 2 is summed, and level 2 before level 3. */
-		for (uint32_t uiLevel = k_uiBrickLevel; uiLevel < k_uiPyramidLevels; ++uiLevel)
+		for (uint32_t uiWord = 0; uiWord < m_uiDirtyWords[uiLevel]; ++uiWord)
 		{
-			std::atomic<uint64_t>* pDirty = m_pDirty[uiLevel][uiBuffer].get();
+			uint64_t uiBits = pDirty[uiWord].exchange(0, std::memory_order_relaxed);
 
-			if (pDirty == nullptr)
-				continue;
-
-			for (uint32_t uiWord = 0; uiWord < m_uiDirtyWords[uiLevel]; ++uiWord)
+			while (uiBits != 0)
 			{
-				uint64_t uiBits = pDirty[uiWord].exchange(0, std::memory_order_relaxed);
+				const uint32_t uiBit = static_cast<uint32_t>(__builtin_ctzll(uiBits));
+				const uint32_t uiCellID = (uiWord << k_uiWordShift) + uiBit;
 
-				while (uiBits != 0)
+				uiBits &= uiBits - 1;
+
+				if (uiCellID >= m_uiLevelCells[uiLevel])
+					continue;
+
+				if (uiLevel == k_uiBrickLevel)
 				{
-					const uint32_t uiBit = static_cast<uint32_t>(__builtin_ctzll(uiBits));
-					const uint32_t uiCellID = (uiWord << k_uiWordShift) + uiBit;
+					/* The bricks are already current - they are the level
+					   the write paths maintain - so this only mirrors them
+					   and rebuilds the fine cells under them. */
+					if (pBricks != nullptr)
+						WriteMirror(uiBuffer, uiLevel, uiCellID, pBricks[uiCellID].load(std::memory_order_relaxed));
 
-					uiBits &= uiBits - 1;
+					RebuildFineCells(uiBuffer, uiCellID);
 
-					if (uiCellID >= m_uiLevelCells[uiLevel])
-						continue;
-
-					if (uiLevel == k_uiBrickLevel)
-					{
-						/* The bricks are already current - they are the level
-						   the write paths maintain - so this only mirrors them
-						   and rebuilds the fine cells under them. */
-						if (pBricks != nullptr)
-							WriteMirror(uiBuffer, uiLevel, uiCellID, pBricks[uiCellID].load(std::memory_order_relaxed));
-
-						RebuildFineCells(uiBuffer, uiCellID);
-
-						/* After the rebuild, not before: overflowing the
-						   region cap turns the frame into a full upload, and
-						   a full upload of a mirror that is already current
-						   is the cheapest way to be right. */
-						RecordDensityRegion(uiBuffer, uiCellID);
-					}
-					else
-					{
-						RebuildCoarseCell(uiBuffer, uiLevel, uiCellID);
-					}
-
-					if (uiLevel + 1 < k_uiPyramidLevels)
-						MarkDirtyAt(uiBuffer, uiLevel + 1, ParentCellID(uiLevel, uiCellID));
+					/* After the rebuild, not before: overflowing the
+					   region cap turns the frame into a full upload, and
+					   a full upload of a mirror that is already current
+					   is the cheapest way to be right. */
+					RecordDensityRegion(uiBuffer, uiCellID);
 				}
+				else
+				{
+					RebuildCoarseCell(uiBuffer, uiLevel, uiCellID);
+				}
+
+				if (uiLevel + 1 < k_uiPyramidLevels)
+					MarkDirtyAt(uiBuffer, uiLevel + 1, ParentCellID(uiLevel, uiCellID));
 			}
 		}
 	}
@@ -762,8 +793,13 @@ uint32_t VoxelBrickGrid::Validate(bool bBack, const uint32_t* pVoxelData)
 		return 0;
 
 	/* Everything above the bricks is only as current as the last flush, so
-	   validating without one would report the backlog rather than a defect. */
-	FlushDirty();
+	   validating without one would report the backlog rather than a defect.
+	   Whichever buffer is being validated: the two are flushed by different
+	   threads now and only one of them is the caller's. */
+	if (bBack)
+		FlushDirtyBackBuffer();
+	else
+		FlushDirty();
 
 	const uint32_t uiIndex = Index(bBack);
 

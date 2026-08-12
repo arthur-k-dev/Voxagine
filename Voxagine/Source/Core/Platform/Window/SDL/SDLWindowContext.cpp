@@ -4,6 +4,7 @@
 #include "Core/LaunchOptions.h"
 
 #include "Core/Application.h"
+#include "Core/Platform/Input/SDL/SDLEventInput.h"
 #include "Core/Platform/Platform.h"
 #include "Core/Platform/Rendering/RenderContext.h"
 #include "Core/Settings.h"
@@ -154,6 +155,23 @@ bool SDLWindowContext::ConsumeEnteredForeground()
 
 void SDLWindowContext::GetMousePositionInPixels(float* pfX, float* pfY)
 {
+	/* Touch first, and only while a finger is actually down. Everything that
+	   wants a cursor goes through here, so this one check is what puts the
+	   pointer under the user's finger on an iPad - and dropping straight back
+	   to SDL when the glass is empty is what lets a paired mouse or trackpad
+	   take over again with no mode to switch. */
+	const SDLEventInput& eventInput = SDLEventInput::Get();
+
+	if (eventInput.HasPointer())
+	{
+		const Vector2 position = eventInput.GetPointerPosition();
+
+		*pfX = position.x;
+		*pfY = position.y;
+
+		return;
+	}
+
 	SDL_GetMouseState(pfX, pfY);
 
 	/* Null when the cursor is outside our windows; logical is the best
@@ -199,8 +217,16 @@ void SDLWindowContext::Poll()
 {
 	SDL_Event event;
 
+	/* Everything the polled-snapshot input model cannot see - the wheel, typed
+	   characters, fingers - is collected here because this is the only place
+	   the engine looks at the event queue. See SDLEventInput.h. */
+	SDLEventInput& eventInput = SDLEventInput::Get();
+	eventInput.BeginFrame();
+
 	while (SDL_PollEvent(&event))
 	{
+		eventInput.Handle(event);
+
 		switch (event.type)
 		{
 		case SDL_EVENT_QUIT:
@@ -243,6 +269,8 @@ void SDLWindowContext::Poll()
 			break;
 		}
 	}
+
+	eventInput.EndFrame();
 }
 
 void SDLWindowContext::OnMove()

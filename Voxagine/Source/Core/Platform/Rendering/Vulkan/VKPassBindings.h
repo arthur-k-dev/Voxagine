@@ -48,19 +48,20 @@ struct VKPassBinding
 	   [[texture(N)]] index must be <= 127, which at 256 put the Voxel pass's
 	   voxelWorldData at texture(262).)
 
-	   **This is smaller than the content needs, and that is a known defect.**
-	   The array is indexed by TextureManager ID, so it has to be as large as the
-	   highest live ID rather than as large as one frame's working set. A level
-	   here keeps more than 96 textures resident, so AcquireID runs out of slots
-	   and returns UINT32_MAX; every texture past that point stops rendering,
-	   which is what garbles in-game text while the main menu - far fewer
-	   textures loaded - looks correct.
+	   **This is now a bound on one frame's working set, not on how many
+	   textures may be loaded.** It used to be both, because the array was
+	   indexed by TextureManager ID: it had to be as large as the highest live
+	   ID, a level here keeps more than 96 textures resident, and every texture
+	   past the limit stopped rendering - which is what garbled in-game text
+	   while the main menu, with far fewer textures loaded, looked correct.
+	   Raising the number could never have fixed that on A12Z.
 
-	   Raising this cannot fix that on A12Z. The fix is to stop using the
-	   TextureManager ID as the descriptor index: pack only the textures a frame
-	   actually references into the array and give the shader that slot instead,
-	   so the array is sized by the working set. Desktop tolerates the current
-	   scheme only because it allows far more descriptors. */
+	   RenderContext::PackBindlessTextures now assigns each texture a slot in
+	   first-seen order across the sprites a frame actually draws, and rewrites
+	   the uploaded SpriteData::TextureID to that slot. VKRenderPass fills slot
+	   N from the same table. Overflowing 96 therefore takes 96 *distinct
+	   textures in a single frame*, and the warning for it lives with the
+	   packing rather than here. */
 	static constexpr uint32_t m_uiBindlessCapacity = 96;
 
 	enum Kind

@@ -41,6 +41,10 @@ public:
 	float GetNearPlane() const { return m_fNearPlane; }
 	float GetFarPlane() const { return m_fFarPlane; }
 
+	/* Degrees, vertical. EditorCamera needs it to convert a gesture in screen
+	   pixels into world units at a given distance. */
+	float GetFieldOfView() const { return m_fFieldofView; }
+
 	// Converts screen coordinates to a world direction
 	Vector3 ScreenToWorld(const Vector2& screenCoord);
 

@@ -24,6 +24,12 @@
 #include "Core/Platform/Rendering/RenderContextInc.h"
 #include "Core/Platform/Rendering/RenderPassInc.h"
 
+/* For m_uiBindlessCapacity, the size of the descriptor array the packing below
+   has to fit inside. It lives with the binding table because that is what
+   declares the array, and the number is a Metal hardware limit rather than a
+   renderer preference - the header says which one. */
+#include "Core/Platform/Rendering/Vulkan/VKPassBindings.h"
+
 /* Object */
 #include "Core/Platform/Rendering/Objects/Shader.h"
 #include "Core/Platform/Rendering/Objects/View.h"
@@ -223,6 +229,110 @@ void RenderContext::Submit(const DebugBox& renderData)
 void RenderContext::Submit(const SpriteData& renderData)
 {
 	m_SpriteList.push_back(renderData);
+}
+
+void RenderContext::PackBindlessTextures()
+{
+	/* Sentinel for "this texture has no slot yet this frame". UINT32_MAX is
+	   also what TextureManager returns for a failed acquire, and the two
+	   meanings do not collide: a sprite carrying it never had a texture, so it
+	   correctly fails to find a slot below. */
+	static constexpr uint32_t k_uiUnpackedTexture = UINT32_MAX;
+
+	/* A sanity ceiling on the ID space, not on how many textures may live.
+	   This project ships 133 of them and IDs are recycled, so four figures is
+	   already far past anything real. */
+	static constexpr uint32_t k_uiMaxTextureID = 65536;
+
+	m_BindlessTextureIDs.clear();
+	m_PackedSpriteList = m_SpriteList;
+
+	for (SpriteData& sprite : m_PackedSpriteList)
+	{
+		const uint32_t uiTextureID = sprite.TextureID;
+
+		/* Catches both UINT32_MAX, which is what TextureManager returns when a
+		   texture was never created, and any other implausible value. The
+		   scratch lookup below is indexed by texture ID, so a wild one would
+		   size it by that number rather than by the live set; IDs are dense
+		   and recycled (VKTextureManager::AcquireID), so anything up here is a
+		   stale or corrupt reference. It used to be unreachable only because
+		   the ID space itself was capped at 96.
+
+		   Slot 0 is a real, uploaded texture - the descriptor writer
+		   guarantees every slot is - so this draws the wrong image rather than
+		   sampling a hole, which on MoltenVK is a GPU address fault and not a
+		   black pixel. */
+		if (uiTextureID >= k_uiMaxTextureID)
+		{
+			sprite.TextureID = 0;
+			continue;
+		}
+
+		if (uiTextureID >= m_BindlessSlotForTexture.size())
+			m_BindlessSlotForTexture.resize(uiTextureID + 1, k_uiUnpackedTexture);
+
+		uint32_t& uiSlot = m_BindlessSlotForTexture[uiTextureID];
+
+		if (uiSlot == k_uiUnpackedTexture)
+		{
+			if (m_BindlessTextureIDs.size() >= VKPassBinding::m_uiBindlessCapacity)
+			{
+				/* Reachable only by drawing more than 96 *distinct* textures
+				   in one frame, which is a different and much rarer thing than
+				   the ID-indexed scheme's "more than 96 textures loaded". If
+				   this ever fires the fix is to split the pass or batch by
+				   texture, not to raise the capacity - 96 is the hardware
+				   ceiling, not a preference. */
+				if (!m_bWarnedBindlessWorkingSet)
+				{
+					fprintf(stderr,
+						"[render] more than %u distinct textures in one frame; "
+						"the rest will draw with the wrong image\n",
+						VKPassBinding::m_uiBindlessCapacity);
+					m_bWarnedBindlessWorkingSet = true;
+				}
+
+				sprite.TextureID = 0;
+				continue;
+			}
+
+			uiSlot = static_cast<uint32_t>(m_BindlessTextureIDs.size());
+			m_BindlessTextureIDs.push_back(uiTextureID);
+		}
+
+		sprite.TextureID = uiSlot;
+	}
+
+	/* Only the entries actually touched, so this costs the working set rather
+	   than the whole ID space. The scratch vector has to come out of here
+	   clean because nothing else resets it. */
+	for (uint32_t uiTextureID : m_BindlessTextureIDs)
+		m_BindlessSlotForTexture[uiTextureID] = k_uiUnpackedTexture;
+
+	/* An early warning for the one thing that can still overflow. The failure
+	   it precedes is not a crash or a validation error - textures simply
+	   sample the wrong image, which on a phone looks like a content bug and
+	   was diagnosed as one for a long time. Reporting the high-water mark as
+	   it approaches the ceiling is what turns that into a build-time signal
+	   instead of a device-only mystery.
+	 *
+	 * Reported once per new peak above the threshold, so a level that sits at
+	 * 40 says nothing at all and one creeping towards 96 says so a few times
+	 * and then stops. */
+	static constexpr size_t k_uiReportWorkingSetAbove =
+		(VKPassBinding::m_uiBindlessCapacity * 3) / 4;
+
+	if (m_BindlessTextureIDs.size() > m_uiPeakBindlessWorkingSet)
+	{
+		m_uiPeakBindlessWorkingSet = m_BindlessTextureIDs.size();
+
+		if (m_uiPeakBindlessWorkingSet > k_uiReportWorkingSetAbove)
+		{
+			fprintf(stderr, "[render] bindless texture working set at %zu of %u\n",
+				m_uiPeakBindlessWorkingSet, VKPassBinding::m_uiBindlessCapacity);
+		}
+	}
 }
 
 void RenderContext::Submit(StructuredVoxelBuffer& renderData)
@@ -1202,8 +1312,15 @@ bool RenderContext::Present()
 
 	// Texture data
 	{
+		/* Rewrites each sprite's TextureID from a TextureManager ID to a slot
+		   in this frame's bindless working set, and records which texture goes
+		   in which slot for VKRenderPass::WriteDescriptors to bind. Uploading
+		   m_SpriteList directly here is what made the array's size depend on
+		   the highest live ID; see m_BindlessTextureIDs. */
+		PackBindlessTextures();
+
 		pSpriteBuffer->Clear();
-		pSpriteBuffer->AddStructuredData(m_SpriteList.data(), sizeof(SpriteData), m_SpriteList.size(), false);
+		pSpriteBuffer->AddStructuredData(m_PackedSpriteList.data(), sizeof(SpriteData), m_PackedSpriteList.size(), false);
 		pSpriteBuffer->Allocate();
 	}
 

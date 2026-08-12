@@ -237,6 +237,12 @@ public:
 
 	virtual void Submit(const SpriteData& renderData);
 
+	/* This frame's bindless texture working set: packed slot -> TextureManager
+	   ID. The descriptor writer fills slot N from entry N; a sprite's
+	   TextureID as uploaded is the slot, not the ID. See m_BindlessTextureIDs
+	   for why the two are no longer the same thing. */
+	const std::vector<uint32_t>& GetBindlessTextureIDs() const { return m_BindlessTextureIDs; }
+
 	virtual void Submit(StructuredVoxelBuffer& renderData);
 
 	/* DYNAMIC_MODELS_PLAN.md phase 2. One dynamic (non-static) VoxRenderer's
@@ -410,6 +416,12 @@ public:
 	/* Clear the screen */
 	virtual void Clear();
 	virtual void FixedClear();
+
+	/* Builds m_PackedSpriteList and m_BindlessTextureIDs from m_SpriteList.
+	   Call once per frame, immediately before the sprite buffer is uploaded -
+	   the upload and the descriptor write both depend on the result and must
+	   see the same one. */
+	void PackBindlessTextures();
 
 	/* Present all the gathered data to the screen */
 	virtual bool Present();
@@ -591,6 +603,54 @@ protected:
 
 	std::vector<RenderData> m_RenderList;
 	std::vector<SpriteData> m_SpriteList;
+
+	/* The bindless texture array, packed by what this frame actually draws.
+	 *
+	 * The array used to be indexed by TextureManager ID directly, which made
+	 * its required size the *highest live ID* rather than the number of
+	 * textures a frame references. Those are very different numbers: this
+	 * project ships 133 PNGs and a level keeps well over a hundred of them
+	 * resident, while a frame of UI samples a few dozen. The array cannot
+	 * simply be grown to fit - 96 is a hard limit on A12Z hardware, where
+	 * MoltenVK binds the set through a Metal indirect argument buffer and
+	 * Metal refuses one with more than 96 textures in it (see
+	 * VKPassBinding::m_uiBindlessCapacity for the exact error). So every
+	 * texture whose ID landed past 96 sampled whatever occupied the last slot,
+	 * which is why in-game text garbled while the main menu - far fewer
+	 * textures loaded - looked correct.
+	 *
+	 * Packing decouples the two. IDs stay whatever TextureManager hands out
+	 * and can climb as far as the content needs; the descriptor index a sprite
+	 * carries is a slot in this frame's working set, assigned in first-seen
+	 * order. Overflow now needs more than 96 *distinct textures in one frame*,
+	 * which the content does not do.
+	 *
+	 * Both halves of the frame read this: PackBindlessTextures rewrites the
+	 * sprite copy that is uploaded, and VKRenderPass::WriteDescriptors fills
+	 * slot N with m_BindlessTextureIDs[N]. They have to agree, which is why
+	 * the packing happens in Present immediately before the sprite upload and
+	 * not, say, at submission time. */
+	std::vector<uint32_t> m_BindlessTextureIDs;
+
+	/* The sprite list as uploaded, with TextureID replaced by its packed slot.
+	 *
+	 * A copy rather than a rewrite of m_SpriteList, because the sprite list is
+	 * rebuilt on the *fixed* tick and Present runs on the render tick: a frame
+	 * where no fixed tick happened would otherwise re-pack IDs that were
+	 * already slots, and bind a completely different set of textures. */
+	std::vector<SpriteData> m_PackedSpriteList;
+
+	/* Scratch for the packing: TextureManager ID -> slot this frame, or
+	   k_uiUnpackedTexture. Kept as a member only to avoid reallocating it
+	   every frame; it is reset before it is read again. */
+	std::vector<uint32_t> m_BindlessSlotForTexture;
+
+	/* Most distinct textures any one frame has referenced this session. Only
+	   interesting as it approaches m_uiBindlessCapacity, which is what it is
+	   reported for. */
+	size_t m_uiPeakBindlessWorkingSet = 0;
+
+	bool m_bWarnedBindlessWorkingSet = false;
 
 #if defined(EDITOR) || defined(_DEBUG)
 	static const int m_iSphereResolution = 30;

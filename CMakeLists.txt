@@ -48,6 +48,15 @@ set(VOXAGINE_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/Voxagine/Source)
 # ---------------------------------------------------------------------------
 include(CMake/Platforms.cmake)
 
+# The file dialog backends on Apple platforms are Objective-C++ (.mm): AppKit's
+# NSOpenPanel on macOS, UIKit on iOS. CMake picks OBJCXX from the extension but
+# the language still has to be enabled, and enable_language() is only valid at
+# directory scope - not inside the if(VOXAGINE_BUILD_EDITOR) block that adds
+# them. Enabling it costs one extra compiler check at configure time.
+if(APPLE AND VOXAGINE_BUILD_EDITOR)
+    enable_language(OBJCXX)
+endif()
+
 # miniaudio's iOS backend includes AVFoundation/Foundation Objective-C
 # declarations. Keep the implementation C everywhere else, but compile its
 # single translation unit as Objective-C on iOS so the backend is usable.
@@ -244,6 +253,12 @@ if(VOXAGINE_BUILD_ENGINE)
         target_link_libraries(voxagine PRIVATE comdlg32)
     endif()
 
+    # NSOpenPanel/NSSavePanel, for the same reason. iOS gets UIKit and
+    # Foundation from voxagine_link_vulkan already, so only macOS is named.
+    if(APPLE AND NOT VOXAGINE_IOS AND VOXAGINE_BUILD_EDITOR)
+        target_link_libraries(voxagine PRIVATE "-framework AppKit")
+    endif()
+
     if(VOXAGINE_ANDROID)
         target_link_libraries(voxagine PRIVATE android log)
     endif()
@@ -311,17 +326,103 @@ if(VOXAGINE_BUILD_ENGINE)
     if(VOXAGINE_BUILD_EDITOR)
         target_sources(voxagine PRIVATE ${VOXAGINE_EDITOR_SOURCES})
         target_compile_definitions(voxagine PUBLIC EDITOR)
+
+        # ARC, for the two Objective-C++ file dialog backends only.
+        #
+        # CMake compiles .mm under manual reference counting by default, which
+        # is not what modern AppKit/UIKit code is written against and not what
+        # these are: nfd_uikit.mm holds a __weak reference across a UIAlertAction
+        # block, and __weak is an ARC construct - clang rejects it outright
+        # under MRC rather than degrading. Under MRC the view controllers it
+        # allocates would also have to be released by hand, in a file whose
+        # objects outlive the call that made them.
+        #
+        # Scoped to these files rather than set on the target: the rest of the
+        # library is C++ and unaffected either way, and a global -fobjc-arc
+        # would silently change how miniaudio's Objective-C translation unit is
+        # compiled on iOS.
+        set_source_files_properties(
+            ${VOXAGINE_SOURCE_DIR}/External/nativefiledialog/nfd_cocoa.mm
+            ${VOXAGINE_SOURCE_DIR}/External/nativefiledialog/nfd_uikit.mm
+            PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
     endif()
 endif()
 
-# ---------------------------------------------------------------------------
-# Bit Buster
+# Copies the shipped asset tree into an app bundle.
 #
-# EDITOR selects the editor build; the old .sln expressed this as separate
-# *Editor and *Game configurations.
+# The trees go in wholesale rather than as individual RESOURCE entries: they are
+# ~95 MB across thousands of files and CMake's per-file resource handling would
+# list every one of them.
+#
+# Named directories rather than all of Game/, which is what this used to copy.
+# That swept the whole desktop working directory into the app - the game's own
+# Source/ tree, both Optick DLLs, the Visual Studio .rc and .aps files, and
+# SmallHouseV2, a directory of generated remainder models nothing references.
+# None of it is reachable on a device, and MobileAssets then extracted a second
+# copy of all of it at startup.
+#
+# Keep this list in step with MobileAssets' k_pAssetRoots and its loose files:
+# anything shipped here but not extracted is dead weight, and anything extracted
+# but not shipped is a missing-file failure at runtime.
+#
+# DESTINATION differs per platform and must match what SDL_GetBasePath returns
+# there - the bundle root on iOS, Contents/Resources on macOS. The caller passes
+# it because only the caller knows which platform it is building for.
+function(voxagine_bundle_assets target destination)
+    # UserSettings.vguser holds the editor's startup world, and only an editor
+    # build has any use for it. Leaving it out is not harmless: with no user
+    # settings the editor opens with no world at all, which is what a bundled
+    # editor did until this list stopped being the game's list.
+    set(VOXAGINE_LOOSE_ASSETS
+        ${CMAKE_CURRENT_SOURCE_DIR}/Game/Settings.vgs
+        ${CMAKE_CURRENT_SOURCE_DIR}/Game/ProjectSettings.vgps)
+
+    if(VOXAGINE_BUILD_EDITOR)
+        list(APPEND VOXAGINE_LOOSE_ASSETS
+            ${CMAKE_CURRENT_SOURCE_DIR}/Game/UserSettings.vguser)
+    endif()
+
+    add_custom_command(TARGET ${target} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            ${CMAKE_CURRENT_SOURCE_DIR}/Game/Content ${destination}/Content
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            ${CMAKE_CURRENT_SOURCE_DIR}/Game/Engine ${destination}/Engine
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${VOXAGINE_LOOSE_ASSETS}
+            ${destination}
+        COMMENT "Copying the asset tree into the app bundle")
+endfunction()
+
+# ---------------------------------------------------------------------------
+# The application
+#
+# Two targets, not one renamed target, and only ever one of them per configure.
+#
+#   BitBuster       - the game. A plain executable on desktop, libmain.so on
+#                     Android, a .app on iOS.
+#   VoxagineEditor  - the editor. A .app bundle on macOS and iOS; a plain
+#                     executable named Voxagine everywhere else.
+#
+# It used to be one target called BitBuster with OUTPUT_NAME Voxagine flipped
+# on for editor builds. That works while both are plain executables and stops
+# working the moment one of them has to be a bundle: MACOSX_BUNDLE, the
+# Info.plist, the bundle identifier and the resource layout are all target
+# properties, and a target has one of each. Two apps need two targets.
+#
+# They are mutually exclusive rather than both built because EDITOR is defined
+# PUBLIC on the voxagine library (see above) - the editor is not an extra
+# executable over the same library, it is a different compilation of it. Having
+# both in one build tree would mean a second 147-TU static library, which is
+# what the editor/game preset split already buys without paying for it twice.
 # ---------------------------------------------------------------------------
 if(VOXAGINE_BUILD_ENGINE)
     include(${CMAKE_CURRENT_SOURCE_DIR}/CMake/GameSources.cmake)
+
+    if(VOXAGINE_BUILD_EDITOR)
+        set(VOXAGINE_APP VoxagineEditor)
+    else()
+        set(VOXAGINE_APP BitBuster)
+    endif()
 
     if(VOXAGINE_ANDROID)
         # An Android app has no executable of its own. SDLActivity dlopens the
@@ -329,27 +430,19 @@ if(VOXAGINE_BUILD_ENGINE)
         # SDL_main in the second, so the game has to *be* libmain.so. The
         # OUTPUT_NAME is what makes the file name match what the Java loader
         # asks for; renaming it means overriding getLibraries() in the activity.
-        add_library(BitBuster SHARED ${VOXAGINE_GAME_SOURCES})
-        set_target_properties(BitBuster PROPERTIES OUTPUT_NAME main)
+        add_library(${VOXAGINE_APP} SHARED ${VOXAGINE_GAME_SOURCES})
+        set_target_properties(${VOXAGINE_APP} PROPERTIES OUTPUT_NAME main)
     else()
-        add_executable(BitBuster ${VOXAGINE_GAME_SOURCES})
+        add_executable(${VOXAGINE_APP} ${VOXAGINE_GAME_SOURCES})
     endif()
 
-    # The editor is a different application from the game: different translation
-    # units compiled in, different thing to launch. Both being called BitBuster
-    # meant the two build trees produced identically named binaries and the only
-    # way to tell an editor build from a game build was the path it came from.
-    # The CMake target keeps its name so every reference below stays valid; only
-    # the file this produces is renamed.
-    #
-    # Guarded on mobile because Android needs OUTPUT_NAME main (above) - though
-    # the editor cannot be built for mobile at all; CMake/Platforms.cmake fails
-    # the configure. Belt and braces so the two renames can never disagree.
-    if(VOXAGINE_BUILD_EDITOR AND NOT VOXAGINE_MOBILE)
-        set_target_properties(BitBuster PROPERTIES OUTPUT_NAME Voxagine)
+    # The editor binary is called Voxagine, the game one BitBuster. On Android
+    # neither is: the loader asks for libmain.so by name (above).
+    if(VOXAGINE_BUILD_EDITOR AND NOT VOXAGINE_ANDROID)
+        set_target_properties(${VOXAGINE_APP} PROPERTIES OUTPUT_NAME Voxagine)
     endif()
 
-    target_include_directories(BitBuster PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Game/Source)
+    target_include_directories(${VOXAGINE_APP} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Game/Source)
     # WHOLE_ARCHIVE, and it is load-bearing rather than tidiness.
     #
     # RTTR registrations are static initializers in an anonymous namespace, so
@@ -369,21 +462,48 @@ if(VOXAGINE_BUILD_ENGINE)
     #
     # Any future reflection-only TU has the same shape, which is why this is
     # fixed at the link rather than by giving Settings.cpp an anchor symbol.
-    target_link_libraries(BitBuster PRIVATE
+    target_link_libraries(${VOXAGINE_APP} PRIVATE
         "$<LINK_LIBRARY:WHOLE_ARCHIVE,voxagine>"
         voxagine_warnings)
 
     # EDITOR itself is defined on the voxagine library above, PUBLIC, so both
     # the library and this executable see it.
 
+    # -----------------------------------------------------------------------
+    # Bundle identity.
+    #
+    # The editor is a separate application from the game and gets its own
+    # identifier, display name and icon. Sharing an identifier would mean
+    # installing one over the other on a device, and on macOS the two would
+    # share Launch Services registration and preferences.
+    if(VOXAGINE_BUILD_EDITOR)
+        set(VOXAGINE_BUNDLE_ID "${VOXAGINE_IOS_BUNDLE_ID}.editor")
+        set(VOXAGINE_BUNDLE_NAME "Voxagine Editor")
+    else()
+        set(VOXAGINE_BUNDLE_ID "${VOXAGINE_IOS_BUNDLE_ID}")
+        set(VOXAGINE_BUNDLE_NAME "Bit Buster")
+    endif()
+
+    get_target_property(VOXAGINE_APP_EXECUTABLE ${VOXAGINE_APP} OUTPUT_NAME)
+
+    if(NOT VOXAGINE_APP_EXECUTABLE)
+        set(VOXAGINE_APP_EXECUTABLE ${VOXAGINE_APP})
+    endif()
+
+    # Substituted into Platforms/iOS/Info.plist.in. Both apps want landscape;
+    # see the comment beside the key there.
+    set(VOXAGINE_IOS_ORIENTATIONS
+"        <string>UIInterfaceOrientationLandscapeLeft</string>
+        <string>UIInterfaceOrientationLandscapeRight</string>")
+
     if(VOXAGINE_IOS)
         configure_file(${CMAKE_CURRENT_SOURCE_DIR}/Platforms/iOS/Info.plist.in
                        ${CMAKE_CURRENT_BINARY_DIR}/Info.plist @ONLY)
 
-        set_target_properties(BitBuster PROPERTIES
+        set_target_properties(${VOXAGINE_APP} PROPERTIES
             MACOSX_BUNDLE TRUE
             MACOSX_BUNDLE_INFO_PLIST ${CMAKE_CURRENT_BINARY_DIR}/Info.plist
-            XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "${VOXAGINE_IOS_BUNDLE_ID}"
+            XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "${VOXAGINE_BUNDLE_ID}"
             XCODE_ATTRIBUTE_IPHONEOS_DEPLOYMENT_TARGET "${VOXAGINE_IOS_MIN_VERSION}"
             # The UIDeviceFamily in Info.plist.in does *not* decide this on its
             # own: Xcode rewrites that key from TARGETED_DEVICE_FAMILY, which
@@ -402,45 +522,55 @@ if(VOXAGINE_BUILD_ENGINE)
         # build with `xcodebuild -allowProvisioningUpdates`, which then creates
         # and downloads the profile for this bundle ID on demand.
         if(VOXAGINE_IOS_DEVELOPMENT_TEAM)
-            set_target_properties(BitBuster PROPERTIES
+            set_target_properties(${VOXAGINE_APP} PROPERTIES
                 XCODE_ATTRIBUTE_DEVELOPMENT_TEAM "${VOXAGINE_IOS_DEVELOPMENT_TEAM}"
                 XCODE_ATTRIBUTE_CODE_SIGN_STYLE "Automatic"
                 XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY "Apple Development"
             )
         else()
-            set_target_properties(BitBuster PROPERTIES
+            set_target_properties(${VOXAGINE_APP} PROPERTIES
                 XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED "NO"
                 XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY ""
             )
         endif()
 
-        # The asset trees go into the bundle wholesale rather than as individual
-        # RESOURCE entries: they are ~95 MB across thousands of files and
-        # CMake's per-file resource handling would list every one of them.
+        voxagine_bundle_assets(${VOXAGINE_APP} $<TARGET_BUNDLE_CONTENT_DIR:${VOXAGINE_APP}>)
+    elseif(APPLE AND VOXAGINE_BUILD_EDITOR)
+        # macOS: the editor is a double-clickable .app, which is the whole
+        # point of this target existing separately.
         #
-        # Named directories rather than all of Game/, which is what this used to
-        # copy. That swept the whole desktop working directory into the app -
-        # the game's own Source/ tree, both Optick DLLs, the Visual Studio .rc
-        # and .aps files, and SmallHouseV2, a directory of generated remainder
-        # models nothing references. None of it is reachable on a device, and
-        # MobileAssets then extracted a second copy of all of it at startup.
+        # A bundle launched from Finder starts with the working directory set
+        # to "/", so the engine's bare relative asset paths - "Content/...",
+        # "Engine/Assets/Shaders/..." - resolve against the root of the disk
+        # and every one of them fails. That is the same problem iOS has, and
+        # Core/System/MobileAssets.cpp now answers it the same way for both:
+        # find the asset root inside the bundle, prepare a writable copy of it,
+        # and chdir there before anything reads a file.
         #
-        # Keep this list in step with MobileAssets' k_pAssetRoots and its loose
-        # files: anything shipped here but not extracted is dead weight, and
-        # anything extracted but not shipped is a missing-file failure at
-        # runtime.
-        add_custom_command(TARGET BitBuster POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_directory
-                ${CMAKE_CURRENT_SOURCE_DIR}/Game/Content
-                $<TARGET_BUNDLE_CONTENT_DIR:BitBuster>/Content
-            COMMAND ${CMAKE_COMMAND} -E copy_directory
-                ${CMAKE_CURRENT_SOURCE_DIR}/Game/Engine
-                $<TARGET_BUNDLE_CONTENT_DIR:BitBuster>/Engine
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                ${CMAKE_CURRENT_SOURCE_DIR}/Game/Settings.vgs
-                ${CMAKE_CURRENT_SOURCE_DIR}/Game/ProjectSettings.vgps
-                $<TARGET_BUNDLE_CONTENT_DIR:BitBuster>
-            COMMENT "Copying the asset tree into the app bundle")
+        # The game is deliberately *not* bundled here. It is still launched
+        # from Game/ on desktop, still finds its assets relative to the working
+        # directory, and nothing about that is broken.
+        if(CMAKE_OSX_DEPLOYMENT_TARGET)
+            set(VOXAGINE_MACOS_MIN_VERSION_KEY
+"    <key>LSMinimumSystemVersion</key>
+    <string>${CMAKE_OSX_DEPLOYMENT_TARGET}</string>")
+        else()
+            set(VOXAGINE_MACOS_MIN_VERSION_KEY "")
+        endif()
+
+        configure_file(${CMAKE_CURRENT_SOURCE_DIR}/Platforms/macOS/Info.plist.in
+                       ${CMAKE_CURRENT_BINARY_DIR}/Info.plist @ONLY)
+
+        set_target_properties(${VOXAGINE_APP} PROPERTIES
+            MACOSX_BUNDLE TRUE
+            MACOSX_BUNDLE_INFO_PLIST ${CMAKE_CURRENT_BINARY_DIR}/Info.plist)
+
+        # Contents/Resources, not Contents/: that is what SDL_GetBasePath
+        # returns on macOS (CFBundleCopyResourcesDirectoryURL), where on iOS it
+        # returns the bundle root. Matching SDL's answer on each platform is
+        # what lets MobileAssets use one code path for both.
+        voxagine_bundle_assets(${VOXAGINE_APP}
+            $<TARGET_BUNDLE_CONTENT_DIR:${VOXAGINE_APP}>/Resources)
     endif()
 
     # Guarded because voxagine_add_shaders returns without creating the target
@@ -448,8 +578,13 @@ if(VOXAGINE_BUILD_ENGINE)
     # is a generate-time error. That is not hypothetical: it is what stopped CI
     # from building the engine at all, and CI has no Vulkan SDK. The executable
     # still links; it just cannot render until someone compiles the shaders.
+    #
+    # It also has to come *before* the POST_BUILD copy above can be correct:
+    # the .spv files land in Game/Engine/Assets/Shaders and are copied from
+    # there, so a bundle built without this dependency can capture the previous
+    # build's shaders.
     if(TARGET voxagine_shaders_game)
-        add_dependencies(BitBuster voxagine_shaders_game)
+        add_dependencies(${VOXAGINE_APP} voxagine_shaders_game)
     endif()
 
     # A separate executable on purpose: this is a renderer integration test,

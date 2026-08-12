@@ -125,7 +125,10 @@ For the editor, use target `VoxagineEditor`, the paths under
 `Build/iOS/Editor/...`, and bundle identifier `com.voxagine.bitbuster.editor`.
 
 For ad-hoc distribution (e.g. via SideStore/AltStore), see
-`Platforms/iOS/build-and-deploy.sh`.
+`Platforms/iOS/build-and-deploy.sh`, which takes `--game` (default) or
+`--editor`. The two are separate apps with separate bundle identifiers, so each
+needs its own entry in the source's `apps` array; the publish step matches on
+`bundleIdentifier` and refuses rather than rewriting the other app's entry.
 
 ### The editor on iPad
 

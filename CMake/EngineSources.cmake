@@ -9,6 +9,7 @@ set(VOXAGINE_ENGINE_SOURCES
     ${VOXAGINE_SOURCE_DIR}/Core/Platform/Input/SDL/SDLGamePad.cpp
     ${VOXAGINE_SOURCE_DIR}/Core/Platform/Input/SDL/SDLKeyboard.cpp
     ${VOXAGINE_SOURCE_DIR}/Core/Platform/Input/SDL/SDLMouse.cpp
+    ${VOXAGINE_SOURCE_DIR}/Core/Platform/Input/SDL/SDLEventInput.cpp
     ${VOXAGINE_SOURCE_DIR}/Core/ECS/Component.cpp
     ${VOXAGINE_SOURCE_DIR}/Core/ECS/Components/AudioPlaylist.cpp
     ${VOXAGINE_SOURCE_DIR}/Core/ECS/Components/AudioSource.cpp
@@ -244,13 +245,35 @@ set(VOXAGINE_EDITOR_SOURCES
     ${VOXAGINE_SOURCE_DIR}/Editor/Window.cpp
 )
 
-# File dialogs are the one piece of the editor with no portable implementation:
-# Win32 has GetOpenFileName, and on Linux we shell out to whatever portal-aware
-# dialog the desktop provides rather than taking a GTK dependency.
+# File dialogs are the one piece of the editor with no portable implementation.
+# One backend per platform, and exactly one must be selected: nfd.h declares
+# NFD_OpenDialog/NFD_SaveDialog and Core/FileBrowser.cpp calls them, so a
+# platform with no backend here does not fail to *run* a dialog, it fails to
+# link the editor at all.
+#
+#   Win32   - GetOpenFileName.
+#   macOS   - NSOpenPanel/NSSavePanel. This used to fall through to the portal
+#             backend below, which compiles on macOS (poll.h and popen exist)
+#             and then finds neither zenity nor kdialog at runtime, so every
+#             dialog silently returned NFD_ERROR. A .app that cannot open a
+#             file is not an editor.
+#   iOS     - an in-app UIKit browser over the project's content tree. Not a
+#             UIDocumentPicker: every call site in Editor.cpp immediately runs
+#             AbsoluteToRelative against the content folder and discards
+#             anything outside it, so a picker that can only usefully return
+#             files from elsewhere in the file system is the wrong control.
+#   Linux   - shell out to whatever portal-aware dialog the desktop provides,
+#             rather than taking a GTK dependency on an SDL/Vulkan app.
 if(WIN32)
     list(APPEND VOXAGINE_EDITOR_SOURCES
         ${VOXAGINE_SOURCE_DIR}/External/nativefiledialog/nfd_win32.cpp)
-elseif(NOT ANDROID AND NOT IOS)
+elseif(VOXAGINE_IOS)
+    list(APPEND VOXAGINE_EDITOR_SOURCES
+        ${VOXAGINE_SOURCE_DIR}/External/nativefiledialog/nfd_uikit.mm)
+elseif(APPLE)
+    list(APPEND VOXAGINE_EDITOR_SOURCES
+        ${VOXAGINE_SOURCE_DIR}/External/nativefiledialog/nfd_cocoa.mm)
+elseif(NOT ANDROID)
     list(APPEND VOXAGINE_EDITOR_SOURCES
         ${VOXAGINE_SOURCE_DIR}/External/nativefiledialog/nfd_portal.cpp)
 endif()

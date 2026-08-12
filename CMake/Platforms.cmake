@@ -78,13 +78,35 @@ if(VOXAGINE_MOBILE)
     message(STATUS "Voxagine: building for mobile "
         "(android=${VOXAGINE_ANDROID} ios=${VOXAGINE_IOS})")
 
-    # The editor is explicitly out of scope for mobile - it is a mouse and
-    # keyboard tool with desktop file dialogs. Catch an attempt to build it
-    # here rather than in a wall of compile errors.
-    if(VOXAGINE_BUILD_EDITOR)
+    # The editor on mobile.
+    #
+    # This used to be a flat FATAL_ERROR for all of mobile, on the grounds that
+    # the editor is a mouse-and-keyboard tool with desktop file dialogs. Both
+    # halves of that were true and both have been answered *for iOS only*:
+    #
+    #   - Input. Core/Platform/Input/SDL/SDLTouchPointer.* turns touches into
+    #     the pointer state the editor already reads, with Blender-style camera
+    #     gestures, and a paired Magic Keyboard or trackpad still arrives as
+    #     ordinary SDL key and mouse events.
+    #   - File dialogs. External/nativefiledialog/nfd_uikit.mm is a real
+    #     backend rather than a stub, browsing the project's own content tree -
+    #     which is the only place the editor can use a file from anyway, since
+    #     every call site immediately makes the result relative to it.
+    #
+    # Android has neither. It is not a hardware limitation, just unbuilt work:
+    # NFD has no Android backend here, so Core/FileBrowser.cpp would not link,
+    # and the touch layer has had no device testing there. Say which is missing
+    # rather than refusing the whole category.
+    if(VOXAGINE_BUILD_EDITOR AND VOXAGINE_ANDROID)
         message(FATAL_ERROR
-            "VOXAGINE_BUILD_EDITOR is not supported on mobile. "
-            "See Docs/MOBILE_PORT_PLAN.md, 'Rejected / out of scope'.")
+            "VOXAGINE_BUILD_EDITOR is not supported on Android: there is no "
+            "nfd_*.cpp for it, so Core/FileBrowser.cpp cannot link. The iOS "
+            "editor is supported - see the ios-editor preset.")
+    endif()
+
+    if(VOXAGINE_BUILD_EDITOR)
+        message(STATUS "Voxagine: building the editor for iOS "
+            "(touch pointer + UIKit file dialogs)")
     endif()
 
     if(VOXAGINE_BUILD_BRINGUP AND VOXAGINE_ANDROID)

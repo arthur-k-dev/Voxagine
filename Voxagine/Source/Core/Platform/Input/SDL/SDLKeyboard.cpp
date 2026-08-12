@@ -4,6 +4,7 @@
 #include <SDL3/SDL.h>
 
 #include "Core/LaunchOptions.h"
+#include "Core/Platform/Input/SDL/SDLEventInput.h"
 
 #include <cctype>
 #include <cstdio>
@@ -135,6 +136,28 @@ Keyboard::State Keyboard::GetState() const
 
 	if (pKeys == nullptr)
 		return state;
+
+	/* A key that went down *and* up inside one frame's events is not in the
+	 * snapshot at all, because the snapshot is a photograph of now and the key
+	 * is already back up. That is not hypothetical - it is why backspace did
+	 * nothing in an ImGui text field on iOS, where SDL delivers it as a
+	 * synthesized press and release together while text input is active.
+	 *
+	 * So the snapshot is merged with "was pressed at any point this frame"
+	 * before anything reads it, which costs one pass over 512 bytes and means
+	 * every consumer - ImGui, the binding maps, the editor shortcuts - sees
+	 * the key. Held keys are unaffected: true OR true.
+	 *
+	 * Merged into a copy rather than SDL's array, which SDL owns. */
+	static bool s_Merged[SDL_SCANCODE_COUNT];
+	const int iMergeCount = iCount < SDL_SCANCODE_COUNT ? iCount : SDL_SCANCODE_COUNT;
+
+	const SDLEventInput& eventInput = SDLEventInput::Get();
+
+	for (int i = 0; i < iMergeCount; ++i)
+		s_Merged[i] = pKeys[i] || eventInput.WasKeyPressedThisFrame(i);
+
+	pKeys = s_Merged;
 
 	/* --ui-script overlays one key onto the snapshot - see the top of this file.
 	   Applied to the built state at the bottom rather than to SDL's array, which

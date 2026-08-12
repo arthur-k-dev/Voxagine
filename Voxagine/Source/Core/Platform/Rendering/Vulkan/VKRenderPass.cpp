@@ -678,12 +678,39 @@ bool VKRenderPass::WriteDescriptors(PCommandEngine* pEngine, VkDescriptorSet set
 
 			bindlessInfos.assign(binding.m_uiCount, fallback);
 
-			for (const auto& entry : pManager->m_pViews)
+			/* Slot N holds the texture the frame's Nth distinct sprite
+			   referenced, not the texture whose TextureManager ID happens to
+			   be N.
+			 *
+			 * That used to be the other way round - this loop walked every
+			 * live view and wrote it at index entry.first - and it is the
+			 * whole reason the array had to be as large as the highest live ID
+			 * rather than as large as a frame's working set. It cannot be: 96
+			 * is a Metal limit on A12Z, the content keeps more than 96
+			 * textures resident, and everything past the limit sampled the
+			 * wrong image. RenderContext::PackBindlessTextures builds this
+			 * list and rewrites the sprites to match; see m_BindlessTextureIDs
+			 * for the full reasoning.
+			 *
+			 * Bounded by both sizes because the two are decided in different
+			 * places: the packer against m_uiBindlessCapacity, this against
+			 * whatever the binding table declared. They agree today and a
+			 * mismatch should truncate rather than corrupt. */
+			const std::vector<uint32_t>& packedTextures =
+				m_pContext->GetBindlessTextureIDs();
+
+			const size_t uiSlots = std::min(packedTextures.size(), bindlessInfos.size());
+
+			for (size_t uiSlot = 0; uiSlot < uiSlots; ++uiSlot)
 			{
-				if (entry.first >= binding.m_uiCount)
+				const auto entry = pManager->m_pViews.find(packedTextures[uiSlot]);
+
+				/* Destroyed between the packing and here. The slot keeps the
+				   fallback, which is a valid descriptor. */
+				if (entry == pManager->m_pViews.end())
 					continue;
 
-				View* pTexture = entry.second.get();
+				View* pTexture = entry->second.get();
 
 				/* A view that was never uploaded is still UNDEFINED; binding
 				   it as sampled would be invalid. */
@@ -701,34 +728,7 @@ bool VKRenderPass::WriteDescriptors(PCommandEngine* pEngine, VkDescriptorSet set
 				info.imageView = imageView;
 				info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
-				/* Bounds-checked because entry.first is a TextureManager ID
-				   from a monotonic counter, not an index into this array: it
-				   keeps climbing as textures load and is unrelated to
-				   m_uiBindlessCapacity. Writing it unchecked is a plain
-				   out-of-bounds vector store - heap corruption rather than a
-				   validation error - and this project ships 133 PNG assets
-				   against a 96-slot array, so it is reachable, not theoretical.
-
-				   Sampling is still wrong for those textures: the shader clamps
-				   the ID to the last slot, so anything loaded past the capacity
-				   draws whatever occupies it. That is a capacity problem, not a
-				   bounds problem, and it is called out once here rather than
-				   silently dropped. */
-				if (entry.first >= bindlessInfos.size())
-				{
-					if (!m_bWarnedBindlessOverflow)
-					{
-						fprintf(stderr,
-							"[vulkan] '%s': texture ID %u exceeds the %zu-slot bindless array; "
-							"it and every later texture will sample the wrong image\n",
-							m_Data.m_Name.c_str(), entry.first, bindlessInfos.size());
-						m_bWarnedBindlessOverflow = true;
-					}
-
-					continue;
-				}
-
-				bindlessInfos[entry.first] = info;
+				bindlessInfos[uiSlot] = info;
 			}
 
 			VkWriteDescriptorSet write{};

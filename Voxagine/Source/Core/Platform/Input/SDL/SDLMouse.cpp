@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "SDLMouse.h"
 
+#include "Core/Platform/Input/SDL/SDLEventInput.h"
 #include "Core/Platform/Window/SDL/SDLWindowContext.h"
 
 #include <SDL3/SDL.h>
@@ -51,6 +52,16 @@ Mouse::State Mouse::GetState() const
 	state.rightButton = (buttons & SDL_BUTTON_RMASK) != 0;
 	state.xButton1 = (buttons & SDL_BUTTON_X1MASK) != 0;
 	state.xButton2 = (buttons & SDL_BUTTON_X2MASK) != 0;
+
+	/* A finger on the glass is the left button held. Only the left one: right
+	   and middle stay whatever a paired mouse says, because there is no
+	   gesture that means them - two and three fingers are the camera (see
+	   SDLEventInput.h), not other buttons.
+
+	   OR rather than assign, so a real button held while touching does not get
+	   cleared. GetMousePositionInPixels above has already put the coordinates
+	   under the finger. */
+	state.leftButton = state.leftButton || SDLEventInput::Get().IsPointerPressed();
 
 	state.scrollWheelValue = m_iScrollWheelValue;
 

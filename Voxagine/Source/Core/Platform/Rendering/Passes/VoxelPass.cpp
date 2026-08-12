@@ -80,8 +80,18 @@ VoxelPass::VoxelPass(
 	   declares. RENDERING_PLAN.md 7.1b route B. */
 	RenderPassData.m_Textures.push_back(pPyramidTexture);
 
-	RenderPassData.m_uiBindlessResourceCount = 1;
-	RenderPassData.m_BindlessSource = RenderPass::E_BINDLESS_SOURCE_MODELS;
+	/* No bindless range. Neither VoxelRenderer shader declares one any more -
+	   the unbounded voxelModelData[] they used to carry belonged to an
+	   abandoned GPU-baker path and was never read - and nothing ever filled it:
+	   VKRenderPass::WriteDescriptors only implements E_BINDLESS_SOURCE_TEXTURES,
+	   so E_BINDLESS_SOURCE_MODELS reserved descriptors and wrote none.
+
+	   Reserving them was not free. MoltenVK spends one [[texture(N)]] index per
+	   descriptor and A12Z requires N <= 127, so this array sat between the
+	   pass's six inputs and its voxelWorldData texel buffer and pushed that last
+	   binding out of range - Metal then refused the fragment shader outright and
+	   the voxel pass had no pipeline at all. */
+	RenderPassData.m_uiBindlessResourceCount = 0;
 
 	Init(RenderPassData);
 }

@@ -1084,9 +1084,40 @@ bool RenderContext::Present()
 		pVDirectEngine->Reset();
 		pVDirectEngine->Start();
 
+#if defined(VOXAGINE_IOS)
+		/* Metal reports a GPU address fault only for the complete Vulkan queue
+		   submission, which otherwise hides which render stage supplied the bad
+		   resource. Keep the producer/consumer stages as separate submissions on
+		   iOS. Besides making the failing stage explicit in the device log, this
+		   gives MoltenVK a command-buffer boundary for dependencies that D3D12
+		   previously resolved within one command list. */
+		auto SubmitVDirectStage = [pVDirectEngine](const char* pName)
+		{
+			fprintf(stderr, "[ios-gpu] submitting VDirect stage '%s'\n", pName);
+			pVDirectEngine->ApplyBarriers();
+			pVDirectEngine->Execute();
+			pVDirectEngine->WaitForGPU();
+
+			if (pVDirectEngine->GetCompletedValue() < pVDirectEngine->GetValue())
+			{
+				fprintf(stderr, "[ios-gpu] VDirect stage '%s' failed\n", pName);
+				return false;
+			}
+
+			fprintf(stderr, "[ios-gpu] completed VDirect stage '%s'\n", pName);
+			pVDirectEngine->Reset();
+			pVDirectEngine->Start();
+			return true;
+		};
+#endif
+
 		/* Before any pass opens: the voxel pass samples the coverage texture,
 		   and a copy cannot be recorded inside a render pass instance. */
 		UploadVoxelPyramid(pVDirectEngine);
+#if defined(VOXAGINE_IOS)
+		if (!SubmitVDirectStage("voxel pyramid upload"))
+			return false;
+#endif
 
 		/* One render pass instance per pass: dynamic rendering cannot nest
 		   them, so the DX12-style interleaved Begin order would silently skip
@@ -1095,6 +1126,10 @@ bool RenderContext::Present()
 		pVDirectEngine->Begin(pParticlePass);
 		pVDirectEngine->Draw(pParticlePass);
 		pVDirectEngine->End(pParticlePass);
+#if defined(VOXAGINE_IOS)
+		if (!SubmitVDirectStage("particles"))
+			return false;
+#endif
 
 		/* The voxel pass samples this one's target at t3, so it has to be
 		   complete first - same ordering constraint as the particle targets
@@ -1113,6 +1148,10 @@ bool RenderContext::Present()
 			pVDirectEngine->Begin(pSunShadowPass);
 			pVDirectEngine->Draw(pSunShadowPass);
 			pVDirectEngine->End(pSunShadowPass);
+#if defined(VOXAGINE_IOS)
+			if (!SubmitVDirectStage("sun shadow"))
+				return false;
+#endif
 
 			/* DYNAMIC_MODELS_PLAN.md phase 4: dynamic renderers' own
 			   light-space depth, then the combine pass that min()s it against
@@ -1122,10 +1161,18 @@ bool RenderContext::Present()
 			pVDirectEngine->Begin(pSunShadowModelPass);
 			pVDirectEngine->Draw(pSunShadowModelPass);
 			pVDirectEngine->End(pSunShadowModelPass);
+#if defined(VOXAGINE_IOS)
+			if (!SubmitVDirectStage("sun shadow models"))
+				return false;
+#endif
 
 			pVDirectEngine->Begin(pSunShadowCombinePass);
 			pVDirectEngine->Draw(pSunShadowCombinePass);
 			pVDirectEngine->End(pSunShadowCombinePass);
+#if defined(VOXAGINE_IOS)
+			if (!SubmitVDirectStage("sun shadow combine"))
+				return false;
+#endif
 		}
 
 		/* Dynamic models - DYNAMIC_MODELS_PLAN.md phase 2. The voxel pass
@@ -1134,14 +1181,23 @@ bool RenderContext::Present()
 		pVDirectEngine->Begin(pVoxelModelPass);
 		pVDirectEngine->Draw(pVoxelModelPass);
 		pVDirectEngine->End(pVoxelModelPass);
+#if defined(VOXAGINE_IOS)
+		if (!SubmitVDirectStage("voxel models"))
+			return false;
+#endif
 
 		pVDirectEngine->Begin(pVoxelPass);
 		pVDirectEngine->Draw(pVoxelPass);
 		pVDirectEngine->End(pVoxelPass);
 
+#if defined(VOXAGINE_IOS)
+		if (!SubmitVDirectStage("voxel world"))
+			return false;
+#else
 		pVDirectEngine->ApplyBarriers();
 
 		pVDirectEngine->Execute();
+#endif
 	}
 
 	// Texture data
@@ -1204,12 +1260,37 @@ bool RenderContext::Present()
 		// pDirectEngine->Wait(pCopyEngine, 1);
 		pDirectEngine->Start();
 
+#if defined(VOXAGINE_IOS)
+		auto SubmitDirectStage = [pDirectEngine](const char* pName)
+		{
+			fprintf(stderr, "[ios-gpu] submitting Direct stage '%s'\n", pName);
+			pDirectEngine->ApplyBarriers();
+			pDirectEngine->Execute();
+			pDirectEngine->WaitForGPU();
+
+			if (pDirectEngine->GetCompletedValue() < pDirectEngine->GetValue())
+			{
+				fprintf(stderr, "[ios-gpu] Direct stage '%s' failed\n", pName);
+				return false;
+			}
+
+			fprintf(stderr, "[ios-gpu] completed Direct stage '%s'\n", pName);
+			pDirectEngine->Reset();
+			pDirectEngine->Start();
+			return true;
+		};
+#endif
+
 		/* One render pass instance per pass (see the VDirect block above).
 		   Post processing samples the UI and debug targets, so both close
 		   before it begins. */
 		pDirectEngine->Begin(pUIPass);
 		pDirectEngine->Draw(pUIPass);
 		pDirectEngine->End(pUIPass);
+#if defined(VOXAGINE_IOS)
+		if (!SubmitDirectStage("UI"))
+			return false;
+#endif
 
 #if defined(_DEBUG) || defined(EDITOR)
 		if (m_bDebugEnabled || !m_bDebugCleared)
@@ -1226,14 +1307,26 @@ bool RenderContext::Present()
 		/* ImContext::Draw takes only the draw data; the Vulkan context reads
 		   the command buffer off the engine it was constructed with, so the
 		   backend command list no longer has to be threaded through here.
-		   It records into the post processing pass's instance. */
+		   It records into the post processing pass's instance.
+
+		   This used to be compiled out on iOS, to isolate a MoltenVK GPU address
+		   fault in this submission. It is not optional work: TextRenderer draws
+		   every string in the game through ImGui, so skipping it is why no text
+		   appeared on device at all - and the editor is ImGui end to end. The
+		   faults it was hiding have since been traced to the voxel buffers'
+		   image format and the AABB stride, both fixed. */
 		m_pPlatform->GetImguiSystem().GetContext()->Draw(ImGui::GetDrawData());
 
 		pDirectEngine->End(pPostProcessingPass);
 		pDirectEngine->ApplyBarriers();
 
 		/* Execute command list */
+#if defined(VOXAGINE_IOS)
+		if (!SubmitDirectStage("post processing"))
+			return false;
+#else
 		pDirectEngine->Execute(); // 1
+#endif
 	}
 
 	if (!m_bDebugEnabled && !m_bDebugCleared)
@@ -1818,7 +1911,26 @@ void RenderContext::LoadTexture(TextureReference* pTextureReference)
 	if (!pTextureReference || pTextureReference->TextureView)
 		return;
 
-	m_pTextureManager->LoadTexture(m_pCommandEngines["Texture"]->Get(), pTextureReference);
+	/* A backend can fail during device/swapchain creation (most commonly when
+	   MoltenVK is unavailable or rejects a required feature).  The context
+	   object still exists in that case, but its managers/engines do not.  World
+	   deserialization happens immediately after Platform::Initialize and must
+	   not turn that recoverable initialization failure into a null dereference.
+	*/
+	if (!m_pTextureManager)
+	{
+		fprintf(stderr, "[render] texture load skipped: texture manager is not initialized\n");
+		return;
+	}
+
+	auto commandEngine = m_pCommandEngines.find("Texture");
+	if (commandEngine == m_pCommandEngines.end() || !commandEngine->second)
+	{
+		fprintf(stderr, "[render] texture load skipped: Texture command engine is not initialized\n");
+		return;
+	}
+
+	m_pTextureManager->LoadTexture(commandEngine->second->Get(), pTextureReference);
 }
 
 void RenderContext::DestroyTexture(const TextureReference* pTextureRef)

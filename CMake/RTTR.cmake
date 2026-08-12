@@ -26,6 +26,12 @@ FetchContent_Declare(rttr
     GIT_REPOSITORY https://github.com/rttrorg/rttr.git
     GIT_TAG        ${VOXAGINE_RTTR_TAG}
     GIT_SHALLOW    TRUE
+    # 0.9.6 sorts base classes with a comparator that is not a strict weak
+    # ordering, which is UB in std::sort and aborts on iOS before main().
+    # CMake/PatchRTTR.cmake explains it at length and is idempotent.
+    PATCH_COMMAND  ${CMAKE_COMMAND}
+                   -DRTTR_SOURCE_DIR=<SOURCE_DIR>
+                   -P ${CMAKE_CURRENT_LIST_DIR}/PatchRTTR.cmake
 )
 
 # RTTR 0.9.6 predates CMake 3.5 being dropped as a compatibility floor, so
@@ -39,7 +45,22 @@ set(BUILD_INSTALLER OFF CACHE BOOL "" FORCE)
 set(BUILD_PACKAGE OFF CACHE BOOL "" FORCE)
 set(BUILD_WITH_STATIC_RUNTIME_LIBS OFF CACHE BOOL "" FORCE)
 
+# iOS bundles do not currently copy RTTR's shared library into the app.
+# Build RTTR statically on iOS so the executable has no reference to the
+# build-machine path (and cannot abort at launch with DYLD "Library missing").
+if(IOS OR (APPLE AND CMAKE_SYSTEM_NAME STREQUAL "iOS"))
+    set(BUILD_RTTR_DYNAMIC OFF CACHE BOOL "" FORCE)
+    set(BUILD_STATIC ON CACHE BOOL "" FORCE)
+endif()
+
 FetchContent_MakeAvailable(rttr)
+
+# RTTR exposes the static target as Core_Lib, while Voxagine consistently links
+# RTTR::Core. Keep that public name stable for the iOS static configuration.
+if((IOS OR (APPLE AND CMAKE_SYSTEM_NAME STREQUAL "iOS")) AND
+   TARGET rttr_core_lib AND NOT TARGET RTTR::Core)
+    add_library(RTTR::Core ALIAS rttr_core_lib)
+endif()
 
 # RTTR's own warnings are not ours to fix.
 if(TARGET rttr_core)

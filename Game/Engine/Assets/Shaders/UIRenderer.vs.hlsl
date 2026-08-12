@@ -28,11 +28,19 @@ struct SpriteData
 {
 	matrix Model;
 	uint TextureID;
-	
-	float4 Color;
-	
-	float2 Offset;
-	float2 Size;
+
+	// Keep this structured-buffer ABI byte-for-byte identical to the C++
+	// SpriteData. Vector members here are otherwise padded to 16-byte
+	// boundaries by SPIR-V, while GLM's Vector2/Vector4 members are packed.
+	float ColorR;
+	float ColorG;
+	float ColorB;
+	float ColorA;
+
+	float OffsetX;
+	float OffsetY;
+	float SizeX;
+	float SizeY;
 	
 	uint Alignment;
 	uint ScreenAlignment;
@@ -41,10 +49,13 @@ struct SpriteData
 	
 	int Layer;
 	
-	float2 TextureRepeat; 
-	
-	float2 cullStart;
-	float2 cullEnd;
+	float TextureRepeatX;
+	float TextureRepeatY;
+
+	float CullStartX;
+	float CullStartY;
+	float CullEndX;
+	float CullEndY;
 	
 	uint padding;
 };
@@ -70,24 +81,29 @@ VS_out main(uint IDvert : VERT_ID, uint IDinst : INST_ID)
 {
 	VS_out OUT;
 	SpriteData sprite = Sprites[IDinst];
+	float2 spriteSize = float2(sprite.SizeX, sprite.SizeY);
+	float2 textureRepeat = float2(sprite.TextureRepeatX, sprite.TextureRepeatY);
+	float4 spriteColor = float4(sprite.ColorR, sprite.ColorG, sprite.ColorB, sprite.ColorA);
+	uint alignment = min(sprite.Alignment, 8u);
+	uint screenAlignment = min(sprite.ScreenAlignment, 8u);
 	
 	// Convert cull start and end from 0,0 - 1,1 to -1,-1 - 1,1
-	float2 cullStart = sprite.cullStart * 2 - 1;
-	float2 cullEnd = sprite.cullEnd * 2 - 1;
+	float2 cullStart = float2(sprite.CullStartX, sprite.CullStartY) * 2 - 1;
+	float2 cullEnd = float2(sprite.CullEndX, sprite.CullEndY) * 2 - 1;
 	
 	// Clamp vertex positions with culling.
 	float3 vertexPos = vertices[IDvert];
 	vertexPos.xy = clamp(vertexPos.xy, cullStart, cullEnd);
 	
-	float3 normCoords = vertexPos - float3(AlignmentCoords[sprite.Alignment], 0.0); // Setting the vertex position with correct center.
-	float3 spriteCoords = normCoords * float3(sprite.Size * 0.5, 1.0); // Sizing mesh to the image size
+	float3 normCoords = vertexPos - float3(AlignmentCoords[alignment], 0.0); // Setting the vertex position with correct center.
+	float3 spriteCoords = normCoords * float3(spriteSize * 0.5, 1.0); // Sizing mesh to the image size
 	
 	if (sprite.IsScreen)
 	{
 		float2 screenCoords = spriteCoords.xy;
 		screenCoords = mul(sprite.Model, float4(screenCoords, 0.0, 1.0)).xy;
 		
-		OUT.Position.xy = (screenCoords / (viewport.xy * 0.5) - float2(1.0, 1.0)) + (AlignmentCoords[sprite.ScreenAlignment] + float2(1.0, 1.0));
+		OUT.Position.xy = (screenCoords / (viewport.xy * 0.5) - float2(1.0, 1.0)) + (AlignmentCoords[screenAlignment] + float2(1.0, 1.0));
 		// Convert layer from -9999 - 9999 to 0 - 1 for depth.
 		OUT.Position.z = ((float(sprite.Layer) * 0.0001) + 1) * 0.5;
 		OUT.Position.w = 1.0;
@@ -101,10 +117,10 @@ VS_out main(uint IDvert : VERT_ID, uint IDinst : INST_ID)
 	OUT.UVs = (vertexPos.xy + float2(1.0, 1.0)) * 0.5; // Convert from -1,-1 - 1,1 To 0,0 - 1,1
 	OUT.UVs.y = 1.0 - OUT.UVs.y; // Invert Y axis
 	
-	OUT.UVs *= sprite.TextureRepeat; // Repeat sprite
+	OUT.UVs *= textureRepeat; // Repeat sprite
 	
 	OUT.TextureID = sprite.TextureID;
-	OUT.Color = sprite.Color;
+	OUT.Color = spriteColor;
 	
 	return OUT;
 }

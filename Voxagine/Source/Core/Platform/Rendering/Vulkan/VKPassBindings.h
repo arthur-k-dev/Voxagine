@@ -30,9 +30,38 @@
  * writes drift apart, and Vulkan only reports the symptom. */
 struct VKPassBinding
 {
-	/* Slots reserved for an unbounded HLSL array; mirrors the 256-entry
-	   descriptor heaps the DX12 managers allocated. */
-	static constexpr uint32_t m_uiBindlessCapacity = 256;
+	/* Slots reserved for the shader's bindless texture array. Must match
+	   UIRenderer.ps.hlsl's BindlessTextureCapacity and VoxelBaker.cs.hlsl's
+	   BindlessModelCapacity exactly: glslc compiles an unsized HLSL resource
+	   array as length one, and a platform-specific size would make the shared
+	   SPIR-V output depend on whichever platform happened to build it last.
+
+	   96 is a hardware ceiling on the iPad's A12Z, not a preference. MoltenVK
+	   binds this set through a Metal indirect argument buffer, and Metal caps
+	   the textures in one at 96 - it says so exactly, and refuses the pipeline:
+
+	     Total number of indirect argument buffer resources exceeded for
+	     indirect textures (120/96)
+	     vkCreateGraphicsPipelines failed for 'UI Renderer'
+
+	   (Raising it far enough also trips a second, separate limit: an individual
+	   [[texture(N)]] index must be <= 127, which at 256 put the Voxel pass's
+	   voxelWorldData at texture(262).)
+
+	   **This is smaller than the content needs, and that is a known defect.**
+	   The array is indexed by TextureManager ID, so it has to be as large as the
+	   highest live ID rather than as large as one frame's working set. A level
+	   here keeps more than 96 textures resident, so AcquireID runs out of slots
+	   and returns UINT32_MAX; every texture past that point stops rendering,
+	   which is what garbles in-game text while the main menu - far fewer
+	   textures loaded - looks correct.
+
+	   Raising this cannot fix that on A12Z. The fix is to stop using the
+	   TextureManager ID as the descriptor index: pack only the textures a frame
+	   actually references into the array and give the shader that slot instead,
+	   so the array is sized by the working set. Desktop tolerates the current
+	   scheme only because it allows far more descriptors. */
+	static constexpr uint32_t m_uiBindlessCapacity = 96;
 
 	enum Kind
 	{

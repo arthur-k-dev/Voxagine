@@ -384,7 +384,15 @@ bool PrepareAssetRoot()
 		/* iOS: the bundle is a real directory, so this is a plain recursive
 		   copy. It exists at all because the bundle is read-only and the game
 		   writes Settings.vgs and PlayerPrefs through the same relative paths
-		   it reads assets through. */
+		   it reads assets through.
+
+		   Restricted to k_pAssetRoots for the same reason Android is, and the
+		   cost of not doing so is higher here: the bundle root also holds the
+		   executable, its _CodeSignature, and the desktop project's leftovers
+		   (Source/, the Optick DLLs, the .rc files). Copying those would roughly
+		   double the install's footprint on device for nothing, and would put a
+		   second copy of the executable somewhere App Review does not permit
+		   one. */
 		const char* pBundle = SDL_GetBasePath();
 
 		if (pBundle == nullptr)
@@ -393,16 +401,60 @@ bool PrepareAssetRoot()
 			return false;
 		}
 
-		std::error_code copyError;
-		std::filesystem::copy(std::filesystem::path(pBundle), root,
-			std::filesystem::copy_options::recursive |
-			std::filesystem::copy_options::overwrite_existing,
-			copyError);
+		const std::filesystem::path bundle(pBundle);
 
-		if (copyError)
+		/* Symlinked, not copied. The iOS bundle is a real, readable directory
+		   that stays mounted for the life of the app, so duplicating ~94 MB of
+		   read-only assets into the container only bought a slower first launch
+		   and double the install footprint. Android cannot do this - assets
+		   there live inside the APK and have no path - which is why only this
+		   branch changes.
+
+		   What the extraction is actually for is the handful of files the
+		   engine *writes* through the same relative paths it reads
+		   (Settings.vgs, PlayerPrefs); those stay real files in the writable
+		   root below. Nothing writes under Content/ or Engine/ in a game build:
+		   VoxModel's save path is editor-only, and the editor is not built for
+		   mobile at all (CMake/Platforms.cmake rejects it). */
+		for (const char* pAssetRoot : k_pAssetRoots)
 		{
-			fprintf(stderr, "[assets] copy from bundle failed: %s\n", copyError.message().c_str());
-			return false;
+			std::error_code linkError;
+			std::filesystem::create_directory_symlink(
+				bundle / pAssetRoot, root / pAssetRoot, linkError);
+
+			if (!linkError)
+			{
+				++uiFiles;
+				continue;
+			}
+
+			/* A sandbox that refuses the symlink is recoverable - it just costs
+			   what this used to cost - so fall back rather than refusing to
+			   start. */
+			fprintf(stderr, "[assets] symlink of %s failed (%s); copying instead\n",
+				pAssetRoot, linkError.message().c_str());
+
+			std::error_code copyError;
+			std::filesystem::copy(bundle / pAssetRoot, root / pAssetRoot,
+				std::filesystem::copy_options::recursive |
+				std::filesystem::copy_options::overwrite_existing,
+				copyError);
+
+			if (copyError)
+			{
+				fprintf(stderr, "[assets] copy of %s from the bundle failed: %s\n",
+					pAssetRoot, copyError.message().c_str());
+				return false;
+			}
+		}
+
+		/* Loose, so they are copied by name - the same two Android names, for
+		   the same reason: everything else beside them is desktop bookkeeping. */
+		for (const char* pLooseFile : { "Settings.vgs", "ProjectSettings.vgps" })
+		{
+			std::error_code copyError;
+			std::filesystem::copy_file(bundle / pLooseFile, root / pLooseFile,
+				std::filesystem::copy_options::overwrite_existing, copyError);
 		}
 
 		for (const auto& entry : std::filesystem::recursive_directory_iterator(root, ec))

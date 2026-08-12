@@ -30,4 +30,14 @@
  * directly anywhere after this is a hard error rather than a silent
  * double-definition - which is the behaviour we want. */
 
+#if defined(VOXAGINE_IOS)
+/* MoltenVK is linked statically on iOS and exports the native Vulkan entry
+ * points directly. volk's dynamic-loader TU would define colliding function
+ * pointer symbols, so use the SDK prototypes and no-op its dispatch loads. */
+#include <vulkan/vulkan.h>
+inline VkResult volkInitialize() { return VK_SUCCESS; }
+inline void volkLoadInstance(VkInstance) {}
+inline void volkLoadDevice(VkDevice) {}
+#else
 #include <External/volk/volk.h>
+#endif

@@ -1,5 +1,6 @@
 #include "VKResource.h"
 
+#include "VKLegacySync.h"
 #include "VKDevice.h"
 #include "VKTranslate.h"
 
@@ -188,7 +189,7 @@ void VKResource::Transition(VkCommandBuffer cmd, PEResourceState newState)
 		dependency.imageMemoryBarrierCount = 1;
 		dependency.pImageMemoryBarriers = &barrier;
 
-		vkCmdPipelineBarrier2(cmd, &dependency);
+		VKCmdPipelineBarrierLegacy(cmd, barrier);
 	}
 	else if (m_Kind == E_KIND_BUFFER)
 	{
@@ -209,7 +210,7 @@ void VKResource::Transition(VkCommandBuffer cmd, PEResourceState newState)
 		dependency.bufferMemoryBarrierCount = 1;
 		dependency.pBufferMemoryBarriers = &barrier;
 
-		vkCmdPipelineBarrier2(cmd, &dependency);
+		VKCmdPipelineBarrierLegacy(cmd, barrier);
 	}
 
 	m_State = newState;

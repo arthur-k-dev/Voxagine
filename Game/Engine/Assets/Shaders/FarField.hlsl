@@ -369,7 +369,11 @@ float4 GetBackground(float2 v2PixelPosition)
 	   teeth along the horizon. */
 	float3 v3WindowOrigin = v3LevelOrigin - sceneCamOffset.xyz;
 
-	if (v3WindowOrigin.y >= GROUND_PLANE_HEIGHT && v3Direction.y < 0.0)
+	/* Until the first world upload, worldSize is deliberately zero.  Avoid
+	   fmod(x, 0), which produces NaN and used to become an unbounded unsigned
+	   storage-buffer index in PostFxGetVoxel. */
+	if (worldSize.x > 0 && worldSize.y > 0 && worldSize.z > 0 &&
+		v3WindowOrigin.y >= GROUND_PLANE_HEIGHT && v3Direction.y < 0.0)
 	{
 		float fGround = (GROUND_PLANE_HEIGHT - v3WindowOrigin.y) / v3Direction.y;
 

@@ -2,6 +2,7 @@
 
 #include "VKAllocator.h"
 #include "VKDevice.h"
+#include "VKLegacySync.h"
 #include "VKTranslate.h"
 
 #include "Core/Platform/Rendering/FrameProfiler.h"
@@ -321,32 +322,40 @@ void VKCommandEngine::Execute()
 
 	Signal();
 
-	VkCommandBufferSubmitInfo commandInfo{};
-	commandInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
-	commandInfo.commandBuffer = cmd;
-
-	VkSemaphoreSubmitInfo signalInfo{};
-	signalInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
-	signalInfo.semaphore = m_Timeline;
-	signalInfo.value = m_uiFenceValue;
-	signalInfo.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
-
-	VkSubmitInfo2 submitInfo{};
-	submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
-	submitInfo.waitSemaphoreInfoCount = static_cast<uint32_t>(m_WaitSemaphores.size());
-	submitInfo.pWaitSemaphoreInfos = m_WaitSemaphores.data();
-	submitInfo.commandBufferInfoCount = 1;
-	submitInfo.pCommandBufferInfos = &commandInfo;
-	submitInfo.signalSemaphoreInfoCount = 1;
-	submitInfo.pSignalSemaphoreInfos = &signalInfo;
+	std::vector<VkSemaphore> waitSemaphores;
+	std::vector<uint64_t> waitValues;
+	std::vector<VkPipelineStageFlags> waitStages;
+	for (const VkSemaphoreSubmitInfo& wait : m_WaitSemaphores)
+	{
+		waitSemaphores.push_back(wait.semaphore);
+		waitValues.push_back(wait.value);
+		waitStages.push_back(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+	}
+	const uint64_t signalValue = m_uiFenceValue;
+	VkTimelineSemaphoreSubmitInfo timelineInfo{};
+	timelineInfo.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+	timelineInfo.waitSemaphoreValueCount = static_cast<uint32_t>(waitValues.size());
+	timelineInfo.pWaitSemaphoreValues = waitValues.data();
+	timelineInfo.signalSemaphoreValueCount = 1;
+	timelineInfo.pSignalSemaphoreValues = &signalValue;
+	VkSubmitInfo submitInfo{};
+	submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+	submitInfo.pNext = &timelineInfo;
+	submitInfo.waitSemaphoreCount = static_cast<uint32_t>(waitSemaphores.size());
+	submitInfo.pWaitSemaphores = waitSemaphores.data();
+	submitInfo.pWaitDstStageMask = waitStages.data();
+	submitInfo.commandBufferCount = 1;
+	submitInfo.pCommandBuffers = &cmd;
+	submitInfo.signalSemaphoreCount = 1;
+	submitInfo.pSignalSemaphores = &m_Timeline;
 
 	{
 		/* Every engine shares one graphics queue, and resource loading submits
 		   uploads from job threads while the main thread submits the frame. */
 		std::lock_guard<std::mutex> lock(m_pDevice->GetQueueMutex());
 
-		if (vkQueueSubmit2(m_Queue, 1, &submitInfo, VK_NULL_HANDLE) != VK_SUCCESS)
-			fprintf(stderr, "[vulkan] vkQueueSubmit2 failed for '%s'\n", m_Info.m_Name.c_str());
+		if (vkQueueSubmit(m_Queue, 1, &submitInfo, VK_NULL_HANDLE) != VK_SUCCESS)
+			fprintf(stderr, "[vulkan] vkQueueSubmit failed for '%s'\n", m_Info.m_Name.c_str());
 	}
 
 	m_Frames[m_uiFrameIndex].m_uiSubmitValue = m_uiFenceValue;
@@ -548,7 +557,7 @@ void VKCommandEngine::UploadImageRegions(VKResource* pImage, VKResource* pSource
 		dependency.imageMemoryBarrierCount = 1;
 		dependency.pImageMemoryBarriers = &barrier;
 
-		vkCmdPipelineBarrier2(cmd, &dependency);
+		VKCmdPipelineBarrierLegacy(cmd, barrier);
 
 		auto LevelExtent = [&extent](uint32_t uiL)
 		{
@@ -603,7 +612,7 @@ void VKCommandEngine::UploadImageRegions(VKResource* pImage, VKResource* pSource
 		dependency.imageMemoryBarrierCount = 1;
 		dependency.pImageMemoryBarriers = &barrier;
 
-		vkCmdPipelineBarrier2(cmd, &dependency);
+		VKCmdPipelineBarrierLegacy(cmd, barrier);
 
 		pImage->SetTrackedState(E_STATE_COPY_SOURCE);
 	}

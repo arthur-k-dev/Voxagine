@@ -2,6 +2,7 @@
 #include "VKRenderContext.h"
 
 #include "Core/Application.h"
+#include "Core/LoggingSystem/LoggingSystem.h"
 #include "Core/Platform/Platform.h"
 #include "Core/Platform/Window/SDL/SDLWindowContext.h"
 #include "Core/Settings.h"
@@ -18,6 +19,14 @@
 
 #include <cstdio>
 
+namespace
+{
+void LogVulkanStartup(Platform* pPlatform, LogLevel level, const std::string& message)
+{
+	pPlatform->GetApplication()->GetLoggingSystem().Log(level, "Vulkan", message);
+}
+}
+
 VKRenderContext::VKRenderContext(Platform* pPlatform) : RenderContext(pPlatform)
 {
 }
@@ -29,11 +38,14 @@ VKRenderContext::~VKRenderContext()
 
 bool VKRenderContext::InitializeBackend()
 {
+	m_StartupError.clear();
 	SDLWindowContext* pWindow = static_cast<SDLWindowContext*>(m_pPlatform->GetWindowContext());
 
 	if (pWindow == nullptr)
 	{
 		fprintf(stderr, "[vulkan] no window context to present to\n");
+		m_StartupError = "No SDL window context is available.";
+		LogVulkanStartup(m_pPlatform, LOGLEVEL_CRITICAL_ERROR, "Startup failed: no SDL window context.");
 		return false;
 	}
 
@@ -56,13 +68,27 @@ bool VKRenderContext::InitializeBackend()
 		bValidation = (pEnv[0] != '0');
 
 	if (!m_Device.CreateInstance(pWindow->GetRequiredInstanceExtensions(), bValidation))
+	{
+		m_StartupError = "Failed to create the Vulkan instance: " + m_Device.GetStartupError();
+		LogVulkanStartup(m_pPlatform, LOGLEVEL_CRITICAL_ERROR,
+			m_StartupError);
 		return false;
+	}
 
 	if (!pWindow->CreateSurface(m_Device.GetInstance(), &m_Surface))
+	{
+		m_StartupError = "SDL could not create a Vulkan presentation surface.";
+		LogVulkanStartup(m_pPlatform, LOGLEVEL_CRITICAL_ERROR, m_StartupError);
 		return false;
+	}
 
 	if (!m_Device.CreateDevice(m_Surface))
+	{
+		m_StartupError = "Failed to create the Vulkan device: " + m_Device.GetStartupError();
+		LogVulkanStartup(m_pPlatform, LOGLEVEL_CRITICAL_ERROR,
+			m_StartupError);
 		return false;
+	}
 
 	m_Allocator.Initialize(&m_Device);
 
@@ -72,7 +98,11 @@ bool VKRenderContext::InitializeBackend()
 	   mailbox unconditionally. See the present-mode choice in VKSwapchain. */
 	if (!m_Swapchain.Create(&m_Device, m_Surface, size.x, size.y,
 	                        m_pPlatform->GetApplication()->GetSettings().IsVSyncEnabled()))
+	{
+		m_StartupError = "Vulkan swapchain creation failed.";
+		LogVulkanStartup(m_pPlatform, LOGLEVEL_CRITICAL_ERROR, m_StartupError);
 		return false;
+	}
 
 	/* The editor shows this; it used to come from the DXGI adapter. */
 	const std::string name = m_Device.GetDeviceName();
@@ -96,6 +126,8 @@ void VKRenderContext::Initialize()
 	if (!m_bBackendReady)
 	{
 		fprintf(stderr, "[vulkan] backend initialization failed; renderer is inert\n");
+		LogVulkanStartup(m_pPlatform, LOGLEVEL_CRITICAL_ERROR,
+			"Renderer is unavailable; world loading will not start.");
 		return;
 	}
 
@@ -134,6 +166,8 @@ void VKRenderContext::Initialize()
 		if (!pEngine->Initialize())
 		{
 			fprintf(stderr, "[vulkan] command engine '%s' failed\n", info.m_Name.c_str());
+			LogVulkanStartup(m_pPlatform, LOGLEVEL_CRITICAL_ERROR,
+				"Startup failed: command engine " + info.m_Name + " could not initialize.");
 			return;
 		}
 
@@ -149,6 +183,7 @@ void VKRenderContext::Initialize()
 	   caller once DX12RenderContext was deleted, which is why the renderer
 	   only ever cleared. */
 	InitializeRenderLoop();
+	LogVulkanStartup(m_pPlatform, LOGLEVEL_MESSAGE, "Renderer initialization complete.");
 }
 
 void VKRenderContext::Deinitialize()

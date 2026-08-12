@@ -44,7 +44,18 @@ inline uint PostFxPosToVoxelID(uint3 v3Position) {
 }
 
 inline float4 PostFxGetVoxel(float3 v3Position) {
-	uint ID = PostFxPosToVoxelID(uint3(v3Position));
+	/* The post pass can run before the first world upload has supplied a
+	   resident grid.  Never turn a negative/NaN/out-of-world position into an
+	   unsigned buffer index: strict Vulkan/Metal implementations fault the GPU
+	   for that access instead of returning zero like several desktop drivers. */
+	if (worldSize.x == 0 || worldSize.y == 0 || worldSize.z == 0)
+		return float4(0.0, 0.0, 0.0, 0.0);
+
+	int3 v3Voxel = int3(floor(v3Position));
+	if (any(v3Voxel < int3(0, 0, 0)) || any(v3Voxel >= int3(worldSize.xyz)))
+		return float4(0.0, 0.0, 0.0, 0.0);
+
+	uint ID = PostFxPosToVoxelID(uint3(v3Voxel));
 #ifdef __PSSL__
 	uint uiColor = voxelWorldData[ID];
 	return float4(0xFF & (uiColor), 0xFF & (uiColor >> 8), 0xFF & (uiColor >> 16), 0xFF & (uiColor >> 24)) / 255.0;
@@ -78,8 +89,18 @@ inline float4 PostFxGetVoxel(float3 v3Position) {
    pixel from the far side. */
 bool IsSceneNeighbourhoodOpaque(float2 v2PixelPosition)
 {
-	int2 v2Size = int2(max(viewport.xy, float2(1.0, 1.0)));
-	int2 v2Texel = int2(v2PixelPosition);
+	/* This pass is full-resolution while targetTexture is rendered at
+	   Settings::ResolutionScale (0.35 on the iPad).  Using the output pixel
+	   coordinate directly for Texture2D.Load therefore reads far beyond the
+	   smaller scene image.  Desktop drivers commonly return zero for that
+	   undefined access; Metal reports it correctly as a GPU address fault. */
+	/* Keep this calculation identical to VKRenderPass::Recreate: the target
+	   dimensions are uint32_t(viewport * ResolutionScale).  The glslc HLSL
+	   frontend used by the iOS build silently discards Texture2D.GetDimensions
+	   output arguments, so querying the image here is not portable. */
+	int2 v2Size = max(int2(viewport.xy * voxelRenderScale), int2(1, 1));
+	float2 v2UV = saturate(v2PixelPosition / max(viewport.xy, float2(1.0, 1.0)));
+	int2 v2Texel = min(int2(v2UV * float2(v2Size)), v2Size - 1);
 
 	[unroll]
 	for (int y = -1; y <= 1; y++)

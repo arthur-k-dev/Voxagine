@@ -96,6 +96,106 @@ namespace MobileLog
 
 		__android_log_write(ANDROID_LOG_INFO, k_pTag, "[log] stdout and stderr are on logcat");
 	}
+
+	void Write(const std::string& message)
+	{
+		__android_log_write(ANDROID_LOG_INFO, k_pTag, message.c_str());
+	}
+}
+
+#elif defined(VOXAGINE_IOS)
+
+#include <os/log.h>
+
+#include <pthread.h>
+#include <unistd.h>
+
+#include <cstdio>
+#include <cstring>
+
+namespace
+{
+	int g_iPipe[2] = { -1, -1 };
+	pthread_t g_Thread;
+
+	void* PumpToUnifiedLog(void*)
+	{
+		char buffer[1024];
+		size_t uiUsed = 0;
+
+		for (;;)
+		{
+			const ssize_t iRead = read(g_iPipe[0], buffer + uiUsed, sizeof(buffer) - uiUsed - 1);
+
+			if (iRead <= 0)
+				break;
+
+			uiUsed += static_cast<size_t>(iRead);
+			buffer[uiUsed] = '\0';
+			char* pLine = buffer;
+
+			for (;;)
+			{
+				char* pNewline = strchr(pLine, '\n');
+
+				if (pNewline == nullptr)
+					break;
+
+				*pNewline = '\0';
+				os_log_error(OS_LOG_DEFAULT, "%{public}s", pLine);
+				pLine = pNewline + 1;
+			}
+
+			uiUsed = strlen(pLine);
+
+			if (uiUsed >= sizeof(buffer) - 1)
+			{
+				os_log_error(OS_LOG_DEFAULT, "%{public}s", pLine);
+				uiUsed = 0;
+			}
+			else if (uiUsed > 0)
+			{
+				memmove(buffer, pLine, uiUsed);
+			}
+		}
+
+		return nullptr;
+	}
+}
+
+namespace MobileLog
+{
+	void Install()
+	{
+		if (g_iPipe[0] != -1)
+			return;
+
+		/* Engine and MoltenVK diagnostics primarily use fprintf(). Forward both
+		   streams to the unified log once, at the platform boundary, so the same
+		   diagnostics are available on iOS without adding iOS-only calls at every
+		   renderer failure site. */
+		setvbuf(stdout, nullptr, _IONBF, 0);
+		setvbuf(stderr, nullptr, _IONBF, 0);
+
+		if (pipe(g_iPipe) != 0)
+			return;
+
+		dup2(g_iPipe[1], STDOUT_FILENO);
+		dup2(g_iPipe[1], STDERR_FILENO);
+
+		if (pthread_create(&g_Thread, nullptr, PumpToUnifiedLog, nullptr) != 0)
+			return;
+
+		pthread_detach(g_Thread);
+		os_log_error(OS_LOG_DEFAULT, "%{public}s", "[log] stdout and stderr are forwarded to the unified log");
+	}
+
+	void Write(const std::string& message)
+	{
+		/* Dynamic os_log payloads are private by default. Engine diagnostics do
+		   not contain user data and must be visible in a USB device capture. */
+		os_log_error(OS_LOG_DEFAULT, "%{public}s", message.c_str());
+	}
 }
 
 #else
@@ -105,6 +205,11 @@ namespace MobileLog
 	void Install()
 	{
 		/* Desktop stdout already goes where the person running it can see it. */
+	}
+
+	void Write(const std::string& message)
+	{
+		fprintf(stderr, "%s\n", message.c_str());
 	}
 }
 

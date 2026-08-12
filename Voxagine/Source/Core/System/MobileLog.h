@@ -1,5 +1,7 @@
 #pragma once
 
+#include <string>
+
 /* Making the engine's own output visible on a phone.
  *
  * Android discards stdout and stderr. Not redirects - discards: a process's
@@ -15,7 +17,9 @@
  * no changes, which is the same trade MobileAssets makes - a hundred untouched
  * call sites beats a hundred converted ones and the one that got missed.
  *
- * A no-op everywhere else, where stdout already goes where it should.
+ * LoggingSystem also uses this as its platform sink. That keeps the engine's
+ * structured diagnostics useful before an editor console exists: Android gets
+ * logcat, iOS gets the unified device log, and desktop gets stderr.
  */
 
 namespace MobileLog
@@ -24,4 +28,9 @@ namespace MobileLog
 	   MobileAssets::PrepareAssetRoot, whose extraction progress is the first
 	   thing worth seeing. */
 	void Install();
+
+	/* Publish one already-formatted engine log line to the platform's normal
+	   diagnostic stream. This intentionally lives below LoggingSystem: callers
+	   create ordinary LogEvents and do not need platform-specific logging code. */
+	void Write(const std::string& message);
 }

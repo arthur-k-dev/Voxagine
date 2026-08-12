@@ -637,9 +637,10 @@ bool VKRenderPass::WriteDescriptors(PCommandEngine* pEngine, VkDescriptorSet set
 
 	/* Bindless texture array, filled from the texture manager's live views so
 	   sprites and fonts loaded at any point appear without the pass being
-	   told. Model buffers (E_BINDLESS_SOURCE_MODELS) stay unwritten until the
-	   VoxModel GPU upload is restored; the array is PARTIALLY_BOUND, so that
-	   is legal as long as no shader indexes them. */
+	   told. Every slot is initialized with a valid fallback view before live
+	   IDs overwrite it. Vulkan permits partially-bound arrays, but MoltenVK
+	   represents this set as a Metal argument buffer, where an accidentally
+	   indexed hole is a GPU address fault rather than a harmless null sample. */
 	std::vector<VkDescriptorImageInfo> bindlessInfos;
 
 	if (m_Data.m_BindlessSource == RenderPass::E_BINDLESS_SOURCE_TEXTURES)
@@ -651,7 +652,31 @@ bool VKRenderPass::WriteDescriptors(PCommandEngine* pEngine, VkDescriptorSet set
 
 			TextureManager* pManager = m_pContext->GetTextureManager();
 
-			bindlessInfos.reserve(pManager->m_pViews.size());
+			VkDescriptorImageInfo fallback{};
+
+			for (const auto& entry : pManager->m_pViews)
+			{
+				View* pTexture = entry.second.get();
+
+				if (pTexture == nullptr || pTexture->GetNative() == nullptr ||
+				    pTexture->GetNative()->IsLayoutUndefined())
+					continue;
+
+				fallback.imageView =
+					pTexture->GetNative()->GetOrCreateImageView(VK_IMAGE_VIEW_TYPE_2D);
+				fallback.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+				if (fallback.imageView != VK_NULL_HANDLE)
+					break;
+			}
+
+			/* With no uploaded texture there can be no valid sprite draw.  Leave
+			   the bindless write absent and let the ordinary completeness/draw
+			   checks skip it. */
+			if (fallback.imageView == VK_NULL_HANDLE)
+				continue;
+
+			bindlessInfos.assign(binding.m_uiCount, fallback);
 
 			for (const auto& entry : pManager->m_pViews)
 			{
@@ -676,19 +701,46 @@ bool VKRenderPass::WriteDescriptors(PCommandEngine* pEngine, VkDescriptorSet set
 				info.imageView = imageView;
 				info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
-				bindlessInfos.push_back(info);
+				/* Bounds-checked because entry.first is a TextureManager ID
+				   from a monotonic counter, not an index into this array: it
+				   keeps climbing as textures load and is unrelated to
+				   m_uiBindlessCapacity. Writing it unchecked is a plain
+				   out-of-bounds vector store - heap corruption rather than a
+				   validation error - and this project ships 133 PNG assets
+				   against a 96-slot array, so it is reachable, not theoretical.
 
-				VkWriteDescriptorSet write{};
-				write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-				write.dstSet = set;
-				write.dstBinding = binding.m_uiBinding;
-				write.dstArrayElement = entry.first;
-				write.descriptorCount = 1;
-				write.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-				write.pImageInfo = &bindlessInfos.back();
+				   Sampling is still wrong for those textures: the shader clamps
+				   the ID to the last slot, so anything loaded past the capacity
+				   draws whatever occupies it. That is a capacity problem, not a
+				   bounds problem, and it is called out once here rather than
+				   silently dropped. */
+				if (entry.first >= bindlessInfos.size())
+				{
+					if (!m_bWarnedBindlessOverflow)
+					{
+						fprintf(stderr,
+							"[vulkan] '%s': texture ID %u exceeds the %zu-slot bindless array; "
+							"it and every later texture will sample the wrong image\n",
+							m_Data.m_Name.c_str(), entry.first, bindlessInfos.size());
+						m_bWarnedBindlessOverflow = true;
+					}
 
-				writes.push_back(write);
+					continue;
+				}
+
+				bindlessInfos[entry.first] = info;
 			}
+
+			VkWriteDescriptorSet write{};
+			write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+			write.dstSet = set;
+			write.dstBinding = binding.m_uiBinding;
+			write.dstArrayElement = 0;
+			write.descriptorCount = binding.m_uiCount;
+			write.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+			write.pImageInfo = bindlessInfos.data();
+
+			writes.push_back(write);
 		}
 	}
 

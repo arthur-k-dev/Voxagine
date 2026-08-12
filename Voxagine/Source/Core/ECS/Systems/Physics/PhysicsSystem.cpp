@@ -59,8 +59,11 @@ PhysicsSystem::PhysicsSystem(World* pWorld, Vector3 gridSize, uint32_t voxelSize
 
 	if (m_pWorld)
 	{
-		m_pGPUParticles = m_pWorld->GetApplication()->GetPlatform().GetRenderContext()->m_pParticlePass->GetMapper();
-		m_pGPUParticles->Resize(m_uiMaxParticleCount, sizeof(GPUParticle));
+		RenderContext* pRenderContext = m_pWorld->GetApplication()->GetPlatform().GetRenderContext();
+		ParticlePass* pParticlePass = pRenderContext != nullptr ? pRenderContext->m_pParticlePass : nullptr;
+		m_pGPUParticles = pParticlePass != nullptr ? pParticlePass->GetMapper() : nullptr;
+		if (m_pGPUParticles != nullptr)
+			m_pGPUParticles->Resize(m_uiMaxParticleCount, sizeof(GPUParticle));
 
 		m_pWorld->Paused += Event<World*>::Subscriber(std::bind(&PhysicsSystem::OnWorldPaused, this, std::placeholders::_1), this);
 		m_pWorld->Resumed += Event<World*>::Subscriber(std::bind(&PhysicsSystem::OnWorldResumed, this, std::placeholders::_1), this);
@@ -1601,5 +1604,3 @@ void PhysicsSystem::SimulateParticles(float fDeltaTime)
 	   actually written and the pass drew stale ones (P15). */
 	m_uiActiveParticleCount = m_Debris.GetCount();
 }
-
-

@@ -3,6 +3,22 @@
 
 #include "Core/Application.h"
 #include "Core/GameTimer.h"
+#include "Core/System/MobileLog.h"
+
+namespace
+{
+	const char* LogLevelName(LogLevel level)
+	{
+		switch (level)
+		{
+		case LOGLEVEL_MESSAGE: return "message";
+		case LOGLEVEL_WARNING: return "warning";
+		case LOGLEVEL_ERROR: return "error";
+		case LOGLEVEL_CRITICAL_ERROR: return "critical";
+		default: return "unknown";
+		}
+	}
+}
 
 LoggingSystem::LoggingSystem()
 {
@@ -54,6 +70,11 @@ void LoggingSystem::Log(const LogLevel & level, const std::string & category, co
 
 	CreateCategory(category);
 	m_Categories[category].push_back(NewLogEventID);
+
+	/* The editor observes LogEventCreated, but a game on a phone has no editor
+	   console. Publish the exact same event through the platform sink rather
+	   than adding iOS/Android logging calls at individual failure sites. */
+	MobileLog::Write(std::string("[") + LogLevelName(level) + "] [" + category + "] " + description);
 
 	LogEventCreated.operator()(NewLogEvent, NewLogEventID);
 }

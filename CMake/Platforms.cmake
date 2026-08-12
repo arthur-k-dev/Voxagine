@@ -61,6 +61,19 @@ endif()
 set(VOXAGINE_ANDROID_MIN_API 31 CACHE STRING "Android minSdkVersion / ANDROID_PLATFORM")
 set(VOXAGINE_IOS_MIN_VERSION "16.0" CACHE STRING "IPHONEOS_DEPLOYMENT_TARGET")
 
+set(VOXAGINE_IOS_BUNDLE_ID "com.voxagine.bitbuster" CACHE STRING
+    "CFBundleIdentifier for the iOS app")
+
+# Defaults to the copy vendored in External/, so `cmake --preset ios` configures
+# with no extra arguments. Overridable for a Vulkan SDK install elsewhere.
+set(VOXAGINE_MOLTENVK_DIR "${CMAKE_CURRENT_LIST_DIR}/../External/MoltenVK/MoltenVK"
+    CACHE PATH "MoltenVK install to link the iOS build against")
+# Empty means "build unsigned", which is what CI and the SideStore route want.
+# Set it to a ten-character Apple team ID to sign for an attached device; see
+# the signing block in CMakeLists.txt.
+set(VOXAGINE_IOS_DEVELOPMENT_TEAM "" CACHE STRING
+    "Apple development team ID to sign the iOS app with, or empty for unsigned")
+
 if(VOXAGINE_MOBILE)
     message(STATUS "Voxagine: building for mobile "
         "(android=${VOXAGINE_ANDROID} ios=${VOXAGINE_IOS})")
@@ -100,8 +113,22 @@ function(voxagine_link_vulkan target)
         endif()
 
         target_include_directories(${target} SYSTEM PUBLIC ${VOXAGINE_MOLTENVK_DIR}/include)
+
+        # MoltenVK's older SDK layout shipped dylib/iOS/libMoltenVK.dylib;
+        # current official iOS archives ship an XCFramework containing the
+        # arm64 static library instead. Support both layouts so a build does
+        # not silently depend on a deleted /tmp SDK extraction.
+        if(EXISTS ${VOXAGINE_MOLTENVK_DIR}/dylib/iOS/libMoltenVK.dylib)
+            set(VOXAGINE_MOLTENVK_LIBRARY ${VOXAGINE_MOLTENVK_DIR}/dylib/iOS/libMoltenVK.dylib)
+        elseif(EXISTS ${VOXAGINE_MOLTENVK_DIR}/static/MoltenVK.xcframework/ios-arm64/libMoltenVK.a)
+            set(VOXAGINE_MOLTENVK_LIBRARY
+                ${VOXAGINE_MOLTENVK_DIR}/static/MoltenVK.xcframework/ios-arm64/libMoltenVK.a)
+        else()
+            message(FATAL_ERROR "No iOS MoltenVK library found under ${VOXAGINE_MOLTENVK_DIR}")
+        endif()
+
         target_link_libraries(${target} PUBLIC
-            ${VOXAGINE_MOLTENVK_DIR}/dylib/iOS/libMoltenVK.dylib
+            ${VOXAGINE_MOLTENVK_LIBRARY}
             "-framework Metal" "-framework IOSurface" "-framework QuartzCore"
             "-framework Foundation" "-framework UIKit")
     else()

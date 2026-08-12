@@ -45,6 +45,7 @@ public:
 
 	virtual bool IsVSyncEnabled() const override { return m_Swapchain.IsVSyncEnabled(); }
 	virtual void SetVSyncEnabled(bool bEnabled) override;
+	virtual std::string GetStartupError() const override { return m_StartupError; }
 
 	VKDevice* GetDevice() { return &m_Device; }
 	const VKAllocator* GetAllocator() const { return &m_Allocator; }
@@ -69,4 +70,5 @@ private:
 	VkSurfaceKHR m_Surface = VK_NULL_HANDLE;
 
 	bool m_bBackendReady = false;
+	std::string m_StartupError;
 };

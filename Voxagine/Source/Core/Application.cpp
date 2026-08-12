@@ -20,6 +20,7 @@
 #include <chrono>
 #include <iostream>
 #include <thread>
+#include <SDL3/SDL_messagebox.h>
 #include "Core/GameTimer.h"
 #include "ECS/WorldManager.h"
 #include "ECS/Systems/Physics/PhysicsSystem.h"
@@ -85,7 +86,26 @@ void Application::Run()
 	m_JobManager.Initialize();
 	m_Platform.Initialize();
 
-	OnCreate();
+	/* A window/input platform may initialize while its renderer rejects the
+	   device. World startup requires RenderContext's voxel mapper, so stop here
+	   with the renderer's already-recorded diagnostic instead of crashing later
+	   in ChunkSystem or PhysicsSystem. */
+	if (m_Platform.GetRenderContext()->IsReady())
+	{
+		OnCreate();
+	}
+	else
+	{
+		const std::string startupError = m_Platform.GetRenderContext()->GetStartupError();
+		m_LoggingSystem.Log(LOGLEVEL_CRITICAL_ERROR, "Application",
+			"Renderer initialization did not complete; application startup was stopped. " + startupError);
+		SDL_ShowSimpleMessageBox(
+			SDL_MESSAGEBOX_ERROR,
+			"Bit Buster cannot start",
+			("The selected renderer is not available on this device.\n\n" + startupError).c_str(),
+			nullptr);
+		m_bExit = true;
+	}
 
 #ifdef EDITOR
 	m_Editor.Initialize(this);

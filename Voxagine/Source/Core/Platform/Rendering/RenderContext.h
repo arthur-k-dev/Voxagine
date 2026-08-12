@@ -19,6 +19,7 @@
 #include "Core/VColors.h"
 
 #include <stdint.h>
+#include <cstddef>
 #include <string>
 #include <memory>
 #include <unordered_map>
@@ -143,6 +144,22 @@ struct SpriteData {
 	uint32_t padding;
 };
 
+// GPU structured-buffer ABI. UIRenderer.vs.hlsl deliberately spells vector
+// members as scalars so every backend uses these packed offsets and stride.
+static_assert(sizeof(SpriteData) == 144, "SpriteData GPU stride changed");
+static_assert(offsetof(SpriteData, TextureID) == 64, "SpriteData TextureID offset changed");
+static_assert(offsetof(SpriteData, Color) == 68, "SpriteData Color offset changed");
+static_assert(offsetof(SpriteData, Offset) == 84, "SpriteData Offset offset changed");
+static_assert(offsetof(SpriteData, Size) == 92, "SpriteData Size offset changed");
+static_assert(offsetof(SpriteData, Alignment) == 100, "SpriteData Alignment offset changed");
+static_assert(offsetof(SpriteData, ScreenAlignment) == 104, "SpriteData ScreenAlignment offset changed");
+static_assert(offsetof(SpriteData, IsScreen) == 108, "SpriteData IsScreen offset changed");
+static_assert(offsetof(SpriteData, Layer) == 112, "SpriteData Layer offset changed");
+static_assert(offsetof(SpriteData, TextureRepeat) == 116, "SpriteData TextureRepeat offset changed");
+static_assert(offsetof(SpriteData, cullStart) == 124, "SpriteData cullStart offset changed");
+static_assert(offsetof(SpriteData, cullEnd) == 132, "SpriteData cullEnd offset changed");
+static_assert(offsetof(SpriteData, padding) == 140, "SpriteData padding offset changed");
+
 struct ParticleMapperData {
 	ParticleMapperData(Mapper* pMapper, uint32_t uiCount) : m_pMapper(pMapper), m_uiCount(uiCount) {}
 	Mapper* m_pMapper = nullptr;
@@ -195,6 +212,14 @@ public:
 
 	virtual void Initialize();
 	virtual void Deinitialize() {};
+
+	/* The render loop owns the voxel mapper consumed by world and physics
+	   startup. A backend can create a window yet fail before that loop exists;
+	   callers must be able to stop cleanly instead of dereferencing it. */
+	bool IsReady() const { return m_pVoxelMapper != nullptr; }
+	/* A backend-specific explanation for a failed startup. Kept on the common
+	   interface so Application can report it without knowing Vulkan/Metal/DX. */
+	virtual std::string GetStartupError() const { return {}; }
 
 	PRenderContext* Get();
 

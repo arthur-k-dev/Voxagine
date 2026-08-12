@@ -110,6 +110,13 @@ bool SDLCALL SDLWindowContext::EventWatch(void* pUserData, SDL_Event* pEvent)
 
 	switch (pEvent->type)
 	{
+	/* Android can invalidate its native window while an app is backgrounded,
+	   so the Vulkan surface has to be released and rebuilt around these
+	   events. iOS retains SDL's CAMetalLayer instead. SDL nevertheless emits
+	   the same initial foreground transition there while the window is being
+	   attached; rebuilding a live MoltenVK surface at that instant produced a
+	   Metal GPU-address fault on A12-class devices. */
+#if defined(VOXAGINE_ANDROID)
 	case SDL_EVENT_WILL_ENTER_BACKGROUND:
 		/* Set going into the background, not coming out of it: this is the
 		   point at which the surface is still valid and Vulkan calls are still
@@ -124,6 +131,7 @@ bool SDLCALL SDLWindowContext::EventWatch(void* pUserData, SDL_Event* pEvent)
 		pSelf->m_bBackgrounded.store(false, std::memory_order_release);
 		pSelf->m_bEnteredForeground.store(true, std::memory_order_release);
 		break;
+#endif
 
 	default:
 		break;
@@ -205,6 +213,13 @@ void SDLWindowContext::Poll()
 		{
 			const uint32_t uiWidth = static_cast<uint32_t>(event.window.data1);
 			const uint32_t uiHeight = static_cast<uint32_t>(event.window.data2);
+
+			/* SDL may send an initial pixel-size notification after the window
+			   has already been created at precisely this size. Recreating a
+			   swapchain for that no-op needlessly invalidates resources; on
+			   MoltenVK/Metal it can race the first submitted command buffer. */
+			if (uiWidth == m_v2Size.x && uiHeight == m_v2Size.y)
+				break;
 
 
 			const IVector2 delta(static_cast<int32_t>(uiWidth) - static_cast<int32_t>(m_v2Size.x),

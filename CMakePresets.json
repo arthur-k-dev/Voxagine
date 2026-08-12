@@ -107,8 +107,8 @@
         },
         {
             "name": "ios",
-            "displayName": "iOS (Debug) - UNVERIFIED",
-            "description": "Needs macOS, Xcode and a MoltenVK install (-DVOXAGINE_MOLTENVK_DIR). Never configured; see Docs/MOBILE_PORT_LOG.md.",
+            "displayName": "iOS (Debug)",
+            "description": "BitBuster for iPad/iPhone. Needs macOS and Xcode; MoltenVK comes from External/. Set VOXAGINE_IOS_DEVELOPMENT_TEAM and build with `xcodebuild -allowProvisioningUpdates` to install on a device.",
             "generator": "Xcode",
             "binaryDir": "${sourceDir}/Build/iOS/Game/Debug",
             "cacheVariables": {
@@ -160,7 +160,7 @@
         },
         {
             "name": "ios",
-            "displayName": "iOS (Debug) - UNVERIFIED",
+            "displayName": "iOS (Debug)",
             "configurePreset": "ios"
         }
     ]

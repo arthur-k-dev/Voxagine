@@ -173,8 +173,7 @@ at ~200 fps, resizes, switches levels and exits cleanly, with zero Vulkan
 validation errors. The editor builds and starts but hangs part-way through
 loading assets.
 
-**Windows.** Unverified — the presets exist but nobody has built on Windows
-recently, so expect small breakages.
+**Windows.** The game and editor both build and run.
 
 **macOS.** The game and editor both build and run — the game as a plain
 executable from `Game/`, the editor as a double-clickable `Voxagine.app`.

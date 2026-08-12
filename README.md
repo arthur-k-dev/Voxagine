@@ -7,18 +7,14 @@ Voxagine is a custom C++ game engine built as a second-year project at
 with an ImGui-based level/entity editor and a couch co-op game, **Bit
 Buster**, built on top of it.
 
-It was originally a Windows/DirectX 12 engine. It now targets **Linux,
-Windows, macOS, iOS and Android** on a single Vulkan renderer; see
-[Port status](#port-status) for what currently builds, runs and is verified on
-real hardware.
+It targets **Linux, Windows, macOS, iOS and Android** on a single Vulkan
+renderer; see [Port status](#port-status) for what's verified on each.
 
 ## Engine features
 
 - **ECS** — entity/component/system architecture (`Voxagine/Source/Core/ECS`)
 - **Vulkan renderer** (`Voxagine/Source/Core/Platform/Rendering`) — dynamic
-  rendering, bindless textures, HLSL shaders compiled to SPIR-V with DXC where
-  it's available and glslc (shaderc) otherwise — macOS and iOS always use the
-  glslc path, since there is no DXC for those platforms
+  rendering, bindless textures, HLSL shaders compiled to SPIR-V (DXC or glslc)
 - **Cross-platform audio** — vendored miniaudio by default, or FMOD behind a
   build flag (`Voxagine/Source/Core/Platform/Audio`)
 - **Custom memory allocators** — pool/free-list allocators (`Voxagine/Source/Core/Memory`)
@@ -32,59 +28,44 @@ real hardware.
 ## Requirements
 
 Every platform needs a C++17 compiler, CMake 3.21+, Ninja, Vulkan 1.3 headers
-and a loader, SDL3, and a way to compile HLSL to SPIR-V (DXC, or glslc from
-shaderc plus SPIRV-Tools as the fallback). One or two gamepads to play Bit
-Buster properly, though keyboard works.
+and a loader, SDL3, and DXC or glslc (shaderc + SPIRV-Tools) to compile HLSL
+to SPIR-V. One or two gamepads to play Bit Buster, though keyboard works.
 
 **Linux:**
 
 ```bash
-# Arch
 sudo pacman -S cmake ninja vulkan-devel sdl3 directx-shader-compiler
 # add vulkan-validation-layers for validation output
 ```
 
-The editor's file dialogs use zenity or kdialog through a desktop portal.
-
 **Windows:** the Vulkan SDK supplies the loader, headers, validation layers
-and DXC; SDL3 comes from vcpkg or a binary release. MSVC 2022 is the expected
-compiler. The editor's file dialogs use Win32 `GetOpenFileName`.
+and DXC; SDL3 comes from vcpkg or a binary release. MSVC 2022.
 
-**macOS:** Xcode's command line tools for the compiler, plus Homebrew for the
-rest — there is no DXC on macOS, so the build always takes the glslc path
-here:
+**macOS:** Xcode's command line tools, plus Homebrew:
 
 ```bash
 xcode-select --install
 brew install cmake ninja vulkan-headers vulkan-loader molten-vk sdl3 shaderc spirv-tools
 ```
 
-`molten-vk`/`vulkan-loader` give the desktop macOS build a Vulkan loader over
-Metal. iOS builds separately vendor their own copy of MoltenVK under
-`External/MoltenVK`, so no extra Vulkan SDK install is needed for those — see
-[Deploying to iOS](#deploying-to-ios-xcode).
-
-iOS's and Android's own toolchain requirements are in their sections below.
+iOS's own Vulkan dependency (MoltenVK) is vendored in the repo — see
+[Deploying to iOS](#deploying-to-ios-xcode). Android's toolchain requirements
+are in [Deploying to Android](#deploying-to-android).
 
 ## Building & running
 
 Builds go through `CMakePresets.json`, which any recent CMake, CLion or Rider
-reads directly. Five desktop presets - `game`, `game-release`, `editor`,
-`editor-release`, `bringup` - each writing to
-`Build/<Linux|Windows|Darwin>/<Type>/<Debug|Release>/` (CMake's
-`hostSystemName` for macOS is `Darwin`).
+reads directly. Five desktop presets — `game`, `game-release`, `editor`,
+`editor-release`, `bringup` — each writing to
+`Build/<Linux|Windows|Darwin>/<Type>/<Debug|Release>/`.
 
 ```bash
 cmake --preset game && cmake --build --preset game
 cd Game && ../Build/<Linux|Windows|Darwin>/Game/Debug/bin/BitBuster    # run from Game/, asset paths are relative
 ```
 
-The editor is a separate target rather than the same executable with a define
-flipped: `EDITOR` is set on the engine library, so an editor build is a
-different compilation of it, and on macOS and iPad the result is an application
-bundle rather than a bare executable. Swap `game` for `editor`. Add `-release`
-for an optimised build - that also drops the Vulkan validation layers, which
-are tied to Debug.
+Swap `game` for `editor` to build the editor, and add `-release` for an
+optimised build without validation layers.
 
 ```bash
 cmake --preset editor && cmake --build --preset editor
@@ -92,20 +73,17 @@ open Build/Darwin/Editor/Debug/bin/Voxagine.app                    # macOS: a re
 cd Game && ../Build/<Linux|Windows>/Editor/Debug/bin/Voxagine       # elsewhere: run from Game/
 ```
 
-A double-clicked bundle starts with a working directory of `/`, so it cannot
-find assets by the relative paths the engine uses everywhere. `Voxagine.app`
-therefore ships the content tree inside itself and copies it, on first launch,
-to `~/Library/Application Support/Voxagine/VoxagineEditor/assets` - which is
-then also where anything you save from the editor ends up. To edit the
-repository's own `Game/` tree instead, point it there:
+On macOS the editor bundle copies its assets to
+`~/Library/Application Support/Voxagine/VoxagineEditor/assets` on first
+launch — that's also where anything you save ends up. To point it at the
+repository's own `Game/` tree instead:
 
 ```bash
 VOXAGINE_ASSET_ROOT=$PWD/Game Build/Darwin/Editor/Debug/bin/Voxagine.app/Contents/MacOS/Voxagine
 ```
 
-There is also `voxagine_bringup`, a standalone SDL3 + Vulkan target that clears
-the screen without any of the engine. It needs no assets and pulls in no RTTR,
-which makes it the quickest check that a toolchain is set up:
+`voxagine_bringup` is a minimal SDL3 + Vulkan target with no engine and no
+assets — the quickest way to check a toolchain is set up:
 
 ```bash
 cmake --preset bringup && cmake --build --preset bringup
@@ -115,23 +93,19 @@ cmake --preset bringup && cmake --build --preset bringup
 ## Deploying to iOS (Xcode)
 
 Needs a Mac with a recent stable Xcode, and either a physical iPad/iPhone or
-the Simulator. MoltenVK is vendored under `External/MoltenVK`, so a plain
-configure needs no extra flags:
+the Simulator.
 
 ```bash
 cmake --preset ios && cmake --build --preset ios                # BitBuster.app, unsigned
 cmake --preset ios-editor && cmake --build --preset ios-editor  # Voxagine editor, as its own iPad app
 ```
 
-`ios`/`ios-editor` (and their `-release` variants) use CMake's Xcode
-generator, so the result is a real `.xcodeproj` at
-`Build/iOS/<Game|Editor>/<Debug|Release>/Voxagine.xcodeproj` — open it directly
-in Xcode if you'd rather work there. Building unsigned is enough to prove the
-code compiles and links (this is what CI checks), but not to install on a
-device.
+These use CMake's Xcode generator, producing a real `.xcodeproj` at
+`Build/iOS/<Game|Editor>/<Debug|Release>/Voxagine.xcodeproj` you can open
+directly. An unsigned build compiles and links but won't install on a device.
 
-**To install on an attached device**, reconfigure with your Apple Developer
-team ID and build with automatic provisioning:
+**To install on an attached device**, set your Apple Developer team ID and
+build with automatic provisioning:
 
 ```bash
 cmake --preset ios -DVOXAGINE_IOS_DEVELOPMENT_TEAM=<your 10-character team ID>
@@ -143,60 +117,54 @@ xcrun devicectl device install app --device <device UDID> \
 xcrun devicectl device process launch --device <device UDID> com.voxagine.bitbuster
 ```
 
-Xcode needs an Apple ID signed in first (Xcode → Settings → Accounts) to
-create the provisioning profile on demand. `xcrun devicectl list devices`
-lists paired devices and their UDIDs.
+Xcode needs an Apple ID signed in (Xcode → Settings → Accounts) to create the
+provisioning profile. `xcrun devicectl list devices` lists paired devices and
+their UDIDs.
 
-The editor follows the same signing story — swap the target for
-`VoxagineEditor`, the project/app paths for the ones under `Build/iOS/Editor/...`,
-and the bundle identifier for `com.voxagine.bitbuster.editor`.
+For the editor, use target `VoxagineEditor`, the paths under
+`Build/iOS/Editor/...`, and bundle identifier `com.voxagine.bitbuster.editor`.
 
-For ad-hoc distribution without installing Xcode on every machine (e.g. via
-SideStore/AltStore), see `Platforms/iOS/build-and-deploy.sh`, which packages a
-built `.app` into a signed IPA.
+For ad-hoc distribution (e.g. via SideStore/AltStore), see
+`Platforms/iOS/build-and-deploy.sh`.
 
 ### The editor on iPad
 
-Touch drives the pointer and the camera, with finger count selecting the
-gesture the way Blender uses modifiers:
+Touch drives the pointer and the camera:
 
 | gesture | does |
 |---|---|
-| one finger | pointer - menus, panels, gizmo, click to select |
+| one finger | pointer — menus, panels, gizmo, click to select |
 | two fingers, drag | orbit the camera; scrolls the panel when over one |
 | two fingers, pinch | zoom |
 | three fingers, drag | pan |
 
-A Magic Keyboard, trackpad or paired mouse works as it does on desktop and is
-unaffected by any of that - iPadOS delivers them as ordinary mouse and key
-events. The on-screen keyboard is raised only while a text field has focus.
+A Magic Keyboard, trackpad or paired mouse works as it does on desktop. File
+dialogs are restricted to the project's own content tree.
 
 ## Deploying to Android
 
 Needs JDK 17, the Android SDK (platform 34 + build-tools, `ANDROID_HOME` set)
-and NDK r27c (`ANDROID_NDK_HOME`). SDL3's Java and native halves have to be the
-*same* checkout, which `fetch-sdl.sh` sets up:
+and NDK r27c (`ANDROID_NDK_HOME`).
 
 ```bash
 cd Platforms/Android
-./fetch-sdl.sh                      # once, pulls the SDL3 checkout both sides share
+./fetch-sdl.sh                      # once
 export JAVA_HOME=...                # JDK 17
 export ANDROID_HOME=...
 export ANDROID_NDK_HOME=...
 ./gradlew assembleDebug
 ```
 
-The APK lands in `Platforms/Android/app/build/outputs/apk/debug/`, `arm64-v8a`
-only by default. To check just that the engine cross-compiles, without Gradle:
+The APK lands in `Platforms/Android/app/build/outputs/apk/debug/`,
+`arm64-v8a` only. To check just that the engine cross-compiles, without
+Gradle:
 
 ```bash
 cmake --preset android-arm64-release && cmake --build --preset android-arm64-release
 ```
 
-The editor is not supported on Android — there is no native-file-dialog
-backend for it there, so `Core/FileBrowser.cpp` wouldn't link. See
-`Platforms/Android/README.md` for the full toolchain setup, known packaging
-issues and verified device numbers.
+The editor is not supported on Android. See `Platforms/Android/README.md` for
+the full toolchain setup and known issues.
 
 ## Port status
 
@@ -205,43 +173,26 @@ at ~200 fps, resizes, switches levels and exits cleanly, with zero Vulkan
 validation errors. The editor builds and starts but hangs part-way through
 loading assets.
 
-**Windows is a supported target but remains unverified.** DirectX 12 is gone
-and the renderer is Vulkan-only, which runs on every platform above; SDL3
-covers the window, input and gamepads; the filesystem layer is plain C stdio;
-and the editor's file dialogs have a Win32 implementation selected by CMake.
-What is missing is that nobody has actually built it on Windows since the port
-began, so expect small breakages rather than none. The MSBuild files are
-deleted for good — CMake is the only build system.
+**Windows.** Unverified — the presets exist but nobody has built on Windows
+recently, so expect small breakages.
 
-**macOS.** Both the game and the editor build and run: the game as a plain
-executable from `Game/`, exactly like Linux; the editor as a real
-double-clickable `Voxagine.app` that finds its own assets inside the bundle.
+**macOS.** The game and editor both build and run — the game as a plain
+executable from `Game/`, the editor as a double-clickable `Voxagine.app`.
 
-**iOS.** The game builds, installs and runs natively on an iPad (verified on
-an iPad Pro, A12Z, at the display's full 2048×1536 - not letterboxed iPhone
-compatibility mode) - world, character models, sprites and text all render
-correctly. The editor targets iPad as its own app bundle with the touch-driven
-pointer and UIKit file-picker backend described above.
+**iOS.** The game builds, installs and runs natively on iPad (verified on an
+iPad Pro, A12Z, at the display's full 2048×1536) — world, character models,
+sprites and text all render correctly. The editor targets iPad as its own app
+bundle with a touch-driven pointer and a UIKit file picker.
 
 **Android.** The native library (`libmain.so`) cross-compiles and links clean
-for `arm64-v8a`, checked on every CI run, including that it carries no
-undefined Vulkan symbols. The Gradle packaging has been built and installed on
-a real device - see `Platforms/Android/README.md` for the numbers. The editor
-is not supported there yet (no file-dialog backend).
-
-Off by default, and unchanged by any of the ports:
+for `arm64-v8a`, checked on every CI run. The Gradle packaging has been built
+and installed on a real device — see `Platforms/Android/README.md`. The
+editor is not supported.
 
 | Dependency | State |
 |------------|-------|
-| FMOD | Proprietary; needs the SDK downloaded by hand. Off behind `VOXAGINE_ENABLE_FMOD`, and audio runs silent without it. |
-| Optick | Vendored headers reference a Windows-only `OptickCore.lib`. Off behind `VOXAGINE_ENABLE_OPTICK`. |
-
-RTTR was a third: it was vendored as 126 headers with no sources and only a
-Windows `rttr_core.lib`. That copy is gone; CMake uses an installed RTTR if
-there is one and otherwise fetches upstream v0.9.6, so the default build still
-needs no network. `nativefiledialog` and `teenypath` were a fourth and fifth —
-both shipped as a header plus a Windows `.lib` — and are now implemented in
-this repository, on `std::filesystem` and the platform dialog APIs.
+| FMOD | Off by default (`VOXAGINE_ENABLE_FMOD`); needs the SDK downloaded by hand. miniaudio is the default and needs nothing extra. |
+| Optick | Off by default (`VOXAGINE_ENABLE_OPTICK`); Windows-only. |
 
 ## Repository layout
 
@@ -249,19 +200,16 @@ this repository, on `std::filesystem` and the platform dialog APIs.
 |--------------------------|-------------------------------------------------------|
 | `Voxagine/`              | Engine core + editor                                  |
 | `Game/`                  | Bit Buster, built on Voxagine                         |
-| `Platforms/`             | Per-platform packaging: the Android Gradle project, iOS/macOS `Info.plist` templates and the iOS ad-hoc deploy script |
+| `Platforms/`             | Per-platform packaging: Android Gradle project, iOS/macOS `Info.plist` templates, iOS deploy script |
 | `SplodyMcSplodeFace/`    | An earlier game built on an earlier version of the engine |
 | `UnitTesting/`           | Unit tests (allocators, reflection, physics, pathfinding, lighting) |
 | `CMake/`                 | Build helper scripts                                  |
 
 ## Status
 
-This was completed as coursework and is no longer under active development,
-apart from the cross-platform port (Linux, Windows, macOS, iOS and Android).
-It's kept here as a portfolio piece.
+Completed as coursework and no longer under active development, apart from
+the cross-platform port. Kept here as a portfolio piece.
 
-Contributions should stay portable: the engine targets every platform above
-from one source tree, so platform-specific code belongs behind the matching
-`VOXAGINE_ANDROID`/`VOXAGINE_IOS`/`WIN32`/`APPLE` guard (see
-`CMake/Platforms.cmake`), not in the shared path. `_WINDOWS` is not defined by
-this build — it came from the deleted `.vcxproj` files.
+Contributions should stay portable: platform-specific code belongs behind the
+matching `VOXAGINE_ANDROID`/`VOXAGINE_IOS`/`WIN32`/`APPLE` guard (see
+`CMake/Platforms.cmake`), not in the shared path.

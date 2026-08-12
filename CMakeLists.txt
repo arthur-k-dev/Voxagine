@@ -617,6 +617,32 @@ if(VOXAGINE_BUILD_ENGINE)
             LABELS "gpu;integration"
             RUN_SERIAL TRUE
             TIMEOUT 180)
+
+        # The same fixture in its VOXAGINE_GPU_STREAMING_ONLY mode: it walks the
+        # player across a Beat2 chunk boundary through --ui-script and times the
+        # window transition against a 16.7 ms per-frame ceiling.
+        #
+        # This is the primary instrument of Docs/CHUNK_STREAMING_PLAN.md, and it
+        # FAILS on master by about 9x (peak 150-154 ms in Release; see phase 0's
+        # notes). Phases 1-5 drive it down and phase 3 removes the WILL_FAIL. A
+        # gate that is expected to fail is honest; deleting it until it passes is
+        # how the hitch stayed unmeasured.
+        #
+        # --frames is a main-loop iteration count, not a wall clock: the fixture
+        # exits itself when the transition closes, so this is set high enough not
+        # to be the terminator in either config and the TIMEOUT is the real bound.
+        add_test(NAME gpu_chunk_streaming_frame_budget
+            COMMAND voxagine_gpu_destruction_stress
+                --hidden --uncapped --size 640x360 --frames 200000
+                --map Content/Worlds/Fishing_Village/Fishing_Village_Beat2.wld
+                --ui-script "wait,forward-on" --ui-script-interval 120)
+        set_tests_properties(gpu_chunk_streaming_frame_budget PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/Game
+            ENVIRONMENT "VOXAGINE_GPU_STREAMING_ONLY=1;VOXAGINE_AUDIO_NULL_DEVICE=1"
+            LABELS "gpu;integration;streaming"
+            RUN_SERIAL TRUE
+            WILL_FAIL TRUE
+            TIMEOUT 180)
     endif()
 endif()
 

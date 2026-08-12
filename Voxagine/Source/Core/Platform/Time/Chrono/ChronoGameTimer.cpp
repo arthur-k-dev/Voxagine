@@ -97,22 +97,7 @@ void ChronoGameTimer::Update(const std::function<void()>& Update)
 			TimeDelta = m_uiTargetElapsedTicks;
 		}
 
-		m_uiLeftOverTicks += TimeDelta;
-
-		bool isUpdated = false;
-		while (m_uiLeftOverTicks >= m_uiTargetElapsedTicks)
-		{
-			isUpdated = true;
-			m_uiElapsedTicks = m_uiTargetElapsedTicks;
-			m_uiTotalTicks += m_uiTargetElapsedTicks;
-			m_uiLeftOverTicks -= m_uiTargetElapsedTicks;
-			m_uiFrameCount++;
-		}
-
-		if (isUpdated)
-		{
-			Update();
-		}
+		RunFixedUpdates(TimeDelta, Update);
 	}
 	else
 	{
@@ -129,11 +114,11 @@ void ChronoGameTimer::Update(const std::function<void()>& Update)
 		}
 	}
 
-	// Track the current framerate.
-	if (m_uiFrameCount != uiLastFrameCount)
-	{
-		m_uiFramesThisSecond++;
-	}
+	/* Track the current framerate. Count every update this call produced, not
+	   one per call that produced any: the fixed timer can run several steps in
+	   one Update and the variable timer can run none, so a plain increment
+	   reports neither the display rate nor the simulation rate. */
+	m_uiFramesThisSecond += m_uiFrameCount - uiLastFrameCount;
 
 	if (m_uiSecondCounter >= s_uiClockFrequency)
 	{

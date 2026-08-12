@@ -10,6 +10,16 @@
 
 #include "External/optick/optick.h"
 
+/* Encode and decode used to print a line to stderr unconditionally, from a job
+   thread, once per chunk. That is noise in every headless capture and a lock on
+   a shared FILE* in the middle of a window slide (rule R9 of the streaming
+   plan). Read the environment once - both callers run off the main thread. */
+static bool ChunkIoTimingsEnabled()
+{
+	static const bool s_bEnabled = std::getenv("VOXAGINE_CHUNK_IO_TIMINGS") != nullptr;
+	return s_bEnabled;
+}
+
 Chunk::Chunk(Application* pApp, World* pWorld, UVector2 chunkIndex, UVector3 chunkSize, Value& rootEntities)
 {
 	m_pWorld = pWorld;
@@ -70,7 +80,7 @@ void Chunk::LoadAsync(ChunkUpdateGroup::Item* pItem, std::function<void(ChunkUpd
 	JobQueue* pJobQueue = m_pWorld->GetJobQueue();
 	if (pJobQueue)
 	{
-		pJobQueue->Enqueue<bool>([this]()
+		pJobQueue->EnqueueWithType<bool>([this]()
 		{
 			if (m_bFirstLoad)
 			{
@@ -89,7 +99,7 @@ void Chunk::LoadAsync(ChunkUpdateGroup::Item* pItem, std::function<void(ChunkUpd
 		{
 			callback(pItem);
 			m_bIsLoading = false;
-		});
+		}, JT_IO);
 	}
 }
 
@@ -150,11 +160,18 @@ void Chunk::UnloadAsync(ChunkUpdateGroup::Item* pItem, std::function<void(ChunkU
 
 void Chunk::EncodeVoxels()
 {
-	std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+	const bool bReportTiming = ChunkIoTimingsEnabled();
+	const std::chrono::steady_clock::time_point start = bReportTiming
+		? std::chrono::steady_clock::now()
+		: std::chrono::steady_clock::time_point();
+
 	m_pEncodedVoxelData.clear();
 
-	//Reserve data vector to at least 10mb
-	m_pEncodedVoxelData.reserve(10000000);
+	/* One byte per source voxel, rather than a flat 10 MB that is both too much
+	   for a small chunk and not obviously enough for a large one. A run costs
+	   seven bytes and covers at least one voxel, so this over-reserves for every
+	   world that compresses at all and never reallocates for one that doesn't. */
+	m_pEncodedVoxelData.reserve(m_VoxelData.size());
 
 	/* A run is a colour and an owner slot, seven bytes rather than the
 	   eighteen the old (bool, colour, uintptr_t, ';', count) record cost - and
@@ -166,11 +183,9 @@ void Chunk::EncodeVoxels()
 	   the old format was restoring dangling pointers; a chunk far enough away
 	   to unload has no debris worth preserving. */
 	const uint32_t compressedVoxelSize = sizeof(uint32_t) + sizeof(uint16_t) + sizeof(uint8_t);
-	uint8_t repeatCount = 0;
-	uint32_t byteOffset = 0;
 	for (size_t i = 0; i < m_VoxelData.size(); ++i)
 	{
-		repeatCount = 0;
+		uint8_t repeatCount = 0;
 		const uint32_t uiColor = m_VoxelData[i].Color;
 		uint16_t uiSlot = m_OwnerVolume.GetSlot(static_cast<uint32_t>(i));
 
@@ -190,16 +205,18 @@ void Chunk::EncodeVoxels()
 			++i;
 		}
 
-		m_pEncodedVoxelData.insert(m_pEncodedVoxelData.begin() + byteOffset, compressedVoxelSize, 0);
+		/* Append. The old insert-at-byteOffset always addressed end() anyway, so
+		   this says what it does and skips the generic insert's move machinery. */
+		size_t writeOffset = m_pEncodedVoxelData.size();
+		m_pEncodedVoxelData.resize(writeOffset + compressedVoxelSize);
 
-		memcpy(&m_pEncodedVoxelData[byteOffset], &uiColor, sizeof(uint32_t));
-		byteOffset += sizeof(uint32_t);
+		memcpy(&m_pEncodedVoxelData[writeOffset], &uiColor, sizeof(uint32_t));
+		writeOffset += sizeof(uint32_t);
 
-		memcpy(&m_pEncodedVoxelData[byteOffset], &uiSlot, sizeof(uint16_t));
-		byteOffset += sizeof(uint16_t);
+		memcpy(&m_pEncodedVoxelData[writeOffset], &uiSlot, sizeof(uint16_t));
+		writeOffset += sizeof(uint16_t);
 
-		memcpy(&m_pEncodedVoxelData[byteOffset], &repeatCount, sizeof(uint8_t));
-		byteOffset += sizeof(uint8_t);
+		memcpy(&m_pEncodedVoxelData[writeOffset], &repeatCount, sizeof(uint8_t));
 	}
 
 	m_pEncodedVoxelData.shrink_to_fit();
@@ -207,15 +224,21 @@ void Chunk::EncodeVoxels()
 	m_VoxelData.shrink_to_fit();
 	m_OwnerVolume.Release();
 
-	std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
-	auto execTime = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-	std::string message = "Chunk encode (ms): " + std::to_string(execTime.count()) + "\n";
-	fprintf(stderr, "%s", message.c_str());
+	if (bReportTiming)
+	{
+		const auto execTime = std::chrono::duration_cast<std::chrono::milliseconds>(
+			std::chrono::steady_clock::now() - start);
+		fprintf(stderr, "Chunk encode (ms): %lld\n", static_cast<long long>(execTime.count()));
+	}
 }
 
 void Chunk::DecodeVoxels()
 {
-	std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+	const bool bReportTiming = ChunkIoTimingsEnabled();
+	const std::chrono::steady_clock::time_point start = bReportTiming
+		? std::chrono::steady_clock::now()
+		: std::chrono::steady_clock::time_point();
+
 	m_VoxelData.resize(m_ChunkSize.x * m_ChunkSize.y * m_ChunkSize.z);
 	m_OwnerVolume.Resize(m_VoxelData.size());
 
@@ -251,10 +274,12 @@ void Chunk::DecodeVoxels()
 	m_pEncodedVoxelData.clear();
 	m_pEncodedVoxelData.shrink_to_fit();
 
-	std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
-	auto execTime = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-	std::string message = "Chunk decode (ms): " + std::to_string(execTime.count()) + "\n";
-	fprintf(stderr, "%s", message.c_str());
+	if (bReportTiming)
+	{
+		const auto execTime = std::chrono::duration_cast<std::chrono::milliseconds>(
+			std::chrono::steady_clock::now() - start);
+		fprintf(stderr, "Chunk decode (ms): %lld\n", static_cast<long long>(execTime.count()));
+	}
 }
 
 uint64_t Chunk::VerifyVoxelCodecRoundTrip()

@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstdint>
 #include <cstdio>
 #include <limits>
@@ -30,6 +31,14 @@ namespace
 	public:
 		bool Passed() const
 		{
+			if (m_bStreamingOnly)
+			{
+				return m_bFinished && m_bPassed &&
+				       m_uiChunkTransitions == 1 &&
+				       m_uiChunkTransitionFrameSamples != 0 &&
+				       m_uiChunkTransitionHitchViolations == 0;
+			}
+
 			return m_bFinished && m_bPassed &&
 			       m_uiBurstsIssued == kBurstCount &&
 			       m_uiChunkTransitions == kExpectedChunkTransitions &&
@@ -45,6 +54,20 @@ namespace
 		void OnCreate() override
 		{
 			VoxApp::OnCreate();
+			m_bStreamingOnly = std::getenv("VOXAGINE_GPU_STREAMING_ONLY") != nullptr;
+			if (m_bStreamingOnly)
+			{
+				/* Only so ObserveExpectedWorld expects Beat2; this mode does not
+				   use the phase route. */
+				m_uiWorldIndex = 1;
+				m_uiPhase = kWorldFirstPhase[m_uiWorldIndex];
+				fprintf(stderr,
+				        "[gpu-test] streaming gate armed: timing one Beat2 window transition "
+				        "driven by --ui-script, %.2f ms frame limit\n",
+				        kMaxStreamingTransitionFrameMs);
+				return;
+			}
+
 			fprintf(stderr,
 			        "[gpu-test] armed: %u productive destruction bursts, %u resident-window phases, "
 			        "%u real level switch; CPU hitch limits %.0f/%.0f/%.0f ms "
@@ -76,6 +99,16 @@ namespace
 		{
 			if (!m_bFinished)
 			{
+				if (m_bStreamingOnly)
+				{
+					fprintf(stderr,
+					        "[gpu-test] FAIL: application exited before the focused chunk "
+					        "transition completed\n");
+					m_bPassed = false;
+					VoxApp::OnExit();
+					return;
+				}
+
 				fprintf(stderr,
 				        "[gpu-test] FAIL: application exited before the fixture completed "
 				        "(%u/%u bursts, %u/%u chunk switches, %u/%u level switches)\n",
@@ -125,6 +158,21 @@ namespace
 		static constexpr double kMaxChunkTransitionFrameMs = 250.0;
 		static constexpr double kMaxLevelSwitchFrameMs = 2000.0;
 
+		/* The streaming gate's own budget, and the whole point of the mode.
+		   250 ms certifies that a window transition happened, not that it was
+		   invisible - it is a hitch limit for a fixture whose subject is
+		   destruction. Docs/CHUNK_STREAMING_PLAN.md drives this one down to a
+		   frame across phases 1-5; on master it fails, which is recorded as the
+		   baseline rather than hidden. */
+		static constexpr double kMaxStreamingTransitionFrameMs = 1000.0 / 60.0;
+
+		double ChunkTransitionLimitMs() const
+		{
+			return m_bStreamingOnly
+				? kMaxStreamingTransitionFrameMs
+				: kMaxChunkTransitionFrameMs;
+		}
+
 		enum class IntervalKind
 		{
 			Ignore,
@@ -138,6 +186,7 @@ namespace
 			Chunk* pChunk = nullptr;
 			uint32_t uiChunkKey = 0;
 			size_t uiNextVoxel = 0;
+			size_t uiFallbackVoxel = std::numeric_limits<size_t>::max();
 		};
 
 		struct Candidate
@@ -148,6 +197,13 @@ namespace
 			uint32_t uiChunkKey = 0;
 			UVector2 v2ChunkIndex = UVector2(0);
 			std::string sOwnerName;
+		};
+
+		enum class CandidateSearchResult
+		{
+			Found,
+			Pending,
+			Exhausted
 		};
 
 		struct ScopedOwnerId
@@ -225,7 +281,7 @@ namespace
 				break;
 			case IntervalKind::ChunkTransition:
 				pKind = "chunk-window transition";
-				fLimit = kMaxChunkTransitionFrameMs;
+				fLimit = ChunkTransitionLimitMs();
 				pPeak = &m_fPeakChunkTransitionFrameMs;
 				pSamples = &m_uiChunkTransitionFrameSamples;
 				pViolations = &m_uiChunkTransitionHitchViolations;
@@ -259,15 +315,16 @@ namespace
 			const std::string sWorldName = world.GetName();
 			if (!m_bInitialWorldObserved)
 			{
-				if (sWorldName != kWorldPaths[0])
+				if (sWorldName != kWorldPaths[m_uiWorldIndex])
 				{
 					Fail("initial world is '%s', expected '%s'",
-					     sWorldName.c_str(), kWorldPaths[0]);
+					     sWorldName.c_str(), kWorldPaths[m_uiWorldIndex]);
 					return false;
 				}
 
 				m_bInitialWorldObserved = true;
-				fprintf(stderr, "[gpu-test] world 0 ready: %s\n", sWorldName.c_str());
+				fprintf(stderr, "[gpu-test] world %u ready: %s\n",
+				        m_uiWorldIndex, sWorldName.c_str());
 				return true;
 			}
 
@@ -376,6 +433,8 @@ namespace
 		                            std::unordered_set<uint32_t>& o_resident)
 		{
 			o_resident.clear();
+			if (chunks.IsStreaming())
+				return false;
 
 			const std::unordered_map<uint32_t, Chunk*>& allChunks = chunks.GetChunks();
 			if (allChunks.empty())
@@ -497,7 +556,8 @@ namespace
 			{
 				const auto chunkIt = allChunks.find(uiChunkKey);
 				if (chunkIt != allChunks.end() && chunkIt->second != nullptr)
-					m_ChunkCursors.push_back({chunkIt->second, uiChunkKey, 0});
+					m_ChunkCursors.push_back({chunkIt->second, uiChunkKey, 0,
+						std::numeric_limits<size_t>::max()});
 			}
 
 			if (m_ChunkCursors.empty())
@@ -511,6 +571,7 @@ namespace
 			m_PhaseDestroyedChunkIds.clear();
 			m_uiPhaseDestroyedVoxels = 0;
 			m_uiNextChunkCursor = 0;
+			m_bCandidateSearchPending = false;
 			m_uiBurstCadence = 0;
 			m_uiResidentStableFrames = 0;
 			m_bPhaseReady = true;
@@ -574,26 +635,44 @@ namespace
 			return true;
 		}
 
-		bool FindFreshCandidate(World& world, VoxelGrid& grid, Candidate& o_candidate)
+		CandidateSearchResult FindFreshCandidate(
+			World& world, VoxelGrid& grid, Candidate& o_candidate)
 		{
 			if (m_ChunkCursors.empty())
-				return false;
+				return CandidateSearchResult::Exhausted;
 
+			/* A resident chunk contains more than eight million voxels. The old
+			   fixture searched every remaining voxel in one OnUpdate call, adding
+			   its own 400 ms "steady" hitches to the production hitch gate. Keep
+			   the cursor and fallback persistent and spend a small fixed amount of
+			   search work per rendered frame. */
+			static constexpr size_t kCandidateChecksPerFrame = 32768;
 			const size_t uiCursorCount = m_ChunkCursors.size();
-			for (size_t uiAttempt = 0; uiAttempt < uiCursorCount; ++uiAttempt)
+			size_t uiChecksRemaining = kCandidateChecksPerFrame;
+			while (uiChecksRemaining > 0)
 			{
-				const size_t uiCursorIndex = (m_uiNextChunkCursor + uiAttempt) % uiCursorCount;
+				const bool bAnyRemaining = std::any_of(
+					m_ChunkCursors.begin(), m_ChunkCursors.end(), [](const ChunkCursor& cursor)
+					{
+						return cursor.uiNextVoxel < cursor.pChunk->GetVoxelData().size() ||
+							cursor.uiFallbackVoxel != std::numeric_limits<size_t>::max();
+					});
+				if (!bAnyRemaining)
+					return CandidateSearchResult::Exhausted;
+
+				const size_t uiCursorIndex = m_uiNextChunkCursor;
 				ChunkCursor& cursor = m_ChunkCursors[uiCursorIndex];
 				const std::vector<Voxel>& voxels = cursor.pChunk->GetVoxelData();
-				size_t uiFallback = std::numeric_limits<size_t>::max();
 
-				for (size_t uiIndex = cursor.uiNextVoxel; uiIndex < voxels.size(); ++uiIndex)
+				if (cursor.uiNextVoxel < voxels.size())
 				{
+					const size_t uiIndex = cursor.uiNextVoxel++;
+					--uiChecksRemaining;
 					Candidate candidate;
 					if (!CandidateAt(world, grid, cursor, uiIndex, candidate))
 					{
 						if (m_bFinished)
-							return false;
+							return CandidateSearchResult::Exhausted;
 						continue;
 					}
 
@@ -603,33 +682,38 @@ namespace
 					if (m_DestroyedOwnerIds.size() < kMinDestroyedModels &&
 					    m_DestroyedOwnerIds.count(scopedOwner) != 0)
 					{
-						if (uiFallback == std::numeric_limits<size_t>::max())
-							uiFallback = uiIndex;
+						if (cursor.uiFallbackVoxel == std::numeric_limits<size_t>::max())
+							cursor.uiFallbackVoxel = uiIndex;
 						continue;
 					}
 
-					cursor.uiNextVoxel = uiIndex + 1;
 					m_uiNextChunkCursor = (uiCursorIndex + 1) % uiCursorCount;
 					o_candidate = std::move(candidate);
-					return true;
+					return CandidateSearchResult::Found;
 				}
 
-				if (uiFallback != std::numeric_limits<size_t>::max())
+				if (cursor.uiFallbackVoxel != std::numeric_limits<size_t>::max())
 				{
+					const size_t uiFallback = cursor.uiFallbackVoxel;
+					cursor.uiFallbackVoxel = std::numeric_limits<size_t>::max();
 					Candidate candidate;
 					if (!CandidateAt(world, grid, cursor, uiFallback, candidate))
-						return false;
+					{
+						if (m_bFinished)
+							return CandidateSearchResult::Exhausted;
+						m_uiNextChunkCursor = (uiCursorIndex + 1) % uiCursorCount;
+						continue;
+					}
 
-					cursor.uiNextVoxel = uiFallback + 1;
 					m_uiNextChunkCursor = (uiCursorIndex + 1) % uiCursorCount;
 					o_candidate = std::move(candidate);
-					return true;
+					return CandidateSearchResult::Found;
 				}
 
-				cursor.uiNextVoxel = voxels.size();
+				m_uiNextChunkCursor = (uiCursorIndex + 1) % uiCursorCount;
 			}
 
-			return false;
+			return CandidateSearchResult::Pending;
 		}
 
 		static uint32_t CountActiveInSphere(VoxelGrid& grid, const Vector3& v3Center,
@@ -801,6 +885,12 @@ namespace
 				m_bCameraPinned = true;
 			}
 
+			if (m_bStreamingOnly)
+			{
+				DriveStreamingOnly(*pGrid, *pChunks);
+				return;
+			}
+
 			RequestCurrentPhase(*pChunks, *pCamera);
 
 			if (!m_bPhaseReady)
@@ -831,12 +921,23 @@ namespace
 				return;
 			}
 
-			if (++m_uiBurstCadence < kFramesBetweenBursts)
-				return;
-			m_uiBurstCadence = 0;
+			if (!m_bCandidateSearchPending)
+			{
+				if (++m_uiBurstCadence < kFramesBetweenBursts)
+					return;
+				m_uiBurstCadence = 0;
+			}
 
 			Candidate candidate;
-			if (!FindFreshCandidate(*pWorld, *pGrid, candidate))
+			const CandidateSearchResult search = FindFreshCandidate(*pWorld, *pGrid, candidate);
+			if (search == CandidateSearchResult::Pending)
+			{
+				m_bCandidateSearchPending = true;
+				return;
+			}
+
+			m_bCandidateSearchPending = false;
+			if (search == CandidateSearchResult::Exhausted)
 			{
 				if (!m_bFinished)
 				{
@@ -847,6 +948,109 @@ namespace
 			}
 
 			IssueBurst(*pWorld, *pGrid, candidate);
+		}
+
+		/* One window transition, measured, and nothing else.
+		 *
+		 * It observes rather than steers, which is the difference between this
+		 * mode and the destruction route above it. Two ways of steering were
+		 * tried and both are wrong here: SetCameraLoadOffset is recomputed from
+		 * the camera in Tick and consumed in FixedTick, so against Beat2's
+		 * CameraMultiplayer - which follows a player that walks, dies and
+		 * respawns - the effective load position never settles and the window
+		 * oscillated across the whole level instead of transitioning once; and
+		 * pinning the camera transform from Tick is simply overwritten by the
+		 * follow camera's own FixedTick before ChunkSystem reads it.
+		 *
+		 * So the player walks, through --ui-script forward-on, exactly as a
+		 * player would, and this waits for the initial window to settle and then
+		 * times the next transition end to end. That is also the flow the
+		 * symptom was reported in (plan ledger E12).
+		 *
+		 * PreparePhase is deliberately not called: hunting destructible model
+		 * voxels across eight-million-voxel chunks would be the largest cost in
+		 * the frame whose cost is the subject. */
+		void DriveStreamingOnly(VoxelGrid& grid, ChunkSystem& chunks)
+		{
+			const bool bStreaming = chunks.IsStreaming();
+
+			if (!m_bFocusedInitialWindowDone)
+			{
+				/* The initial window is not the subject - its cost is a world
+				   load, which phase 4 owns. Wait for it to go quiet. */
+				m_uiResidentStableFrames = bStreaming ? 0 : m_uiResidentStableFrames + 1;
+
+				if (m_uiResidentStableFrames < kResidentStableFrames)
+					return;
+
+				m_bFocusedInitialWindowDone = true;
+				m_uiResidentStableFrames = 0;
+				m_v3StreamingWindowOffset = grid.GetWorldOffset();
+				fprintf(stderr,
+				        "[gpu-test] initial window settled at (%.0f, %.0f); timing the next "
+				        "transition\n",
+				        m_v3StreamingWindowOffset.x, m_v3StreamingWindowOffset.z);
+				return;
+			}
+
+			if (bStreaming)
+			{
+				m_uiChunkTransitions = 1;
+				m_uiResidentStableFrames = 0;
+				m_eExpectedInterval = IntervalKind::ChunkTransition;
+				return;
+			}
+
+			/* Not started yet: keep waiting rather than reporting on an idle
+			   run. The --frames cap and the ctest timeout bound this. */
+			if (m_uiChunkTransitions == 0)
+			{
+				m_eExpectedInterval = IntervalKind::Ignore;
+				return;
+			}
+
+			/* The window stopped moving. Give it the same settle margin before
+			   closing the interval - a group finishing does not mean the next
+			   one is not about to start. */
+			if (++m_uiResidentStableFrames < kResidentStableFrames)
+				return;
+
+			m_eExpectedInterval = IntervalKind::Ignore;
+
+			if (grid.GetWorldOffset() == m_v3StreamingWindowOffset)
+			{
+				Fail("the window reported streaming but did not move "
+				     "(world offset still %.1f, %.1f)",
+				     m_v3StreamingWindowOffset.x, m_v3StreamingWindowOffset.z);
+				return;
+			}
+
+			if (m_uiChunkTransitionFrameSamples == 0)
+			{
+				Fail("focused chunk transition produced no measured frames");
+				return;
+			}
+
+			if (m_uiChunkTransitionHitchViolations != 0)
+			{
+				/* The number this whole mode exists to produce, printed on the
+				   failing path too - on master it is the baseline. */
+				Fail("chunk transition exceeded its frame budget %u time(s) of %llu: "
+				     "peak %.2f ms against %.2f ms",
+				     m_uiChunkTransitionHitchViolations,
+				     static_cast<unsigned long long>(m_uiChunkTransitionFrameSamples),
+				     m_fPeakChunkTransitionFrameMs, kMaxStreamingTransitionFrameMs);
+				return;
+			}
+
+			fprintf(stderr,
+			        "[gpu-test] PASS: focused Beat2 chunk transition peak %.2f/%.2f ms "
+			        "across %llu frames\n",
+			        m_fPeakChunkTransitionFrameMs, kMaxStreamingTransitionFrameMs,
+			        static_cast<unsigned long long>(m_uiChunkTransitionFrameSamples));
+			m_bPassed = true;
+			m_bFinished = true;
+			Exit();
 		}
 
 		void DrainGPU()
@@ -943,6 +1147,9 @@ namespace
 		uint32_t m_uiResidentStableFrames = 0;
 		uint32_t m_uiDrainFrames = 0;
 		size_t m_uiNextChunkCursor = 0;
+		bool m_bCandidateSearchPending = false;
+		bool m_bFocusedInitialWindowDone = false;
+		Vector3 m_v3StreamingWindowOffset = Vector3(0.f);
 		uint64_t m_uiDestroyedVoxels = 0;
 		uint64_t m_uiPhaseDestroyedVoxels = 0;
 
@@ -972,6 +1179,7 @@ namespace
 		bool m_bDraining = false;
 		bool m_bFinished = false;
 		bool m_bPassed = true;
+		bool m_bStreamingOnly = false;
 	};
 }
 

@@ -70,7 +70,13 @@ set(VOXAGINE_TEST_SOURCES
     ${VOXAGINE_TEST_DIR}/Particles/ParticleLandingChecks.cpp
     ${VOXAGINE_TEST_DIR}/Particles/ParticlesPerf.cpp
 
+    # The renderer's CPU-side decisions - the parts that are reachable without
+    # a device. The GPU integration fixture in the same directory is a separate
+    # executable and is not part of this suite.
+    ${VOXAGINE_TEST_DIR}/Rendering/ModelMeshUploadChecks.cpp
+
     # Engine-wide primitives that are not about voxels at all.
+    ${VOXAGINE_TEST_DIR}/Foundation/GameTimerChecks.cpp
     ${VOXAGINE_TEST_DIR}/Foundation/JobManagerConfigChecks.cpp
     ${VOXAGINE_TEST_DIR}/Foundation/DateTimeChecks.cpp
     ${VOXAGINE_TEST_DIR}/Foundation/MathUtilsChecks.cpp

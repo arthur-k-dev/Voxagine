@@ -27,6 +27,8 @@ AudioSystem::~AudioSystem()
 
 void AudioSystem::Start()
 {
+	m_bStarted = true;
+
 	if (!m_pWorld->GetApplication()->IsInEditor())
 	{
 		for (auto& it : m_AudioSources)
@@ -489,7 +491,11 @@ void AudioSystem::OnComponentAdded(Component* pComponent)
 	{
 		m_AudioSources[pSource] = pSource->GetState();
 
-		if (!bIsEditor)
+		/* Only once Start has run. A source added while the world is still
+		   loading would otherwise start playing there and be started a second
+		   time by Start's own pass over m_AudioSources - two channels for one
+		   effect, and a BGM crossfaded against itself. */
+		if (!bIsEditor && m_bStarted)
 		{
 			if (pSource->IsBGM() && pSource->m_bAutoPlay)
 				pSource->SetAsBGM(0.0f);

@@ -1,6 +1,7 @@
 #include "Player.h"
 
 #include <Core/Application.h>
+#include <Core/LaunchOptions.h>
 #include <Core/ECS/World.h>
 #include <Core/ECS/Entities/Camera.h>
 
@@ -341,19 +342,26 @@ void Player::Start()
 	bool bPlayer1Active = MainMenuManagerComponent::m_bPlayer1Active;
 	bool bPlayer2Active = MainMenuManagerComponent::m_bPlayer2Active;
 
+	/* Playing a level straight from the editor *or* through --map skips the
+	   main menu, so nobody ever joins and the count stays at zero - which
+	   leaves both player entities live and reads as a two player game, with
+	   neither of them taking input. Default that case to player one alone.
+	   Reaching the level through the menu sets a real count, so the game's own
+	   flow is untouched.
+
+	   --map was the missing half: every headless run of a level had an
+	   uncontrollable player, which is why nothing could script gameplay. */
+	bool bDirectLevelLaunch = LaunchOptions::Get().HasMap();
 #ifdef EDITOR
-	// Playing a level straight from the editor skips the main menu, so nobody
-	// ever joins and the count stays at zero - which leaves both player
-	// entities live and reads as a two player game. Default that case to
-	// player one alone. Reaching the level through the menu sets a real count,
-	// so the game's own flow is untouched.
-	if (uiPlayerCount == 0)
+	bDirectLevelLaunch = true;
+#endif
+
+	if (uiPlayerCount == 0 && bDirectLevelLaunch)
 	{
 		uiPlayerCount = 1;
 		bPlayer1Active = true;
 		bPlayer2Active = false;
 	}
-#endif
 
 	// Single player mode
 	if (uiPlayerCount == 1)

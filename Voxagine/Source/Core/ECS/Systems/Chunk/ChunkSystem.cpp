@@ -578,7 +578,18 @@ void ChunkSystem::OnChunkUnloaded(ChunkUpdateGroup::Item* pUpdateItem)
 
 void ChunkSystem::OnWorldResumed(World* pWorld)
 {
-	uint32_t* viewPortData = m_pWorld->GetApplication()->GetPlatform().GetRenderContext()->GetVoxelData();
+	RenderContext* pRenderContext = m_pWorld->GetApplication()->GetPlatform().GetRenderContext();
+
+	/* The far field belongs to the render context, not to a world, so whichever
+	   world is on top owns it. A pushed menu world's ChunkSystem::Start builds
+	   its own - and since every menu world is a single chunk, "its own" is
+	   Resize(0,0,0), which throws this level's volume away. Nothing put it back,
+	   so opening the pause menu once removed the horizon for the rest of the
+	   session. It is a full rebuild (~215 ms); streaming it is phase 4 of
+	   Docs/CHUNK_STREAMING_PLAN.md. */
+	pRenderContext->BuildFarField(m_pWorld);
+
+	uint32_t* viewPortData = pRenderContext->GetVoxelData();
 	for (auto& iter : m_Chunks)
 	{
 		if (iter.second->IsLoaded())

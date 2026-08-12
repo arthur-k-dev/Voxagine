@@ -42,6 +42,29 @@
 #include "../../Components/VoxAnimator.h"
 #include "DebugRenderer.h"
 
+namespace
+{
+	/* Once per entity, not once per frame: whatever produces a NaN keeps
+	   producing it, and this is a per-renderer path (streaming plan rule R9,
+	   which measured per-renderer stderr turning a 2 ms bake into 20+ ms). The
+	   set is by name because the point is to name the culprit in a bug report,
+	   and two entities sharing a name share a cause. */
+	void ReportNonFiniteModelTransform(VoxRenderer* pRenderer, const char* pWhat)
+	{
+		static std::set<std::string> s_Reported;
+
+		const std::string& sName = pRenderer->GetOwner()->GetName();
+
+		if (!s_Reported.insert(sName).second)
+			return;
+
+		fprintf(stderr,
+			"[render] '%s' produced a non-finite model %s; "
+			"repaired for drawing, but the source is a real defect\n",
+			sName.c_str(), pWhat);
+	}
+}
+
 RenderSystem::RenderSystem(World* pWorld) :
 	ComponentSystem(pWorld),
 	m_pRenderContext(m_pWorld->GetApplication()->GetPlatform().GetRenderContext()),
@@ -235,8 +258,44 @@ void RenderSystem::PostTick(float fDeltaTime)
 				Quaternion quat;
 				Vector3 scale(1.f);
 
-				if (ComputeContinuousModelTransform(pRenderer, worldOrigin, quat, scale) &&
-				    std::isfinite(worldOrigin.x + worldOrigin.y + worldOrigin.z))
+				/* Only the origin used to be checked here, and the rotation is
+				   the component this tree actually produces NaNs in - see
+				   CLAUDE.md's "Something produces NaN transforms", which is
+				   still open, and the uninitialised `Quaternion rotation;` in
+				   Monster::RangeAttack. A non-finite quaternion reached the
+				   vertex shader and drew garbage.
+
+				   It is repaired rather than rejected, and that distinction is
+				   the whole point: rejecting the instance makes the character
+				   *disappear*, which is a worse failure than one drawn
+				   unrotated for a frame and is far harder to trace back to a
+				   NaN. Reported once per entity, the way VoxelBaker reports the
+				   same class, so it stays a findable bug rather than a
+				   mystery. */
+				bool bSubmit = ComputeContinuousModelTransform(pRenderer, worldOrigin, quat, scale);
+
+				if (bSubmit && !std::isfinite(quat.x + quat.y + quat.z + quat.w))
+				{
+					ReportNonFiniteModelTransform(pRenderer, "rotation");
+					quat = Quaternion(1.f, 0.f, 0.f, 0.f);
+				}
+
+				if (bSubmit && !std::isfinite(scale.x + scale.y + scale.z))
+				{
+					ReportNonFiniteModelTransform(pRenderer, "scale");
+					scale = Vector3(1.f);
+				}
+
+				/* The origin has no sane repair - putting the model at the
+				   world centre would be a lie rather than a degradation - so
+				   this one still drops, loudly. */
+				if (bSubmit && !std::isfinite(worldOrigin.x + worldOrigin.y + worldOrigin.z))
+				{
+					ReportNonFiniteModelTransform(pRenderer, "position");
+					bSubmit = false;
+				}
+
+				if (bSubmit)
 				{
 					ModelInstanceData instance;
 					instance.Rotation = Vector4(quat.x, quat.y, quat.z, quat.w);

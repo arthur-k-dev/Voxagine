@@ -1,5 +1,7 @@
 #pragma once
 
+#include <functional>
+
 #include "Core/Settings.h"
 #include "Core/Time.h"
 
@@ -64,6 +66,37 @@ public:
 	virtual void Update(const std::function<void()>& Update) = 0;
 
 protected:
+	/* Consume every fixed step a real-time delta represents, calling back once
+	   per step. The old code counted and consumed every accumulated step here
+	   but invoked the callback once afterwards, so at 30 display fps a 60 Hz
+	   fixed update discarded every other step and the game simulated at half
+	   speed. The caller clamps the delta, which is what bounds this loop.
+
+	   It lives in the base rather than in ChronoGameTimer so the accumulator is
+	   testable without sleeping or depending on steady_clock's native period. */
+	uint32_t RunFixedUpdates(uint64_t uiTimeDelta, const std::function<void()>& Update)
+	{
+		m_uiLeftOverTicks += uiTimeDelta;
+
+		// A zero period would spin forever, and now with a callback inside it.
+		if (m_uiTargetElapsedTicks == 0)
+			return 0;
+
+		uint32_t uiUpdates = 0;
+		while (m_uiLeftOverTicks >= m_uiTargetElapsedTicks)
+		{
+			m_uiElapsedTicks = m_uiTargetElapsedTicks;
+			m_uiTotalTicks += m_uiTargetElapsedTicks;
+			m_uiLeftOverTicks -= m_uiTargetElapsedTicks;
+			++m_uiFrameCount;
+			++uiUpdates;
+
+			Update();
+		}
+
+		return uiUpdates;
+	}
+
 	// Derived timing data uses a canonical tick format.
 	uint64_t m_uiElapsedTicks = 0;
 	uint64_t m_uiTotalTicks = 0;

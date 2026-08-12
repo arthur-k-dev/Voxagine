@@ -42,6 +42,7 @@ namespace
 		if (token == "right") return SDL_SCANCODE_RIGHT;
 		if (token == "confirm") return SDL_SCANCODE_RETURN;
 		if (token == "back") return SDL_SCANCODE_ESCAPE;
+		if (token == "fire") return SDL_SCANCODE_P;
 		if (token == "wait") return SDL_SCANCODE_UNKNOWN;
 
 		fprintf(stderr, "[ui] unknown script token \'%s\'\n", token.c_str());
@@ -81,7 +82,11 @@ namespace
 	/* One token per interval, held for a single frame. Held for exactly one is
 	   what makes a press *and* a release happen: the menus bind some actions on
 	   press and others on release, and a key that stayed down would fire the
-	   repeat handlers instead. */
+	   repeat handlers instead.
+
+	   forward-on/forward-off are the exception and use Held deliberately:
+	   walking a player across a chunk boundary is what the streaming gates
+	   script, and that takes many frames of one key being down. */
 	SDL_Scancode StepUIScript()
 	{
 		if (!LaunchOptions::Get().HasUIScript())
@@ -101,6 +106,18 @@ namespace
 		const std::string& token = g_UIScript.Tokens[g_UIScript.uiStep++];
 
 		printf("[ui] step %zu: %s\n", g_UIScript.uiStep, token.c_str());
+
+		if (token == "forward-on")
+		{
+			g_UIScript.Held = SDL_SCANCODE_W;
+			return SDL_SCANCODE_UNKNOWN;
+		}
+
+		if (token == "forward-off")
+		{
+			g_UIScript.Held = SDL_SCANCODE_UNKNOWN;
+			return SDL_SCANCODE_UNKNOWN;
+		}
 
 		return ScancodeForToken(token);
 	}
@@ -274,16 +291,26 @@ Keyboard::State Keyboard::GetState() const
 	state.Y = pKeys[SDL_SCANCODE_Y];
 	state.Z = pKeys[SDL_SCANCODE_Z];
 
-	switch (scripted)
+	/* Two scancodes now: the one this interval stepped to, and whatever
+	   forward-on left held down across intervals. */
+	const auto applyScriptedScancode = [&state](SDL_Scancode scancode)
 	{
-	case SDL_SCANCODE_UP:     state.Up = true; break;
-	case SDL_SCANCODE_DOWN:   state.Down = true; break;
-	case SDL_SCANCODE_LEFT:   state.Left = true; break;
-	case SDL_SCANCODE_RIGHT:  state.Right = true; break;
-	case SDL_SCANCODE_RETURN: state.Enter = true; break;
-	case SDL_SCANCODE_ESCAPE: state.Escape = true; break;
-	default: break;
-	}
+		switch (scancode)
+		{
+		case SDL_SCANCODE_UP:     state.Up = true; break;
+		case SDL_SCANCODE_DOWN:   state.Down = true; break;
+		case SDL_SCANCODE_LEFT:   state.Left = true; break;
+		case SDL_SCANCODE_RIGHT:  state.Right = true; break;
+		case SDL_SCANCODE_RETURN: state.Enter = true; break;
+		case SDL_SCANCODE_ESCAPE: state.Escape = true; break;
+		case SDL_SCANCODE_P:      state.P = true; break;
+		case SDL_SCANCODE_W:      state.W = true; break;
+		default: break;
+		}
+	};
+
+	applyScriptedScancode(scripted);
+	applyScriptedScancode(g_UIScript.Held);
 
 	return state;
 }

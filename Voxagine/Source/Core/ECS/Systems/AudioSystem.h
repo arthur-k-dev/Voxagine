@@ -66,4 +66,7 @@ protected:
 
 	bool m_bBGMStopNext = false;
 	bool m_bBGMCrossFade = false;
+
+	// Sources added before Start must not autoplay; Start's own pass does it.
+	bool m_bStarted = false;
 };

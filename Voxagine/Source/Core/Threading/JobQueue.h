@@ -30,6 +30,12 @@ public:
 	template<typename T>
 	Job* Enqueue(std::function<T()> backgroundFunc, std::function<void(T)> callback);
 
+	/* Route work to one of the dedicated queues. Chunk decoding uses the single
+	   IO worker so that six large volumes cannot occupy every default worker at
+	   the exact moment the window moves and the game thread wants one. */
+	template<typename T>
+	Job* EnqueueWithType(std::function<T()> backgroundFunc, std::function<void(T)> callback, JobType jobType);
+
 	void Enqueue(Job* pJob);
 	void EnqueueBulk(const std::vector<Job*>& pJobs);
 
@@ -44,9 +50,6 @@ private:
 	void CancelPendingJobs();
 	bool TryEnqueueWithType(Job* pJob, JobType jobType);
 	void EnqueueWithType(Job* pJob, JobType jobType);
-
-	template<typename T>
-	Job* EnqueueWithType(std::function<T()> backgroundFunc, std::function<void(T)> callback, JobType jobType);
 };
 
 template<typename T>

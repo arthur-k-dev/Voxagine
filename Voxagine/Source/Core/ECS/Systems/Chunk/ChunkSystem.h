@@ -23,6 +23,13 @@ public:
 	UVector2 GetWorldSize() { return m_WorldSize; }
 	const std::unordered_map<uint32_t, Chunk*>& GetChunks() { return m_Chunks; }
 
+	/* Is any part of the resident window still moving? Today that is an
+	   outstanding update group and nothing else. Later phases of
+	   Docs/CHUNK_STREAMING_PLAN.md give it more to answer for - a far-field
+	   build in progress, renderers whose stamps have not been baked yet - so
+	   callers should ask this rather than the group list. */
+	bool IsStreaming() const { return !m_UpdateGroups.empty(); }
+
 	void SetCameraLoadOffset(Vector3 offset) { m_CameraLoadOffset = offset; }
 	Vector3 GetCameraLoadOffset() const { return m_CameraLoadOffset; }
 

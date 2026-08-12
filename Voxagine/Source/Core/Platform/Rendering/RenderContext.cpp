@@ -51,6 +51,7 @@
 
 #include "Core/ECS/Components/VoxRenderer.h"
 #include "Core/ECS/Systems/Rendering/ModelMeshStore.h"
+#include "Core/Platform/Rendering/ModelMeshUpload.h"
 #include "External/optick/optick.h"
 
 #include "Editor/imgui/Contexts/ImContext.h"
@@ -150,6 +151,17 @@ void RenderContext::WaitForGPU()
 	{
 		it.second->WaitForGPU();
 	}
+}
+
+void RenderContext::WaitForVoxelReaders()
+{
+	/* Retire only the engine that reads the voxel-side buffers, rather than
+	   every engine WaitForGPU drains. Everything that host-writes a buffer a
+	   previous VDirect submission may still be fetching from needs this and
+	   nothing wider. */
+	const auto iter = m_pCommandEngines.find("VDirect");
+	if (iter != m_pCommandEngines.end() && iter->second != nullptr)
+		iter->second->WaitForGPU();
 }
 
 void RenderContext::Submit(const RenderData& renderData)
@@ -363,18 +375,74 @@ void RenderContext::SyncModelMeshStore()
 	if (uiCurrentQuads == m_uiModelMeshUploadedQuads)
 		return;
 
-	/* 3 uint32_t words per quad (VoxelMesher.h) - the mapper's own element
-	   unit is one uint32_t, same granularity every other Mapper in this
-	   engine uses. Grown, never shrunk: ModelMeshStore never removes a quad
-	   once meshed. */
-	m_pModelMeshMapper->Resize(uiCurrentQuads * 3u, sizeof(uint32_t));
+	/* Which range to copy is decided by ModelMeshUpload::PlanUpload, which is
+	   pure and unit-tested against a simulated allocator - the whole of the
+	   defect this guards against was that arithmetic, not any Vulkan call. Its
+	   header carries the reasoning; the two rules are that a reallocation
+	   invalidates everything already uploaded, and that growth is geometric so
+	   reallocations stay rare. */
+	const uint32_t uiRequiredWords = uiCurrentQuads * ModelMeshUpload::k_uiWordsPerQuad;
+
+	const ModelMeshUpload::Plan plan = ModelMeshUpload::PlanUpload(
+		uiCurrentQuads, m_uiModelMeshUploadedQuads, m_uiModelMeshCapacityWords);
+
+	if (uiCurrentQuads < m_uiModelMeshUploadedQuads)
+	{
+		fprintf(stderr,
+			"[render] the model mesh store shrank (%u -> %u quads); re-uploading it whole\n",
+			m_uiModelMeshUploadedQuads, uiCurrentQuads);
+	}
+
+	if (plan.bReallocate)
+	{
+		if (m_uiModelMeshCapacityWords != 0)
+			WaitForGPU();
+
+		m_pModelMeshMapper->Resize(plan.uiNewCapacityWords, sizeof(uint32_t));
+		m_uiModelMeshCapacityWords = plan.uiNewCapacityWords;
+	}
+
+	/* Quad words are immutable once meshed, and an older command buffer cannot
+	   index into an appended range because its instance list was built against
+	   m_uiModelMeshUploadedQuads - but the allocation is shared, and
+	   HOST_COHERENT memory does not order a host write against a fetch already
+	   in flight. Retire that reader first. */
+	WaitForVoxelReaders();
 
 	std::memcpy(
-		m_pModelMeshMapper->GetData(),
-		store.GetQuads().data(),
-		static_cast<size_t>(uiCurrentQuads) * 3u * sizeof(uint32_t));
+		m_pModelMeshMapper->GetData() + plan.uiFirstWord,
+		store.GetQuads().data() + plan.uiFirstWord,
+		static_cast<size_t>(plan.uiWordCount) * sizeof(uint32_t));
 
 	m_uiModelMeshUploadedQuads = uiCurrentQuads;
+
+	/* VOXAGINE_MODEL_MESH_AUDIT=1: the whole uploaded range must equal the
+	   store. This is the check that would have caught the append-into-a-fresh-
+	   allocation bug above the moment it was written, and the failure it looks
+	   for is invisible in any single frame - a model that stopped being drawn
+	   looks like content, not like corruption.
+	 *
+	 * Env-gated because it reads the mapping back, and the mapping is device-
+	 * local host-visible, so every word is a PCIe read of VRAM. */
+	static const bool s_bAuditMeshStore = std::getenv("VOXAGINE_MODEL_MESH_AUDIT") != nullptr;
+
+	if (s_bAuditMeshStore)
+	{
+		const uint32_t* pUploaded = m_pModelMeshMapper->GetData();
+		const uint32_t* pSource = store.GetQuads().data();
+
+		for (uint32_t i = 0; i < uiRequiredWords; ++i)
+		{
+			if (pUploaded[i] == pSource[i])
+				continue;
+
+			fprintf(stderr,
+				"[mesh-audit] word %u of %u disagrees (uploaded 0x%08x, store 0x%08x) "
+				"- quad %u, so every model meshed below that is drawing garbage\n",
+				i, uiRequiredWords, pUploaded[i], pSource[i], i / 3u);
+			break;
+		}
+	}
 }
 
 void RenderContext::SortAABBs()
@@ -397,10 +465,21 @@ void RenderContext::EnableDebugLines(bool bEnabled)
 
 bool RenderContext::ResizeWorldBuffer()
 {
+	/* Called from the world load and unload paths, where the top world can be
+	   absent or half-constructed - a sprite-only menu world has no physics
+	   system at all. Every one of these was an unchecked dereference. */
 	Application* pApplication = m_pPlatform->GetApplication();
 	World* pWorld = pApplication->GetWorldManager().GetTopWorld();
+	if (pWorld == nullptr)
+		return false;
+
 	PhysicsSystem* pPhysics = pWorld->GetSystem<PhysicsSystem>();
+	if (pPhysics == nullptr)
+		return false;
+
 	VoxelGrid* pGrid = pPhysics->GetVoxelGrid();
+	if (pGrid == nullptr)
+		return false;
 
 	UVector3 uWorldSize;
 	pGrid->GetDimensions(
@@ -413,33 +492,45 @@ bool RenderContext::ResizeWorldBuffer()
 	bool bChanged =  m_pVoxelMapper->Resize(uWorldSize.x * uWorldSize.y * uWorldSize.z, sizeof(uint32_t));
 	m_pVoxelData = m_pVoxelMapper->GetData();
 
-	/* The brick grid describes this window, so it follows the same resize.
-	   Order matters: the grid drops its mirror pointers first, the mapper is
-	   then free to reallocate underneath it, and Flush repopulates. */
-	m_BrickGrid.Resize(uWorldSize);
-	m_pBrickMapper->Resize(m_BrickGrid.GetBrickCount(), sizeof(uint32_t));
-	m_BrickGrid.SetBuffers(m_pBrickMapper->GetData(), m_pBrickMapper->GetBackBufferData());
+	/* Same dimensions is the common case: every world load and every resume
+	   asks, and every world in this game has the same 3x3 window. Both callers
+	   answer a false return with ClearVoxels, which zeroes the mapping and calls
+	   ClearAll - so re-zeroing the five levels here and then flushing all
+	   10.8 M mirror cells is a full pyramid rebuild that is discarded a line
+	   later. The reallocating path is unchanged. */
+	const bool bGridChanged = m_BrickGrid.GetWorldSize() != uWorldSize;
 
-	/* Same order again for the coverage texture and its staging: the grid is
-	   holding pointers into a mapper that is about to be reallocated, so it
-	   drops them (in Resize, above), the mapper resizes, and Flush repopulates
-	   both mirrors. The texture's mip 0 is the pyramid's finest level, so its
-	   extent is that level's grid rather than the window's. */
-	if (m_BrickGrid.GetFineCellCount() > 0)
+	if (bGridChanged)
 	{
-		m_pPyramidStaging->Resize(m_BrickGrid.GetFineCellCount(), sizeof(uint32_t));
+		/* The brick grid describes this window, so it follows the same resize.
+		   Order matters: the grid drops its mirror pointers first, the mapper is
+		   then free to reallocate underneath it, and Flush repopulates. */
+		m_BrickGrid.Resize(uWorldSize);
+		m_pBrickMapper->Resize(m_BrickGrid.GetBrickCount(), sizeof(uint32_t));
+		m_BrickGrid.SetBuffers(m_pBrickMapper->GetData(), m_pBrickMapper->GetBackBufferData());
 
-		m_BrickGrid.SetDensityBuffers(
-			m_pPyramidStaging->GetData(),
-			m_pPyramidStaging->GetBackBufferData());
+		/* Same order again for the coverage texture and its staging: the grid is
+		   holding pointers into a mapper that is about to be reallocated, so it
+		   drops them (in Resize, above), the mapper resizes, and Flush repopulates
+		   both mirrors. The texture's mip 0 is the pyramid's finest level, so its
+		   extent is that level's grid rather than the window's. */
+		if (m_BrickGrid.GetFineCellCount() > 0)
+		{
+			m_pPyramidStaging->Resize(m_BrickGrid.GetFineCellCount(), sizeof(uint32_t));
 
-		m_pPyramidView->Resize(m_BrickGrid.GetFineGridSize());
+			m_BrickGrid.SetDensityBuffers(
+				m_pPyramidStaging->GetData(),
+				m_pPyramidStaging->GetBackBufferData());
+
+			m_pPyramidView->Resize(m_BrickGrid.GetFineGridSize());
+		}
+
+		m_BrickGrid.Flush();
 	}
 
-	m_BrickGrid.Flush();
-
 	/* Whatever the bakers stamped is gone. See GetVoxelGeneration. */
-	++m_uiVoxelGeneration;
+	if (bChanged || bGridChanged)
+		++m_uiVoxelGeneration;
 
 	return bChanged;
 }
@@ -1173,6 +1264,80 @@ bool RenderContext::Present()
 		   separately (SyncModelMeshStore) since it only needs to grow when a
 		   genuinely new model frame is first meshed, not every frame. */
 		{
+			/* Both indices in a ModelQuadInstance are consumed directly by the
+			   vertex shader with no bounds check available to it. One stale
+			   reference is an arbitrary transform applied to an arbitrary quad,
+			   which expands six vertices across the whole render target - and it
+			   presents as a frame the driver kills (CLAUDE.md, "the freeze is a
+			   GPU timeout") rather than as a validation error. Validate at the
+			   CPU/GPU boundary; drop only the corrupt references.
+
+			   This is a backstop and should not fire. A non-finite transform is
+			   caught and *repaired* where the entity is known, in
+			   RenderSystem::PostTick - because dropping an instance here makes
+			   a character silently vanish, which is worse than one drawn
+			   unrotated and much harder to trace to a NaN. Anything that
+			   reaches this test bypassed that guard, so the report says so.
+
+			   The finiteness test is a sum because a NaN in any component
+			   poisons it, and one comparison is cheaper than eleven. */
+			const uint32_t uiMeshQuads = ModelMeshStore::Get().GetTotalQuadCount();
+			std::vector<uint8_t> validInstances(m_ModelInstances.size(), 1u);
+
+			for (size_t i = 0; i < m_ModelInstances.size(); ++i)
+			{
+				const ModelInstanceData& instance = m_ModelInstances[i];
+				const float fFinite =
+					instance.Rotation.x + instance.Rotation.y + instance.Rotation.z + instance.Rotation.w +
+					instance.Scale.x + instance.Scale.y + instance.Scale.z +
+					instance.WorldOrigin.x + instance.WorldOrigin.y + instance.WorldOrigin.z;
+
+				validInstances[i] = std::isfinite(fFinite) ? 1u : 0u;
+			}
+
+			const size_t uiBeforeQuadRefs = m_ModelQuadInstances.size();
+			m_ModelQuadInstances.erase(
+				std::remove_if(m_ModelQuadInstances.begin(), m_ModelQuadInstances.end(),
+					[&](const ModelQuadInstance& ref)
+					{
+						return ref.InstanceIndex >= validInstances.size() ||
+							validInstances[ref.InstanceIndex] == 0u ||
+							ref.QuadIndex >= uiMeshQuads;
+					}),
+				m_ModelQuadInstances.end());
+
+			/* Once. Whatever gets past the submission guard gets past it every
+			   frame until it is fixed, and this is a per-frame path (rule R9).
+			   A model *is* missing from the image when this fires, so it says
+			   that rather than reporting a count and leaving the reader to
+			   wonder what the visible effect was. */
+			if (m_ModelQuadInstances.size() != uiBeforeQuadRefs && !m_bWarnedInvalidModelQuads)
+			{
+				fprintf(stderr,
+					"[render] dropped %zu model quad references that are not safe to "
+					"draw (%zu instances, %u stored quads) - a model is missing from "
+					"the image, and it bypassed RenderSystem's transform repair\n",
+					uiBeforeQuadRefs - m_ModelQuadInstances.size(),
+					m_ModelInstances.size(), uiMeshQuads);
+				m_bWarnedInvalidModelQuads = true;
+			}
+
+			/* Buffer::Allocate resets and reuses its upload page whenever the
+			   exact byte count changes, so a frame that changes the instance or
+			   quad count overwrites the allocation the preceding VDirect
+			   submission is still reading. Animation changes it. Frames of a
+			   stable size keep the normal pipelined path. */
+			const uint32_t uiNextInstanceBytes =
+				static_cast<uint32_t>(m_ModelInstances.size() * sizeof(ModelInstanceData));
+			const uint32_t uiNextQuadBytes =
+				static_cast<uint32_t>(m_ModelQuadInstances.size() * sizeof(ModelQuadInstance));
+
+			if (pModelInstanceBuffer->GetTotalSize() != uiNextInstanceBytes ||
+				pModelQuadInstanceBuffer->GetTotalSize() != uiNextQuadBytes)
+			{
+				WaitForVoxelReaders();
+			}
+
 			pModelInstanceBuffer->Clear();
 			pModelInstanceBuffer->AddStructuredData(
 				m_ModelInstances.data(), sizeof(ModelInstanceData), m_ModelInstances.size(), false);

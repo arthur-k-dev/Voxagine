@@ -5,6 +5,9 @@
 #include "Core/ECS/World.h"
 #include "External/optick/optick.h"
 
+#include <chrono>
+#include <cstdio>
+
 WorldManager::WorldManager(Application* pApp)
 {
 	m_pApplication = pApp;
@@ -34,6 +37,25 @@ void WorldManager::LoadWorld(World* pWorld)
 {
 	m_DeferredFuncs.push([this, pWorld]()
 	{
+		/* Permanent, and one line rather than a profiler event, because this is
+		   the single largest stall the game has and it happens off the frame
+		   loop where the frame profiler cannot see it. Docs/CHUNK_STREAMING_PLAN.md
+		   phase 4 is measured against these splits. */
+		const auto begin = std::chrono::steady_clock::now();
+		auto checkpoint = begin;
+		double fUnloadMs = 0.0;
+		double fDeleteMs = 0.0;
+
+		const auto split = [&checkpoint]()
+		{
+			const auto now = std::chrono::steady_clock::now();
+			const double fMs =
+				std::chrono::duration<double, std::milli>(now - checkpoint).count();
+			checkpoint = now;
+
+			return fMs;
+		};
+
 		if (!m_Worlds.empty())
 		{
 			World* pTopWorld = m_Worlds.back();
@@ -41,15 +63,27 @@ void WorldManager::LoadWorld(World* pWorld)
 			WorldPopped(pTopWorld);
 
 			pTopWorld->Unload();
+			fUnloadMs = split();
 
 			delete pTopWorld;
 			pTopWorld = nullptr;
 			m_Worlds.pop_back();
+			fDeleteMs = split();
 		}
 
 		m_Worlds.push_back(pWorld);
 		pWorld->Initialize();
+		const double fInitializeMs = split();
+
 		WorldLoaded(pWorld);
+		const double fLoadedMs = split();
+
+		fprintf(stderr,
+			"[world-switch] '%s': unload %.1f + delete %.1f + initialize %.1f + "
+			"loaded %.1f = %.1f ms\n",
+			pWorld->GetName().c_str(), fUnloadMs, fDeleteMs, fInitializeMs, fLoadedMs,
+			std::chrono::duration<double, std::milli>(
+				std::chrono::steady_clock::now() - begin).count());
 	});
 }
 

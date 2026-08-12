@@ -168,7 +168,9 @@ struct ParticleMapperData {
 
 struct TextureReadData
 {
-	~TextureReadData() { delete[] m_Data; }
+	/* Defined in TextureManager.cpp, next to the decoder that allocates
+	   m_Data - the free has to match stbi's allocator, not operator new[]. */
+	~TextureReadData();
 
 	uint32_t* m_Data = nullptr;
 	UVector2 m_Dimensions = UVector2(0, 0);
@@ -227,6 +229,11 @@ public:
 	virtual void DestroyShader(const ShaderReference* pTextureReference) = 0;
 
 	virtual void WaitForGPU();
+
+	/* Drain only the VDirect engine - the one that reads the voxel-side
+	   buffers. Host writes to a buffer a submission may still be fetching from
+	   need this; a full WaitForGPU is a much wider stall for the same effect. */
+	void WaitForVoxelReaders();
 
 	/* Submit data to the draw list */
 	virtual void Submit(const RenderData& renderData);
@@ -593,11 +600,17 @@ protected:
 
 	/* The shared greedy-mesh quad store (ModelMeshStore, VoxelMesher.h) mirrored
 	   to the GPU. Grows across a session as new model frames are first meshed,
-	   never shrinks - SyncModelMeshStore in Present resizes and re-uploads the
-	   whole thing only when ModelMeshStore's own count has grown since the last
-	   sync, which is rare after the first few seconds of a level. */
+	   never shrinks - SyncModelMeshStore in Present appends the new range only
+	   when ModelMeshStore's own count has grown since the last sync, which is
+	   rare after the first few seconds of a level.
+
+	   The capacity is tracked separately from the used length because the
+	   allocation is grown geometrically: Mapper::Resize destroys the VkBuffer
+	   in-flight submissions are reading from, so it has to be rare and drained,
+	   not once per newly meshed animation frame. */
 	Mapper* m_pModelMeshMapper = nullptr;
 	uint32_t m_uiModelMeshUploadedQuads = 0;
+	uint32_t m_uiModelMeshCapacityWords = 0;
 
 	VoxelModelPass* m_pVoxelModelPass = nullptr;
 
@@ -651,6 +664,9 @@ protected:
 	size_t m_uiPeakBindlessWorkingSet = 0;
 
 	bool m_bWarnedBindlessWorkingSet = false;
+
+	// Present drops non-finite model instances; said once, not once a frame.
+	bool m_bWarnedInvalidModelQuads = false;
 
 #if defined(EDITOR) || defined(_DEBUG)
 	static const int m_iSphereResolution = 30;

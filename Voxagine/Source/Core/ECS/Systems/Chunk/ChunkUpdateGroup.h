@@ -20,9 +20,17 @@ public:
 		/* The atomic publish: physics volumes, world offset, buffer swap and
 		   camera, together or not at all. */
 		US_COMMIT,
-		/* Deserializing incoming roots and refreshing moved ones. After the
-		   commit, so a static renderer's stamp lands against the offset it will
-		   actually be drawn at. Still unbounded - phase 3. */
+		/* Every non-static staged root of the whole incoming window enters the
+		   world here, in one frame. The gameplay contract (E3): two gameplay
+		   entities that reference each other are never half-present, so nothing
+		   downstream needs to poll for a link that has not arrived. Staging
+		   that has not finished by now finishes here first, under
+		   StreamingBudgets::EntityStaging. */
+		US_ADMITTING_GAMEPLAY,
+		/* The static art, a bounded number of roots per display frame
+		   (StreamingBudgets::EntityAdmission), plus the renderer refresh of
+		   chunks that only moved. After the commit, so a static renderer's stamp
+		   lands against the offset it will actually be drawn at. */
 		US_LOADING_ENTITIES,
 		/* Serializing each outgoing chunk's roots back out to JSON and
 		   destroying them, a bounded number of roots per display frame
@@ -101,6 +109,13 @@ public:
 	void AdvanceItemCursor() { ++m_uiItemCursor; }
 	void ResetItemCursor() { m_uiItemCursor = 0; }
 
+	/* Staging has its own cursor because it is the one budgeted loop that runs
+	   *across* states - opportunistically during US_RENDERING, then to
+	   completion in US_ADMITTING_GAMEPLAY - so it cannot borrow the item cursor
+	   without breaking that cursor's rule that one state owns it at a time. */
+	size_t GetStagingCursor() const { return m_uiStagingCursor; }
+	void AdvanceStagingCursor() { ++m_uiStagingCursor; }
+
 	inline bool operator()(const ChunkUpdateGroup& group) const { return group.m_uiUpdateId == m_uiUpdateId; }
 
 private:
@@ -111,6 +126,7 @@ private:
 	bool m_bRendering = false;
 	bool m_bCommitted = false;
 	size_t m_uiItemCursor = 0;
+	size_t m_uiStagingCursor = 0;
 
 	std::chrono::steady_clock::time_point m_Created = std::chrono::steady_clock::now();
 	uint32_t m_uiAdvances = 0;

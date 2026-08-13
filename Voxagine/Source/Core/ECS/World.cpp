@@ -5,6 +5,7 @@
 #include "Core/ECS/Systems/Physics/PhysicsSystem.h"
 #include "Core/ECS/Systems/Rendering/RenderSystem.h"
 #include "Core/ECS/Systems/Chunk/ChunkSystem.h"
+#include "Core/ECS/Systems/Chunk/StreamingCounters.h"
 #include "Core/ECS/Systems/ScriptSystem.h"
 #include "Core/ECS/Entities/Camera.h"
 #include "Core/ECS/Components/VoxRenderer.h"
@@ -207,49 +208,100 @@ void World::PreTick()
 	GetApplication()->GetSerializer().ResolveWorldLinks(*this);
 }
 
+bool World::IsGameplayHeld() const
+{
+	return m_pChunkSystem != nullptr && !m_pChunkSystem->IsInitialWindowReady();
+}
+
 void World::Tick(float fDeltaTime)
 {
+	/* R1. The chunk system still advances - it is what ends the hold - and the
+	   render system still runs, so the frame presents whatever the window holds
+	   rather than freezing on the last one. Everything else waits. */
+	const bool bHeld = IsGameplayHeld();
+
+	if (bHeld)
+		StreamingCounters::Get().GameplayTicksHeld.fetch_add(1, std::memory_order_relaxed);
+
 	/* Tick the entities and systems */
-	for (Entity* pEntity : m_Entities)
-		pEntity->Tick(fDeltaTime);
+	if (!bHeld)
+	{
+		for (Entity* pEntity : m_Entities)
+			pEntity->Tick(fDeltaTime);
+	}
 
 	for (ComponentSystem* pSystem : m_Systems)
-		pSystem->Tick(fDeltaTime);
+	{
+		if (bHeld && pSystem != static_cast<ComponentSystem*>(m_pChunkSystem))
+			continue;
 
-	m_pRenderSystem->Tick(fDeltaTime);
+		pSystem->Tick(fDeltaTime);
+	}
+
+	/* Null for a world built with no render context - the streaming harness.
+	   Same shape as RegisterComponent's guard. */
+	if (m_pRenderSystem != nullptr)
+		m_pRenderSystem->Tick(fDeltaTime);
 }
 
 void World::FixedTick(const GameTimer& fixedTimer)
 {
-	for (Entity* pEntity : m_Entities)
-		pEntity->FixedTick(fixedTimer);
+	const bool bHeld = IsGameplayHeld();
+
+	if (!bHeld)
+	{
+		for (Entity* pEntity : m_Entities)
+			pEntity->FixedTick(fixedTimer);
+	}
 
 	for (ComponentSystem* pSystem : m_Systems)
-		pSystem->FixedTick(fixedTimer);
+	{
+		if (bHeld && pSystem != static_cast<ComponentSystem*>(m_pChunkSystem))
+			continue;
 
-	m_pRenderSystem->FixedTick(fixedTimer);
+		pSystem->FixedTick(fixedTimer);
+	}
+
+	if (m_pRenderSystem != nullptr)
+		m_pRenderSystem->FixedTick(fixedTimer);
 }
 
 void World::PostFixedTick(const GameTimer& fixedTimer)
 {
-	for (Entity* pEntity : m_Entities)
-		pEntity->PostFixedTick(fixedTimer);
+	const bool bHeld = IsGameplayHeld();
 
-	for (ComponentSystem* pSystem : m_Systems)
-		pSystem->PostFixedTick(fixedTimer);
+	if (!bHeld)
+	{
+		for (Entity* pEntity : m_Entities)
+			pEntity->PostFixedTick(fixedTimer);
 
-	m_pRenderSystem->PostFixedTick(fixedTimer);
+		for (ComponentSystem* pSystem : m_Systems)
+			pSystem->PostFixedTick(fixedTimer);
+	}
+
+	if (m_pRenderSystem != nullptr)
+		m_pRenderSystem->PostFixedTick(fixedTimer);
 }
 
 void World::PostTick(float fDeltaTime)
 {
-	for (Entity* pEntity : m_Entities)
-		pEntity->PostTick(fDeltaTime);
+	const bool bHeld = IsGameplayHeld();
 
-	for (ComponentSystem* pSystem : m_Systems)
-		pSystem->PostTick(fDeltaTime);
+	if (!bHeld)
+	{
+		for (Entity* pEntity : m_Entities)
+			pEntity->PostTick(fDeltaTime);
 
-	m_pRenderSystem->PostTick(fDeltaTime);
+		for (ComponentSystem* pSystem : m_Systems)
+			pSystem->PostTick(fDeltaTime);
+	}
+	else if (m_pChunkSystem != nullptr)
+	{
+		m_pChunkSystem->PostTick(fDeltaTime);
+	}
+
+	if (m_pRenderSystem != nullptr)
+		m_pRenderSystem->PostTick(fDeltaTime);
 }
 
 void World::OnDrawGizmos(float fDeltaTime)
@@ -262,7 +314,8 @@ void World::OnDrawGizmos(float fDeltaTime)
 	for (ComponentSystem* pSystem : m_Systems)
 		pSystem->OnDrawGizmos(fDeltaTime);
 
-	m_pRenderSystem->OnDrawGizmos(fDeltaTime);
+	if (m_pRenderSystem != nullptr)
+		m_pRenderSystem->OnDrawGizmos(fDeltaTime);
 #endif
 }
 
@@ -270,7 +323,8 @@ void World::Render(const GameTimer& fixedTimer)
 {
 	OPTICK_CATEGORY("Rendering", Optick::Category::Rendering);
 	OPTICK_EVENT();
-	m_pRenderSystem->Render(fixedTimer);
+	if (m_pRenderSystem != nullptr)
+		m_pRenderSystem->Render(fixedTimer);
 }
 
 void World::RegisterComponent(Component* pComponent)
@@ -655,6 +709,15 @@ void World::DeleteEntityFromLists(Entity * pEntity)
 	   World::GetRenderContext made in phase 1. */
 	if (m_pCameraEntity == pEntity)
 		m_pCameraEntity = nullptr;
+
+	/* M8, and the same move one paragraph larger: every *reflected* Entity*
+	   pointing at this entity is nulled here, because nothing else knows those
+	   pointers exist. Chunk streaming makes it routine - the two ends of a
+	   cross-chunk reference are in different chunks and one of them leaves
+	   first - and the reader that bites is the serializer itself, which
+	   dereferences an Entity* property to write its id when the *holder's*
+	   chunk unloads in turn. See World::EntityLinkRecord. */
+	GetApplication()->GetSerializer().ClearEntityLinks(*this, pEntity);
 
 	EntityRemoved(pEntity);
 }

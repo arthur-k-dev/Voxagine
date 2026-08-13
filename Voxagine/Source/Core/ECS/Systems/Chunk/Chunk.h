@@ -90,7 +90,45 @@ public:
 	void SetGroundPlane(const std::string& texturePath);
 	void UpdateGroundPlane();
 
+	/* The unbounded form: stage every root and admit every one of them, now.
+	   ChunkSystem::Start's synchronous initial window is the only caller left -
+	   the state machine goes through the three budgeted halves below. */
 	void LoadEntities();
+
+	/* --- phase 3: staged construction, then admission ------------------------
+	   Deserializing a chunk's roots and putting them in the world are two
+	   different questions and only the second one is observable. Construction
+	   happens *detached* - the entities exist, their components exist, and
+	   nothing in the world has been told - so it can run before the window
+	   commits and be spread across as many frames as it needs. Admission is
+	   then a pointer push per root, which is what makes the gameplay half of it
+	   affordable to do atomically (see AdmitStagedGameplay). */
+
+	/* Construct a bounded number of *roots*, whole, into m_StagedRoots. True
+	   when every root of this chunk is staged.
+
+	   A root is the unit for the same reason it is in PrepareUnloadBatch: the
+	   largest root hierarchy in any shipped level is 68 nodes, so bounding
+	   below one buys tens of microseconds and costs a resumable stack holding a
+	   half-built entity tree across frames. The experiment's
+	   ValueToEntityShallow + explicit LoadDeserializationFrame stack is
+	   deliberately not re-derived. */
+	bool StageEntityBatch(StreamingBudget::Scope& budget);
+
+	/* Admit every staged *non-static* root, in one call. This is the gameplay
+	   contract (CHUNK_STREAMING_PLAN.md E3): a gameplay entity never observes a
+	   world where half of the incoming gameplay roots exist, so cross-links
+	   between them are never transiently null and no manager needs to poll.
+	   Returns how many were admitted. */
+	uint32_t AdmitStagedGameplay();
+
+	/* Admit the rest - the static art - a bounded number of roots at a time.
+	   True when this chunk has nothing staged left. */
+	bool AdmitStagedStatic(StreamingBudget::Scope& budget);
+
+	bool HasStagedRoots() const { return m_uiNextStagedRoot < m_StagedRoots.size(); }
+	size_t StagedRootCount() const { return m_StagedRoots.size(); }
+
 	void UpdateEntities();
 
 	/* Encodes and decodes this chunk's voxels in place and reports how many
@@ -110,6 +148,15 @@ private:
 	static inline bool SlotEqual(uint16_t uiSlot, uint16_t uiEncoded);
 
 	void UpdateRenderer(Entity* pEntity, bool bFirstLoad);
+
+	/* One staged root into the world, with the persistent/static/already-present
+	   arbitration LoadEntities used to do inline. Consumes the pointer: the slot
+	   is nulled, so nothing can admit or delete a root twice. */
+	void AdmitStagedRoot(Entity*& pRoot);
+
+	/* Non-static first, stable, once per staging pass. The order is what makes
+	   AdmitStagedGameplay a prefix of m_StagedRoots rather than a scan. */
+	void OrderStagedRoots();
 
 	/* One root, whole: serialize it into m_RootEntities and destroy it if this
 	   chunk owns its deletion. */
@@ -148,6 +195,21 @@ private:
 
 	/* Ids, not pointers - see PrepareUnloadBatch. */
 	std::vector<uint64_t> m_SerializedUnloadIds;
+
+	/* --- resumable load state (phase 3) --------------------------------------
+	   These *are* raw Entity*s held across frames, which rule R4 says needs a
+	   stated defense. It is ownership: a staged root is not in the world, so
+	   nothing but this chunk knows it exists and nothing but this chunk can
+	   destroy it. That is the whole difference from ledger E1, where the
+	   pointers named entities gameplay was free to delete. The two ways out are
+	   admission (which hands ownership to the world and nulls the slot) and
+	   ResetStreamingState/~Chunk (which delete them). */
+	std::vector<Entity*> m_StagedRoots;
+	size_t m_uiNextStagedRoot = 0;
+	size_t m_uiNextRootToStage = 0;
+	size_t m_uiStagedGameplayCount = 0;
+	bool m_bStagingPrepared = false;
+	bool m_bStagedRootsOrdered = false;
 
 	TextureReadData* m_pTextureReadData;
 	Document m_CopyDoc;

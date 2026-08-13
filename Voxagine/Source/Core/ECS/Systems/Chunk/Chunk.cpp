@@ -52,6 +52,15 @@ Chunk::Chunk(Application* pApp, World* pWorld, UVector2 chunkIndex /*= Vector2(0
 
 Chunk::~Chunk()
 {
+	/* Staged roots are this chunk's own - nothing in the world knows they
+	   exist - so a chunk that dies mid-load is the one place they can be
+	   leaked. A world unload does exactly that. */
+	for (Entity* pRoot : m_StagedRoots)
+	{
+		if (pRoot != nullptr)
+			DeleteEntity(pRoot);
+	}
+
 	delete m_pTextureReadData;
 }
 
@@ -359,8 +368,32 @@ void Chunk::ResetStreamingState()
 	/* Nothing in flight. Deliberately an early return rather than an
 	   unconditional wipe: a chunk that finished unloading holds its whole volume
 	   in m_pEncodedVoxelData, and clearing that here would delete the level. */
-	if (!m_bUnloadPrepared && !m_bEncodePrepared)
+	if (!m_bUnloadPrepared && !m_bEncodePrepared && !m_bStagingPrepared)
 		return;
+
+	if (m_bStagingPrepared)
+	{
+		/* Roots constructed but never admitted. They are this chunk's to delete
+		   precisely because nothing was ever told about them - the same
+		   ownership argument the header makes for holding the pointers at all.
+		   m_RootEntities is untouched, so the next attempt re-stages from the
+		   same JSON. */
+		for (Entity* pRoot : m_StagedRoots)
+		{
+			if (pRoot != nullptr)
+				DeleteEntity(pRoot);
+		}
+
+		StreamingCounters::Get().CancelledStagings.fetch_add(1, std::memory_order_relaxed);
+	}
+
+	m_StagedRoots.clear();
+	m_StagedRoots.shrink_to_fit();
+	m_uiNextStagedRoot = 0;
+	m_uiNextRootToStage = 0;
+	m_uiStagedGameplayCount = 0;
+	m_bStagedRootsOrdered = false;
+	m_bStagingPrepared = false;
 
 	if (m_bEncodePrepared)
 	{
@@ -391,6 +424,9 @@ void Chunk::ResetStreamingState()
 	assert(!m_bEncodePrepared && !m_bUnloadPrepared && !m_bIsUnloading &&
 		m_uiEncodeCursor == 0 && m_uiEncodeOccupied == 0 &&
 		m_SerializedUnloadIds.empty() &&
+		!m_bStagingPrepared && !m_bStagedRootsOrdered && m_StagedRoots.empty() &&
+		m_uiNextStagedRoot == 0 && m_uiNextRootToStage == 0 &&
+		m_uiStagedGameplayCount == 0 &&
 		"Chunk::ResetStreamingState left streaming state behind");
 }
 
@@ -516,64 +552,250 @@ void Chunk::UpdateRenderer(Entity* pEntity, bool bFirstLoad)
 void Chunk::LoadEntities()
 {
 	OPTICK_EVENT();
-	for (SizeType i = 0; i < m_RootEntities.size(); i++)
+
+	/* The unbounded form. Same two halves the state machine runs, so there is
+	   one description of what loading a chunk means rather than two that drift
+	   apart on the persistent/static arbitration - which is exactly how the two
+	   copies of the destruction tick loop diverged before Tests/ was unified. */
+	StreamingBudget unbounded = StreamingBudget::Unbounded();
+	StreamingBudget::Scope scope(unbounded);
+
+	while (!StageEntityBatch(scope))
 	{
-		Entity* pEntity = m_pJsonSerializer->ValueToEntity(m_RootEntities[i], *m_pWorld);
+	}
 
-		if (!pEntity) continue;
+	AdmitStagedGameplay();
 
-		//Don't spawn a persistent entity after the first load
-		if (pEntity->IsPersistent() && !m_bFirstLoad)
+	while (!AdmitStagedStatic(scope))
+	{
+	}
+}
+
+bool Chunk::StageEntityBatch(StreamingBudget::Scope& budget)
+{
+	OPTICK_EVENT();
+
+	if (!m_bStagingPrepared)
+	{
+		m_bStagingPrepared = true;
+		m_uiNextRootToStage = 0;
+		m_uiNextStagedRoot = 0;
+		m_uiStagedGameplayCount = 0;
+		m_bStagedRootsOrdered = false;
+		m_StagedRoots.reserve(m_RootEntities.size());
+	}
+
+	const bool bProfiling = FrameProfiler::Get().IsEnabled();
+	const std::chrono::steady_clock::time_point start =
+		bProfiling ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
+
+	uint32_t uiStaged = 0;
+
+	while (m_uiNextRootToStage < m_RootEntities.size())
+	{
+		/* Whole, recursively, inside this slice - see the header. Nothing is
+		   told about it: the entity and its components exist and the world's
+		   lists are untouched, so no system has seen it, no Awake has run and
+		   no renderer has been stamped. That is what "detached" buys, and it is
+		   why this may run before the window commits. */
+		const std::chrono::steady_clock::time_point rootStart =
+			bProfiling ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
+
+		Entity* pEntity = m_pJsonSerializer->ValueToEntity(
+			m_RootEntities[m_uiNextRootToStage], *m_pWorld);
+
+		/* Per *root*, because the budget cannot bound anything smaller and this
+		   is therefore the granularity of the worst case. A root that pulls a
+		   model or a texture in through the resource stack costs a GPU round
+		   trip (CLAUDE.md, "Chunk loading stalls the frame"), which is orders of
+		   above what the reflection walk costs - so this is the number that says
+		   whether a slide's staging cost is deserialization or resource I/O. */
+		if (bProfiling)
 		{
-			if (!pEntity->IsStatic())
-			{
-				Entity* pFoundEntity = m_pWorld->FindEntity(pEntity->GetId());
-				if (pFoundEntity != nullptr)
-					UpdateRenderer(pFoundEntity, true);
-			}
-			continue;
+			FrameProfiler::Get().Report("CPU Chunk StageRoot",
+				std::chrono::duration<double, std::milli>(
+					std::chrono::steady_clock::now() - rootStart).count());
 		}
 
-		if (pEntity->IsStatic())
+		++m_uiNextRootToStage;
+		++uiStaged;
+
+		/* An unknown EntityType, or a root the serializer refused. Skipped and
+		   counted rather than crashed on: streamed content is data (T7). */
+		if (pEntity == nullptr)
 		{
-			Entity* pFoundEntity = m_pWorld->FindEntityAll(pEntity->GetId());
-			if (pFoundEntity == nullptr)
-			{
-				m_pJsonSerializer->AddRootEntityToWorld(*m_pWorld, pEntity);
-			}
-			else
-			{
-				UpdateRenderer(pFoundEntity, m_bFirstLoad);
-				DeleteEntity(pEntity);
-				continue;
-			}
+			StreamingCounters::Get().StagedRootsRejected.fetch_add(1, std::memory_order_relaxed);
 		}
 		else
 		{
-			m_pJsonSerializer->AddRootEntityToWorld(*m_pWorld, pEntity);
-			UpdateRenderer(pEntity, true);
+			m_StagedRoots.push_back(pEntity);
 		}
 
-		if (!m_bFirstLoad)
+		budget.Consume();
+
+		if (budget.Exhausted())
+			break;
+	}
+
+	if (bProfiling && uiStaged > 0)
+	{
+		FrameProfiler::Get().Report("CPU Chunk StageEntities",
+			std::chrono::duration<double, std::milli>(
+				std::chrono::steady_clock::now() - start).count());
+	}
+
+	/* Only a *budgeted* slice says anything about the budget - see
+	   Scope::IsUnbounded. The high-water mark of staged roots is recorded
+	   either way, because that one is about how much this chunk is holding
+	   rather than about how it was sliced. */
+	if (!budget.IsUnbounded())
+		StreamingCounters::RaiseMax(StreamingCounters::Get().MaxRootsPerStagingSlice, uiStaged);
+
+	StreamingCounters::RaiseMax(StreamingCounters::Get().MaxStagedRoots, m_StagedRoots.size());
+
+	return m_uiNextRootToStage >= m_RootEntities.size();
+}
+
+void Chunk::OrderStagedRoots()
+{
+	if (m_bStagedRootsOrdered)
+		return;
+
+	/* Stable, so a level's own order still decides ties and a replay is
+	   reproducible. Only valid before anything has been admitted, which the
+	   caller guarantees by ordering on the first admission call. */
+	const auto gameplayEnd = std::stable_partition(
+		m_StagedRoots.begin(), m_StagedRoots.end(),
+		[](Entity* pEntity) { return pEntity != nullptr && !pEntity->IsStatic(); });
+
+	m_uiStagedGameplayCount =
+		static_cast<size_t>(std::distance(m_StagedRoots.begin(), gameplayEnd));
+
+	m_bStagedRootsOrdered = true;
+}
+
+uint32_t Chunk::AdmitStagedGameplay()
+{
+	OrderStagedRoots();
+
+	uint32_t uiAdmitted = 0;
+
+	while (m_uiNextStagedRoot < m_uiStagedGameplayCount)
+	{
+		AdmitStagedRoot(m_StagedRoots[m_uiNextStagedRoot++]);
+		++uiAdmitted;
+	}
+
+	return uiAdmitted;
+}
+
+bool Chunk::AdmitStagedStatic(StreamingBudget::Scope& budget)
+{
+	OrderStagedRoots();
+
+	uint32_t uiAdmitted = 0;
+
+	while (m_uiNextStagedRoot < m_StagedRoots.size())
+	{
+		AdmitStagedRoot(m_StagedRoots[m_uiNextStagedRoot++]);
+		++uiAdmitted;
+
+		budget.Consume();
+
+		if (budget.Exhausted())
+			break;
+	}
+
+	if (!budget.IsUnbounded())
+		StreamingCounters::RaiseMax(StreamingCounters::Get().MaxRootsPerAdmissionSlice, uiAdmitted);
+
+	if (m_uiNextStagedRoot < m_StagedRoots.size())
+		return false;
+
+	m_StagedRoots.clear();
+	m_StagedRoots.shrink_to_fit();
+	m_uiNextStagedRoot = 0;
+	m_uiNextRootToStage = 0;
+	m_uiStagedGameplayCount = 0;
+	m_bStagedRootsOrdered = false;
+	m_bStagingPrepared = false;
+
+	return true;
+}
+
+void Chunk::AdmitStagedRoot(Entity*& pRoot)
+{
+	Entity* pEntity = pRoot;
+
+	/* Consumed either way. Every branch below either hands the root to the
+	   world or deletes it, so leaving the slot set is the one way a staged root
+	   gets admitted or freed twice. */
+	pRoot = nullptr;
+
+	if (pEntity == nullptr)
+		return;
+
+	//Don't spawn a persistent entity after the first load
+	if (pEntity->IsPersistent() && !m_bFirstLoad)
+	{
+		if (!pEntity->IsStatic())
 		{
-			auto updateInstanceLoaded = [this](Entity* pEntity, const auto& updateInstanceLoadedRef) -> void
-			{
-				for (Component* pComp : pEntity->GetAddedComponents())
-				{
-					if (pComp->get_type() == rttr::type::get<VoxRenderer>())
-					{
-						VoxRenderer* pRenderer = static_cast<VoxRenderer*>(pComp);
-						pRenderer->SetChunkInstanceLoaded(true);
-						break;
-					}
-				}
-
-				for (Entity* pChild : pEntity->GetChildren())
-					updateInstanceLoadedRef(pChild, updateInstanceLoadedRef);
-			};
-
-			updateInstanceLoaded(pEntity, updateInstanceLoaded);
+			Entity* pFoundEntity = m_pWorld->FindEntity(pEntity->GetId());
+			if (pFoundEntity != nullptr)
+				UpdateRenderer(pFoundEntity, true);
 		}
+
+		/* The staged copy is not the one in the world, and nothing else holds
+		   it. Master constructed and abandoned it here, once per persistent root
+		   per chunk load. */
+		DeleteEntity(pEntity);
+		return;
+	}
+
+	if (pEntity->IsStatic())
+	{
+		Entity* pFoundEntity = m_pWorld->FindEntityAll(pEntity->GetId());
+		if (pFoundEntity == nullptr)
+		{
+			m_pJsonSerializer->AddRootEntityToWorld(*m_pWorld, pEntity);
+		}
+		else
+		{
+			UpdateRenderer(pFoundEntity, m_bFirstLoad);
+			DeleteEntity(pEntity);
+			return;
+		}
+	}
+	else
+	{
+		m_pJsonSerializer->AddRootEntityToWorld(*m_pWorld, pEntity);
+		UpdateRenderer(pEntity, true);
+	}
+
+	if (!m_bFirstLoad)
+	{
+		/* M7. The decoded voxels this chunk came back with are what it looked
+		   like when it left, damage included; telling every restored renderer
+		   so is what stops the pristine model being stamped over them. It also
+		   clears the update request deserialization itself produced - see the
+		   phase 2 notes. */
+		auto updateInstanceLoaded = [](Entity* pCurrent, const auto& updateInstanceLoadedRef) -> void
+		{
+			for (Component* pComp : pCurrent->GetAddedComponents())
+			{
+				if (pComp->get_type() == rttr::type::get<VoxRenderer>())
+				{
+					VoxRenderer* pRenderer = static_cast<VoxRenderer*>(pComp);
+					pRenderer->SetChunkInstanceLoaded(true);
+					break;
+				}
+			}
+
+			for (Entity* pChild : pCurrent->GetChildren())
+				updateInstanceLoadedRef(pChild, updateInstanceLoadedRef);
+		};
+
+		updateInstanceLoaded(pEntity, updateInstanceLoaded);
 	}
 }
 

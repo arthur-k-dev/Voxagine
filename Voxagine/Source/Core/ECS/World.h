@@ -41,10 +41,9 @@ public:
 
 	   bCreateRenderSystem is false only for a world with no render context -
 	   the streaming harness (CHUNK_STREAMING_PLAN.md T1). Such a world can be
-	   Initialize()d, its systems Start()ed and its ChunkSystem driven, but it
-	   must not be run through World::Tick and friends: those dereference the
-	   render system unconditionally and deliberately, because every world that
-	   is actually ticked has one. */
+	   Initialize()d, its systems Start()ed, its ChunkSystem driven, and - as of
+	   phase 3 - run through Tick/FixedTick, which is what makes R1's gameplay
+	   hold expressible as a check rather than only as a comment. */
 	void PreLoad(bool bCreateRenderSystem = true);
 	virtual void Unload();
 
@@ -54,6 +53,30 @@ public:
 
 	/* Processes the add and remove queues for entities and components */
 	virtual void PreTick();
+
+	/* R1 of Docs/CHUNK_STREAMING_PLAN.md: gameplay never ticks against a
+	   missing initial window. True while this world's ChunkSystem has not yet
+	   published its first resident window and admitted its roots - during which
+	   Tick and FixedTick advance the chunk system (and the renderer, so the
+	   frame still presents) and nothing else.
+
+	   This is the single rule that replaces the experiment's Bootstrap entity
+	   metadata, its Player::SetPersistent-in-constructor and its PhysicsBody
+	   non-resident-ground freeze (ledger E7, E8): all three were gameplay
+	   defending itself against a world that had not arrived. PreTick is
+	   deliberately *not* held - entity admission and link resolution are how the
+	   world arrives. */
+	bool IsGameplayHeld() const;
+
+	/* How many PreTicks a serialized entity reference may wait for both of its
+	   ends to be in the world before it is given up on and counted
+	   (StreamingCounters::WorldLinksAbandoned). Four seconds at 60 Hz, against a
+	   worst case of roughly sixty frames: three incoming chunks' static art at
+	   sixteen roots a frame, plus the unload states behind it. Generous on
+	   purpose - the cost of a too-small number is a link that silently never
+	   forms, and the cost of a too-large one is a few pointer comparisons a
+	   frame on a level that references something it no longer contains. */
+	static constexpr uint32_t k_uiMaxWorldLinkRetries = 240;
 
 	/* Processes Start and Tick functions on entities, components and systems */
 	virtual void Tick(float fDeltaTime);
@@ -192,10 +215,65 @@ private:
 	 */
 	struct WorldConnectionInformation
 	{
-		rttr::instance rInstance;
-		rttr::property rProperty;
+		/* **The source is an identity, not a pointer, and that is M3.** This
+		   used to hold a raw `rttr::instance` of the entity or component being
+		   deserialized, and ResolveWorldLinks dereferenced it a frame or more
+		   later to ask two questions: which entity owns you, and what type are
+		   you. Both are answerable without holding the object - and holding it
+		   was a use-after-free waiting for its case, which chunk streaming
+		   supplies three of: a staged root deleted because the entity is already
+		   in the world, a persistent duplicate, and a chunk unloaded between
+		   deserialization and the next PreTick. Rule R4.
+
+		   Resolving by identity also fixes a defect nobody had named: where a
+		   static root is deserialized again and discarded because the world
+		   already has it, the link now lands on the *live* entity rather than on
+		   the copy that is about to be deleted. */
+		uint64_t uiSourceEntityId = 0;
+
+		/* Invalid/nullptr_t means the source is the entity itself; otherwise the
+		   component of this type on it. */
+		rttr::type rSourceComponentType = rttr::type::get<nullptr_t>();
+
+		/* rttr::property has no default constructor; an invalid one is what
+		   get_property returns for a name a type does not have, and it is the
+		   only way to spell "not set yet" here. */
+		rttr::property rProperty = rttr::type::get<nullptr_t>().get_property("");
 		rttr::type rType = rttr::type::get<nullptr_t>();
 		int64_t iEntityId = -1;
+		int iIndex = -1;
+
+		/* K6: a link whose target has not been admitted yet is retried, not
+		   dropped. Streaming means the two ends of a cross-chunk reference
+		   arrive in different frames, and dropping the first one is exactly the
+		   transient null the experiment patched per manager (ledger E3). */
+		uint32_t uiAttempts = 0;
+	};
+
+	/* A link that *has* been made, remembered so that destroying the target can
+	   null the pointer to it. M8.
+
+	   Making a link writes a raw `Entity*` into a reflected property and nothing
+	   afterwards knows it is there - so when chunk streaming destroys the target
+	   (which is the ordinary case: the two ends of a cross-chunk reference are
+	   in different chunks and one of them leaves first), every holder is left
+	   with a dangling pointer. It is a use-after-free the moment anything reads
+	   it, and the *serializer* reads it: `VariantToValue` dereferences an
+	   `Entity*` property to write its id, so unloading the holder's chunk
+	   crashes. Found by ASan through
+	   Tests/Streaming/EntityStreamingChecks.cpp once StreamingProbeEntity gave
+	   the suite a reflected `Entity*` at all - no engine type has one, which is
+	   why nothing had ever caught it.
+
+	   Same shape as the main-camera fix above and as
+	   World::GetRenderContext: turn a dangling pointer into a state every
+	   reader can check for. */
+	struct EntityLinkRecord
+	{
+		uint64_t uiTargetId = 0;
+		uint64_t uiSourceEntityId = 0;
+		rttr::type rSourceComponentType = rttr::type::get<nullptr_t>();
+		rttr::property rProperty = rttr::type::get<nullptr_t>().get_property("");
 		int iIndex = -1;
 	};
 
@@ -211,6 +289,11 @@ private:
 	std::string m_GroundTexturePath = "";
 
 	std::vector<WorldConnectionInformation> m_vWorldConnections = {};
+
+	/* Grows by one per link actually made and shrinks when either end dies, so
+	   it is bounded by the number of live cross-entity references - tens, in
+	   every shipped level. */
+	std::vector<EntityLinkRecord> m_vEntityLinks = {};
 
 	void DeleteEntity(Entity* pEntity);
 };

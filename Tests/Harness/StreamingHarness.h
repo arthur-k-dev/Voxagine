@@ -113,8 +113,13 @@ public:
 class StreamingHarness
 {
 public:
-	/* Names a file under Tests/Fixtures, without the extension. */
-	explicit StreamingHarness(const std::string& sFixture);
+	/* Names a file under Tests/Fixtures, without the extension.
+
+	   bInitialize is false only for a check that needs to observe the world
+	   *before* its systems start - which is the one state in which R1's
+	   gameplay hold is live, because ChunkSystem::Start builds the initial
+	   window synchronously. Call Initialize() when the check is ready. */
+	explicit StreamingHarness(const std::string& sFixture, bool bInitialize = true);
 	~StreamingHarness();
 
 	World& GetWorld() { return *m_pWorld; }
@@ -127,6 +132,16 @@ public:
 
 	UVector2 ChunkSize() const { return m_ChunkSize; }
 	UVector3 WindowSize() const { return m_v3WindowSize; }
+
+	/* Starts the world's systems, which is where the initial 3x3 window is
+	   loaded. Called by the constructor unless it was told not to. */
+	void Initialize();
+
+	/* Drive World::Tick/FixedTick rather than the chunk system's directly, so
+	   that entities, gameplay systems and R1's hold are all in the loop. Off by
+	   default: most streaming checks are about the state machine and a world
+	   full of ticking entities only adds noise to them. */
+	void SetTickWorld(bool bTickWorld) { m_bTickWorld = bTickWorld; }
 
 	/* Where the camera is, which is the only input the chunk system has. */
 	void PlaceCamera(const Vector3& v3Position);
@@ -165,4 +180,6 @@ private:
 
 	UVector2 m_ChunkSize = UVector2(0, 0);
 	UVector3 m_v3WindowSize = UVector3(0, 0, 0);
+	bool m_bTickWorld = false;
+	bool m_bInitialized = false;
 };

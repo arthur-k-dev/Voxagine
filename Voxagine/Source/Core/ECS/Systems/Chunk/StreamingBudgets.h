@@ -92,6 +92,12 @@ public:
 
 		uint32_t Consumed() const { return m_uiConsumed; }
 
+		/* Whether this scope bounds anything at all. The unbounded scopes are
+		   the non-streaming callers - ChunkSystem::Start's synchronous initial
+		   window, the editor, an audit - and a slice counter that recorded them
+		   would report their whole pass as a budget violation. */
+		bool IsUnbounded() const { return m_Budget.IsUnbounded(); }
+
 	private:
 		const StreamingBudget& m_Budget;
 		std::chrono::steady_clock::time_point m_Start;
@@ -107,18 +113,44 @@ private:
    field by field, so a scenario's budgets are visible in one line. */
 struct StreamingBudgets
 {
-	/* Entity work after the window commits: deserializing an incoming chunk's
-	   roots and admitting them, and refreshing the renderers of chunks that only
-	   moved.
+	/* Constructing an incoming chunk's roots, detached from the world, in units
+	   of *roots*. Phase 3.
 
-	   **Unbounded, and that is the honest state of it.** Phase 1 moved this
-	   work to after the atomic commit and changed nothing else about it; it is
-	   still `Chunk::LoadEntities` in full, 41.6 ms of it per incoming chunk
-	   (phase 0's baseline). Phases 2 and 3 make it resumable, at which point
-	   this becomes a real number and `Tests/Baselines/perf.txt`'s
-	   nodes-per-slice counter ratchets down against it. Until then the counter
-	   records what master actually does. */
-	StreamingBudget EntityWork = StreamingBudget::Unbounded();
+	   This is where `Chunk::LoadEntities`'s 44 ms per chunk went. It runs
+	   *before* the commit as well as after it - the chunk render job owns the
+	   back buffer for its whole length and this touches no voxels - so on a
+	   settled machine most of a slide's deserialization is already paid for by
+	   the time the window publishes.
+
+	   A root is the unit for the same reason UnloadSerialization uses one: the
+	   largest root hierarchy in any shipped level is 68 nodes. */
+	StreamingBudget EntityStaging = StreamingBudget::Milliseconds(2.0);
+
+	/* Putting staged *static* roots into the world, in units of roots. Phase 3.
+
+	   Admission itself is a pointer push per node; what this bounds is what
+	   admission sets off next PreTick - component registration, Awake, and the
+	   VoxelBaker stamp of every renderer that just arrived (17.6 ms a slide,
+	   RENDERING_PLAN 4c). Phase 5 bounds the stamp itself; until it does, this
+	   is the only thing keeping a chunk's worth of art out of one frame.
+
+	   **A count rather than a clock, and it is the one budget here that has to
+	   be.** Every other budgeted loop pays for its work as it does it, so a
+	   millisecond allowance measures exactly the thing being bounded. Admission
+	   pays nothing now and everything next PreTick, so a wall-clock budget would
+	   cheerfully admit a thousand roots in 20 microseconds and hand the
+	   following frame the stall this phase exists to remove. The unit is the
+	   cost driver.
+
+	   Non-static roots are deliberately *not* bounded by this - see
+	   Chunk::AdmitStagedGameplay and StreamingCounters::
+	   MaxGameplayRootsPerAdmission for why that is the contract rather than an
+	   oversight. */
+	StreamingBudget EntityAdmission = StreamingBudget::Units(16);
+
+	/* Refreshing the renderers of chunks that only moved, in units of *chunks*.
+	   One FindEntitiesInChunk pass each, 0.06 ms. */
+	StreamingBudget EntityRefresh = StreamingBudget::Units(1);
 
 	/* Serializing an outgoing chunk's roots out to JSON, in units of *roots*.
 	   Phase 2.

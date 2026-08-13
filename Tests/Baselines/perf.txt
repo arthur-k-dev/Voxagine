@@ -21,6 +21,18 @@
 # roots-per-unload-slice, encode-runs-per-slice, chunk-storage-reused/allocated
 # and chunk-instance-restamps. The first two are the benchmark's own unit
 # budgets, exactly, and are the assertion that a budgeted loop honours them.
+#
+# Re-recorded 2026-08-13 (chunk streaming phase 3). `roots-per-entity-pass` is
+# gone rather than ratcheted: the uninterrupted pass it measured no longer
+# exists. Loading a chunk's entities is two budgeted halves now and each has its
+# own exact number - roots-per-staging-slice is the staging budget (2) and
+# roots-per-admission-slice is what one static root per fixture chunk admits
+# against a budget of 2. `gameplay-roots-per-admission` is the odd one out and
+# the important one: it is deliberately unbounded and a *drop* in it is the
+# regression, because every non-static root of the incoming window entering
+# together is what makes a cross-chunk gameplay link impossible to observe
+# half-made (ledger E3). The link counters are all zero on a fixture with no
+# links; Tests/Streaming/EntityStreamingChecks.cpp carries those.
 
 Destruction/BurstIntoSolidRock/bursts                                 49.0000  work
 Destruction/BurstIntoSolidRock/integrity-seeds                    205898.0000  work
@@ -58,13 +70,20 @@ Streaming/WindowSlideAndReturn/chunk-storage-reused                    3.0000  w
 Streaming/WindowSlideAndReturn/commits                                 2.0000  work
 Streaming/WindowSlideAndReturn/committed-groups                        2.0000  work
 Streaming/WindowSlideAndReturn/encode-runs-per-slice                  64.0000  work
+Streaming/WindowSlideAndReturn/gameplay-roots-per-admission            6.0000  work
 Streaming/WindowSlideAndReturn/occupancy-disagreements                 0.0000  work
+Streaming/WindowSlideAndReturn/pending-world-links                     0.0000  work
 Streaming/WindowSlideAndReturn/publishes-outside-commit                0.0000  work
 Streaming/WindowSlideAndReturn/resident-chunks                         9.0000  work
-Streaming/WindowSlideAndReturn/roots-per-entity-pass                   9.0000  work
+Streaming/WindowSlideAndReturn/roots-per-admission-slice               1.0000  work
+Streaming/WindowSlideAndReturn/roots-per-staging-slice                 2.0000  work
 Streaming/WindowSlideAndReturn/roots-per-unload-slice                  2.0000  work
+Streaming/WindowSlideAndReturn/staged-roots-high-water                 3.0000  work
+Streaming/WindowSlideAndReturn/staged-roots-rejected                   0.0000  work
 Streaming/WindowSlideAndReturn/voxel-words-written                622592.0000  work
 Streaming/WindowSlideAndReturn/window-swaps                            2.0000  work
+Streaming/WindowSlideAndReturn/world-links-abandoned                   0.0000  work
+Streaming/WindowSlideAndReturn/world-links-source-lost                 0.0000  work
 VoxelEditing/ScatteredWrites/clear-writes                         400000.0000  work
 VoxelEditing/ScatteredWrites/dirty-bricks                          16384.0000  work
 VoxelEditing/ScatteredWrites/representation-disagreements              0.0000  work

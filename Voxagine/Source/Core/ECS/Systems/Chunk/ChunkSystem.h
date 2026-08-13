@@ -36,6 +36,24 @@ public:
 	   callers should ask this rather than the group list. */
 	bool IsStreaming() const { return !m_UpdateGroups.empty(); }
 
+	/* R1: gameplay never ticks against a missing initial window. True once the
+	   world's first 3x3 resident window is committed and its roots are admitted;
+	   World::Tick and World::FixedTick hold every entity and every gameplay
+	   system until it is.
+
+	   It is inert today and that is deliberate. ChunkSystem::Start still builds
+	   the initial window synchronously, so this is true the moment Start
+	   returns - the gate exists so that phase 4 can make the initial window
+	   stream through the same machine as every other one and put the loading
+	   screen over the wait, instead of discovering at that point that gameplay
+	   has been running against a world that is not there. That is precisely the
+	   experiment's E12/E3/E7/E8: it made every step resumable and never made
+	   anything wait for the result, then patched the consequences per manager.
+
+	   True with no camera as well, because a world with no camera has no window
+	   to wait for and holding it forever would be worse than any hitch. */
+	bool IsInitialWindowReady() const { return m_bInitialWindowReady; }
+
 	void SetCameraLoadOffset(Vector3 offset) { m_CameraLoadOffset = offset; }
 	Vector3 GetCameraLoadOffset() const { return m_CameraLoadOffset; }
 
@@ -64,6 +82,12 @@ protected:
 	   UpdateGroup so that there is exactly one place to read, one place to
 	   assert about, and one place a future phase can add to. */
 	void CommitWindow(ChunkUpdateGroup& group);
+
+	/* Construct the incoming chunks' entity trees, detached from the world,
+	   under StreamingBudgets::EntityStaging. Called opportunistically from
+	   US_RENDERING while the worker builds the back buffer, and again from
+	   US_ADMITTING_GAMEPLAY until it returns true. */
+	bool StageIncomingEntities(ChunkUpdateGroup& group);
 
 	/* bBackBuffer says which of the voxel mapper's two buffers viewPortData
 	   points at. The occupancy bricks are per-buffer, so writing voxels into
@@ -110,6 +134,8 @@ private:
 	UVector2 m_ChunkSize;
 	uint32_t m_uiNumChunkY;
 	uint32_t m_uiNumChunkX;
+	bool m_bInitialWindowReady = false;
+
 	UVector2 m_ClampedCameraPosition;
 	Vector3 m_CameraLoadOffset = Vector3(0);
 };

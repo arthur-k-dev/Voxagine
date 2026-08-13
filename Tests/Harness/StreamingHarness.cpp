@@ -107,7 +107,7 @@ uint64_t HarnessVoxelWindow::CountOccupiedFront() const
 	return uiOccupied;
 }
 
-StreamingHarness::StreamingHarness(const std::string& sFixture) :
+StreamingHarness::StreamingHarness(const std::string& sFixture, bool bInitialize) :
 	m_Application(TestApplication())
 {
 	const std::string sPath = std::string(VOXAGINE_TEST_FIXTURE_DIR) + "/" + sFixture + ".wld";
@@ -151,10 +151,25 @@ StreamingHarness::StreamingHarness(const std::string& sFixture) :
 	ChunkSystem* pChunks = m_pWorld->GetChunkSystem();
 	pChunks->SetVoxelWindow(&m_Window);
 
+	/* The chunk grid, in voxels per chunk. GetWorldSize is the level; the
+	   window is three chunks across wherever the level is bigger than one. */
+	m_ChunkSize = UVector2(m_v3WindowSize.x / 3, m_v3WindowSize.z / 3);
+
+	if (bInitialize)
+		Initialize();
+}
+
+void StreamingHarness::Initialize()
+{
+	if (m_bInitialized)
+		return;
+
+	m_bInitialized = true;
+
 	/* World::Initialize creates the main camera and starts every system, which
 	   is where ChunkSystem::Start loads the initial 3x3 window synchronously.
-	   The window must already be attached above, or that first load writes
-	   nothing. */
+	   The window must already be attached by the constructor, or that first load
+	   writes nothing. */
 	m_pWorld->Initialize();
 	m_pWorld->PreTick();
 
@@ -169,10 +184,6 @@ StreamingHarness::StreamingHarness(const std::string& sFixture) :
 	   Same call, and the same reason, as the GPU stress fixture's. */
 	if (Camera* pCamera = m_pWorld->GetMainCamera())
 		pCamera->SetPersistent(true);
-
-	/* The chunk grid, in voxels per chunk. GetWorldSize is the level; the
-	   window is three chunks across wherever the level is bigger than one. */
-	m_ChunkSize = UVector2(m_v3WindowSize.x / 3, m_v3WindowSize.z / 3);
 }
 
 StreamingHarness::~StreamingHarness()
@@ -212,8 +223,18 @@ void StreamingHarness::Frame()
 
 	m_pWorld->PreTick();
 
-	Chunks().FixedTick(FixedTimer());
-	Chunks().Tick(1.f / 60.f);
+	if (m_bTickWorld)
+	{
+		/* The real thing, including R1's hold: World::Tick decides whether the
+		   entities and the gameplay systems advance at all. */
+		m_pWorld->FixedTick(FixedTimer());
+		m_pWorld->Tick(1.f / 60.f);
+	}
+	else
+	{
+		Chunks().FixedTick(FixedTimer());
+		Chunks().Tick(1.f / 60.f);
+	}
 
 	/* A real frame takes milliseconds and a JobThread that finds no work sleeps
 	   for ten of them, so a test spinning this as fast as it can outruns the

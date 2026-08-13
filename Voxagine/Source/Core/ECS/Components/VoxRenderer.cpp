@@ -2,7 +2,6 @@
 #include "Core/ECS/Components/VoxRenderer.h"
 
 #include "Core/Resources/Formats/VoxModel.h"
-#include "Core/ECS/Systems/Rendering/ModelMeshStore.h"
 
 #include <rttr/registration>
 #include <rttr/policy.h>
@@ -84,16 +83,23 @@ void VoxRenderer::SetFrame(const VoxFrame* pFrame, bool bIncrementRef)
 	m_pFrame = pFrame;
 	m_modelFilePath = m_pFrame ? m_pFrame->GetModel()->GetRefPath() : "";
 
-	/* DYNAMIC_MODELS_PLAN.md phase 1: cache this frame's greedy mesh the first
-	   time anything asks for it. Unconditional rather than gated on
-	   IsStatic() - meshing is idempotent and cheap after the first call for a
-	   given frame, distinct frames number in the hundreds for the whole game
-	   (phase 0), and a renderer's static/dynamic status is not settled yet at
-	   construction time this call can run at. Nothing reads the result until
-	   phase 2 wires a pass to it. */
-	if (m_pFrame != nullptr)
-		ModelMeshStore::Get().EnsureMeshed(m_pFrame);
+	/* **Meshing does not happen here, and that is CHUNK_STREAMING_PLAN.md K10.**
+	   DYNAMIC_MODELS_PLAN.md phase 1 put an unconditional
+	   `ModelMeshStore::Get().EnsureMeshed(m_pFrame)` on this line, reasoning
+	   that meshing is idempotent, cheap after the first call for a given frame,
+	   and that a renderer's static/dynamic status is not settled at construction
+	   time. All three are true and the conclusion was still wrong, because of
+	   *where* this call runs: deserializing a chunk's roots. Measured on a Beat2
+	   window transition, one `VoxRenderer` construction took **44.65 ms** - the
+	   whole of what was left of the transition hitch after phase 3 bounded the
+	   entity load, and greedy-meshing a river-bed model no model pass will ever
+	   draw, because `RenderSystem::Render` submits only *non-static* renderers.
 
+	   The consumer meshes lazily and caches on the frame itself, so nothing is
+	   lost: a dynamic model is meshed once for the whole game, on the first
+	   frame it is actually drawn. What is gained is that constructing a static
+	   renderer - which is what a chunk load does hundreds of times - costs
+	   nothing at all. */
 	FrameChanged(this);
 }
 

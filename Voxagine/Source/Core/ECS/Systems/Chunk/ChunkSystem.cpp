@@ -87,7 +87,13 @@ void ChunkSystem::Start()
 	   checks rather than assuming, which is the state World::DeleteEntityFromLists
 	   now publishes instead of a dangling pointer. */
 	if (pCamera == nullptr)
+	{
+		/* Nothing decides where a window goes, so there is no window to wait
+		   for. Holding gameplay on a world that can never become ready would
+		   turn a missing camera into a hang (R1). */
+		m_bInitialWindowReady = true;
 		return;
+	}
 
 	Vector3 cameraPos = pCamera->GetTransform()->GetPosition() + m_CameraLoadOffset;
 	Vector3 worldOffset = CalculateWorldOffset(cameraPos);
@@ -141,6 +147,11 @@ void ChunkSystem::Start()
 	   far field exists to work around, so this is where it belongs. */
 	if (RenderContext* pRenderContext = m_pWorld->GetRenderContext())
 		pRenderContext->BuildFarField(m_pWorld);
+
+	/* R1. Everything above is synchronous, so the window and its roots are both
+	   there by the time this line runs - see IsInitialWindowReady for why the
+	   gate exists anyway. */
+	m_bInitialWindowReady = true;
 }
 
 bool ChunkSystem::CanProcessComponent(Component* pComponent)
@@ -475,7 +486,18 @@ void ChunkSystem::UpdateGroup(ChunkUpdateGroup& group)
 	}
 	case ChunkUpdateGroup::UpdateState::US_RENDERING:
 	{
-		if (group.IsRendering()) break;
+		/* The worker owns the back buffer for this whole state and staging
+		   touches no voxels, so the main thread spends the wait constructing the
+		   incoming chunks' entity trees instead of idling. On a settled machine
+		   that is most of a slide's deserialization paid for before the window
+		   even publishes. Detached, so nothing observes it (see
+		   Chunk::StageEntityBatch). */
+		if (group.IsRendering())
+		{
+			StageIncomingEntities(group);
+			break;
+		}
+
 		group.SetRendering(true);
 
 		/* Null where there is no render context at all - a backend that failed
@@ -533,49 +555,106 @@ void ChunkSystem::UpdateGroup(ChunkUpdateGroup& group)
 	case ChunkUpdateGroup::UpdateState::US_COMMIT:
 	{
 		CommitWindow(group);
+		group.SetState(ChunkUpdateGroup::UpdateState::US_ADMITTING_GAMEPLAY);
+		break;
+	}
+	case ChunkUpdateGroup::UpdateState::US_ADMITTING_GAMEPLAY:
+	{
+		/* The gameplay contract, and the whole of ledger E3's replacement.
+		   Staging finishes first - it usually already has, from US_RENDERING -
+		   and then *every* non-static root of *every* incoming chunk enters the
+		   world in this one frame.
+
+		   Deliberately unbudgeted, and the measurement says why it can be: the
+		   worst incoming slide in any shipped level is 430 non-static roots
+		   (Walking_Through_The_Maru_Beat3), and admitting a root is a pointer
+		   push per node - the work it sets off is the per-renderer stamp on the
+		   next PreTick, which is phase 5's budget to bound. Splitting this would
+		   buy nothing here and would re-open the transient-null link class the
+		   experiment patched per manager. */
+		if (!StageIncomingEntities(group))
+			break;
+
+		const bool bProfiling = FrameProfiler::Get().IsEnabled();
+		const std::chrono::steady_clock::time_point phase =
+			bProfiling ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
+
+		uint32_t uiAdmitted = 0;
+
+		for (ChunkUpdateGroup::Item& item : group.GetItems())
+		{
+			if (item.ItemTarget == ChunkUpdateGroup::Item::Target::T_ASYNC_LOAD)
+				uiAdmitted += item.pChunk->AdmitStagedGameplay();
+		}
+
+		StreamingCounters::RaiseMax(
+			StreamingCounters::Get().MaxGameplayRootsPerAdmission, uiAdmitted);
+
+		if (bProfiling && uiAdmitted > 0)
+			FrameProfiler::Get().Report("CPU Chunk AdmitGameplay", MillisecondsSince(phase));
+
+		group.ResetItemCursor();
 		group.SetState(ChunkUpdateGroup::UpdateState::US_LOADING_ENTITIES);
 		break;
 	}
 	case ChunkUpdateGroup::UpdateState::US_LOADING_ENTITIES:
 	{
-		/* Main-thread and, as of phase 1, still unbounded - 41.6 ms per
-		   incoming chunk (CHUNK_STREAMING_PLAN.md phase 0's baseline). Phases 2
-		   and 3 make it resumable against StreamingBudgets::EntityWork; this
-		   phase moved it rather than shrinking it.
+		/* What is left is static art, and it admits in bounded slices - this is
+		   where phase 0's 41.6 ms and phase 1's 44.2 ms per incoming chunk went.
 
-		   Moving it is not cosmetic. It runs *after* the commit now, so a
-		   first-load chunk's static renderers stamp against the world offset
-		   and the chunk slots they will actually be drawn at. Before, the
-		   callback repointed the grid's chunk slots, then stamped against the
-		   *outgoing* offset, then swapped the buffer those stamps went into. */
+		   The budget is a *count* of roots rather than a clock, because the cost
+		   of admitting one is not paid here: see StreamingBudgets::
+		   EntityAdmission.
+
+		   Running after the commit is not cosmetic. A first-load chunk's static
+		   renderers stamp against the world offset and the chunk slots they will
+		   actually be drawn at; master's callback repointed the grid's slots,
+		   stamped against the *outgoing* offset, then swapped the buffer those
+		   stamps went into. */
 		const bool bProfiling = FrameProfiler::Get().IsEnabled();
 
 		const std::chrono::steady_clock::time_point phase =
 			bProfiling ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
 
-		uint32_t uiLoaded = 0;
-		uint64_t uiRoots = 0;
+		StreamingBudget::Scope budget(StreamingBudgets::Get().EntityAdmission);
+		StreamingBudget::Scope refresh(StreamingBudgets::Get().EntityRefresh);
 
-		for (ChunkUpdateGroup::Item& item : group.GetItems())
+		uint32_t uiLoaded = 0;
+
+		std::vector<ChunkUpdateGroup::Item>& items = group.GetItems();
+
+		while (group.GetItemCursor() < items.size())
 		{
+			ChunkUpdateGroup::Item& item = items[group.GetItemCursor()];
+
 			if (item.ItemTarget == ChunkUpdateGroup::Item::Target::T_ASYNC_LOAD)
 			{
-				uiRoots += item.pChunk->GetRootEntities().size();
+				/* Not done: leave the cursor here and come back next frame. */
+				if (!item.pChunk->AdmitStagedStatic(budget))
+					break;
 
-				item.pChunk->LoadEntities();
 				item.pChunk->m_bIsLoaded = true;
 				item.pChunk->m_bFirstLoad = false;
 
 				++uiLoaded;
 			}
-			if (item.ItemTarget == ChunkUpdateGroup::Item::Target::T_MOVE)
-				item.pChunk->UpdateEntities();
-		}
+			else if (item.ItemTarget == ChunkUpdateGroup::Item::Target::T_MOVE)
+			{
+				/* One chunk's renderer refresh per frame. Cheap (0.06 ms) but
+				   there is no reason for three of them to share a frame with an
+				   admission slice. */
+				if (refresh.Exhausted())
+					break;
 
-		/* T4. Unbounded on master and unbounded now; the number is what phases
-		   2 and 3 ratchet down, and recording it here is what makes "bounded
-		   work per tick" a value CI can compare rather than a comment. */
-		StreamingCounters::RaiseMax(StreamingCounters::Get().MaxRootsPerEntityPass, uiRoots);
+				item.pChunk->UpdateEntities();
+				refresh.Consume();
+			}
+
+			group.AdvanceItemCursor();
+
+			if (budget.Exhausted())
+				break;
+		}
 
 		if (bProfiling)
 		{
@@ -583,6 +662,9 @@ void ChunkSystem::UpdateGroup(ChunkUpdateGroup& group)
 				uiLoaded > 0 ? "CPU Chunk LoadEntities" : "CPU Chunk UpdateEntities",
 				MillisecondsSince(phase));
 		}
+
+		if (group.GetItemCursor() < items.size())
+			break;
 
 		group.ResetItemCursor();
 		group.SetState(ChunkUpdateGroup::UpdateState::US_START_UNLOADING);
@@ -773,8 +855,19 @@ std::vector<ChunkUpdateGroup>::iterator ChunkSystem::RemoveUpdateGroup(const std
 	   A group that never advanced past the commit has created no per-chunk state
 	   and must therefore touch none. */
 	const bool bOwnsChunkState =
+		iter->GetState() == ChunkUpdateGroup::UpdateState::US_RENDERING ||
+		iter->GetState() == ChunkUpdateGroup::UpdateState::US_ADMITTING_GAMEPLAY ||
+		iter->GetState() == ChunkUpdateGroup::UpdateState::US_LOADING_ENTITIES ||
 		iter->GetState() == ChunkUpdateGroup::UpdateState::US_START_UNLOADING ||
 		iter->GetState() == ChunkUpdateGroup::UpdateState::US_ENCODING;
+
+	/* The three load states are here for completeness rather than because they
+	   are reachable: only `m_UpdateGroups.front()` ever advances, and a
+	   cancellation only ever erases groups *behind* the one the camera returned
+	   to - so a cancelled group is in US_INIT and owns nothing. Naming them
+	   anyway costs a comparison and means that if scheduling ever lets a
+	   half-staged group be erased, its detached roots are deleted rather than
+	   leaked. */
 
 	/* What the player actually waits: boundary crossed -> new chunks there.
 	   Off by default; see the comment on MillisecondsSinceCreated. */
@@ -810,6 +903,52 @@ std::vector<ChunkUpdateGroup>::iterator ChunkSystem::RemoveUpdateGroup(const std
 	}
 
 	return m_UpdateGroups.erase(iter);
+}
+
+bool ChunkSystem::StageIncomingEntities(ChunkUpdateGroup& group)
+{
+	const bool bProfiling = FrameProfiler::Get().IsEnabled();
+	const std::chrono::steady_clock::time_point start =
+		bProfiling ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
+
+	/* One budget for the whole group, not one per chunk: three incoming chunks
+	   share a slice rather than getting one each, or "bounded per frame" would
+	   mean three times the bound whenever a corner slide brings three. Same rule
+	   as US_START_UNLOADING's. */
+	StreamingBudget::Scope budget(StreamingBudgets::Get().EntityStaging);
+
+	std::vector<ChunkUpdateGroup::Item>& items = group.GetItems();
+
+	while (group.GetStagingCursor() < items.size())
+	{
+		ChunkUpdateGroup::Item& item = items[group.GetStagingCursor()];
+
+		if (item.ItemTarget != ChunkUpdateGroup::Item::Target::T_ASYNC_LOAD)
+		{
+			group.AdvanceStagingCursor();
+			continue;
+		}
+
+		/* The chunk's own decode has to have finished - m_RootEntities is what
+		   is being read here and LoadAsync's job thread does not touch it, but
+		   its voxel resize does run on that thread and the chunk is not this
+		   system's to read from until the job reports done. */
+		if (!item.bIsDone)
+			break;
+
+		if (!item.pChunk->StageEntityBatch(budget))
+			break;
+
+		group.AdvanceStagingCursor();
+
+		if (budget.Exhausted())
+			break;
+	}
+
+	if (bProfiling)
+		FrameProfiler::Get().Report("CPU Chunk StageEntitiesPass", MillisecondsSince(start));
+
+	return group.GetStagingCursor() >= items.size();
 }
 
 void ChunkSystem::CommitWindow(ChunkUpdateGroup& group)

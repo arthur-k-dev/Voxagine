@@ -1,8 +1,10 @@
 #!/bin/sh
-# Build Bit Buster or the Voxagine editor for iOS, package a valid IPA, and
-# publish it to the SideStore source hosted on the NUC. Linux cannot compile
+# Build Bit Buster or the Voxagine editor for iOS, then either package a
+# valid IPA and publish it to the SideStore source hosted on the NUC, or
+# install it straight onto an attached, paired device. Linux cannot compile
 # iOS binaries, but can run this script with --skip-build against an existing
-# .app bundle.
+# .app bundle (SideStore route only - a device install needs a real Apple
+# signature, which only Xcode on macOS can produce).
 #
 # The two are separate applications with separate bundle identifiers, so they
 # install side by side on a device and have separate entries in source.json.
@@ -18,7 +20,17 @@ SOURCE_NAME=${SOURCE_NAME:-NUC}
 VERSION=${VERSION:-0.1.$(date +%Y%m%d)}
 SSH_KEY=${SSH_KEY:-}
 SKIP_BUILD=0
+TARGET_EXPLICIT=0
+[ -n "${TARGET:-}" ] && TARGET_EXPLICIT=1
 TARGET=${TARGET:-game}
+DEST_EXPLICIT=0
+[ -n "${DEST:-}" ] && DEST_EXPLICIT=1
+DEST=${DEST:-sidestore}
+CONFIG_EXPLICIT=0
+[ -n "${CONFIG:-}" ] && CONFIG_EXPLICIT=1
+CONFIG=${CONFIG:-Release}
+DEVICE_ID=${DEVICE_ID:-}
+IOS_DEVELOPMENT_TEAM=${IOS_DEVELOPMENT_TEAM:-}
 
 # SideStore compares the IPA's Info.plist as well as its source metadata. A
 # changing source.json version is not enough when CFBundleVersion remains 1:
@@ -51,12 +63,26 @@ ssh_nuc() {
 }
 
 usage() {
-    echo "Usage: $0 [--game|--editor] [--skip-build]"
-    echo "  --game    Bit Buster, com.voxagine.bitbuster (default)"
-    echo "  --editor  the Voxagine editor, com.voxagine.bitbuster.editor"
+    echo "Usage: $0 [--game|--editor] [--sidestore|--device] [--release|--debug] [--skip-build]"
+    echo "  --game       Bit Buster, com.voxagine.bitbuster (default)"
+    echo "  --editor     the Voxagine editor, com.voxagine.bitbuster.editor"
+    echo
+    echo "  --sidestore  package an IPA and publish it to the NUC's SideStore"
+    echo "               source; unsigned, since SideStore re-signs on install"
+    echo "               (default)"
+    echo "  --device     build signed and install straight onto a paired"
+    echo "               device via devicectl. Picks the device and Apple"
+    echo "               Development signing team interactively when there's"
+    echo "               a choice (or a terminal to ask); set DEVICE_ID /"
+    echo "               IOS_DEVELOPMENT_TEAM to skip the prompts"
+    echo
+    echo "  --release    optimised, no Vulkan validation layers (default)"
+    echo "  --debug      unoptimised, with Vulkan validation layers"
     echo
     echo "  macOS: configure/build the chosen app, then package and publish it"
-    echo "  Linux: use --skip-build with an existing .app bundle"
+    echo "         or install it, per --sidestore/--device"
+    echo "  Linux: use --skip-build with an existing .app bundle (--sidestore"
+    echo "         only - --device needs Xcode to produce a real signature)"
     echo
     echo "  Each app needs its own entry in source.json, matched on"
     echo "  bundleIdentifier. Publishing refuses rather than guessing if the"
@@ -66,12 +92,171 @@ usage() {
 for arg in "$@"; do
     case "$arg" in
         --skip-build) SKIP_BUILD=1 ;;
-        --game) TARGET=game ;;
-        --editor) TARGET=editor ;;
+        --game) TARGET=game; TARGET_EXPLICIT=1 ;;
+        --editor) TARGET=editor; TARGET_EXPLICIT=1 ;;
+        --sidestore) DEST=sidestore; DEST_EXPLICIT=1 ;;
+        --device) DEST=device; DEST_EXPLICIT=1 ;;
+        --release) CONFIG=Release; CONFIG_EXPLICIT=1 ;;
+        --debug) CONFIG=Debug; CONFIG_EXPLICIT=1 ;;
         -h|--help) usage; exit 0 ;;
         *) echo "Unknown option: $arg" >&2; usage >&2; exit 2 ;;
     esac
 done
+
+# Neither --game/--editor nor $TARGET was given. Ask rather than silently
+# building the game when a real terminal is attached; a non-interactive
+# caller (CI, a script) gets the documented game default instead of hanging
+# on a prompt with no one to answer it.
+if [ "$TARGET_EXPLICIT" -eq 0 ] && [ -t 0 ]; then
+    printf 'Deploy which app? [g]ame (default) / [e]ditor: '
+    read -r REPLY
+    case "$REPLY" in
+        e|E|editor) TARGET=editor ;;
+        *) TARGET=game ;;
+    esac
+fi
+
+# Same idea for the destination: don't silently pick one when a person is
+# sitting at the terminal and neither --sidestore/--device nor $DEST said so.
+if [ "$DEST_EXPLICIT" -eq 0 ] && [ -t 0 ]; then
+    printf 'Deploy where? [s]ideStore (default) / [d]evice: '
+    read -r REPLY
+    case "$REPLY" in
+        d|D|device) DEST=device ;;
+        *) DEST=sidestore ;;
+    esac
+fi
+
+# Same idea for the build configuration.
+if [ "$CONFIG_EXPLICIT" -eq 0 ] && [ -t 0 ]; then
+    printf 'Which build? [r]elease (default) / [d]ebug: '
+    read -r REPLY
+    case "$REPLY" in
+        d|D|debug) CONFIG=Debug ;;
+        *) CONFIG=Release ;;
+    esac
+fi
+
+case "$CONFIG" in
+    Release|Debug) ;;
+    *) echo "CONFIG must be 'Release' or 'Debug', got '$CONFIG'" >&2; exit 2 ;;
+esac
+
+case "$DEST" in
+    sidestore|device) ;;
+    *) echo "DEST must be 'sidestore' or 'device', got '$DEST'" >&2; exit 2 ;;
+esac
+
+# --device installs a real Apple signature, which only devicectl (Xcode 15+,
+# macOS-only) can consume; there is no equivalent tool on Linux.
+if [ "$DEST" = device ] && [ "$(uname -s)" != Darwin ]; then
+    echo "--device needs macOS: devicectl, which installs onto the device, is Apple's own tool." >&2
+    exit 2
+fi
+
+# Resolve *which* device and *which* signing team up front, before spending
+# minutes on a build - both are knowable without one, and failing here beats
+# failing on the codesign step afterwards with a build already sitting there.
+if [ "$DEST" = device ]; then
+    DEVICE_TMP=$(mktemp -d "${TMPDIR:-/tmp}/voxagine-device.XXXXXX")
+    trap 'rm -rf "$DEVICE_TMP"' EXIT INT TERM
+
+    if [ -z "$DEVICE_ID" ]; then
+        DEVICES_JSON="$DEVICE_TMP/devices.json"
+        xcrun devicectl list devices --json-output "$DEVICES_JSON" >/dev/null
+        DEVICE_LIST=$(python3 -c '
+import json, sys
+with open(sys.argv[1]) as f:
+    data = json.load(f)
+for d in data.get("result", {}).get("devices", []):
+    props = d.get("connectionProperties", {}) or {}
+    if props.get("pairingState") == "paired" and props.get("tunnelState") in ("connected", "disconnected"):
+        print(d["identifier"] + "\t" + d.get("deviceProperties", {}).get("name", "?"))
+' "$DEVICES_JSON")
+        DEVICE_COUNT=$(printf '%s\n' "$DEVICE_LIST" | grep -c . || true)
+        if [ "$DEVICE_COUNT" -eq 0 ]; then
+            echo "No paired iOS device found. Pair one in Xcode (Window > Devices and Simulators), or set DEVICE_ID." >&2
+            exit 1
+        fi
+        echo "Paired devices:"
+        i=0
+        printf '%s\n' "$DEVICE_LIST" | while IFS='	' read -r id name; do
+            i=$((i + 1))
+            echo "  $i) $name ($id)"
+        done
+        if [ "$DEVICE_COUNT" -eq 1 ]; then
+            DEVICE_ID=$(printf '%s\n' "$DEVICE_LIST" | cut -f1)
+            echo "Only one, so installing on that."
+        elif [ -t 0 ]; then
+            printf 'Install on which? [1-%s]: ' "$DEVICE_COUNT"
+            read -r PICK
+            DEVICE_ID=$(printf '%s\n' "$DEVICE_LIST" | sed -n "${PICK}p" | cut -f1)
+            if [ -z "$DEVICE_ID" ]; then
+                echo "Invalid selection: $PICK" >&2
+                exit 1
+            fi
+        else
+            echo "Multiple paired devices found and no terminal to ask interactively; set DEVICE_ID." >&2
+            exit 1
+        fi
+    fi
+
+    if [ -z "$IOS_DEVELOPMENT_TEAM" ]; then
+        # Xcode's own account cache, not Keychain: a Keychain "Apple
+        # Development" certificate can outlive the Xcode account it was
+        # issued under (left over from a reinstalled Xcode, a different
+        # Apple ID, an expired membership, ...), and automatic signing then
+        # fails with "No Account for Team" even though the cert looks fine.
+        # The teams Xcode lists here are the ones it can actually fetch a
+        # profile for.
+        TEAM_LIST=$(python3 -c '
+import plistlib, os, sys
+path = os.path.expanduser("~/Library/Preferences/com.apple.dt.Xcode.plist")
+try:
+    with open(path, "rb") as f:
+        data = plistlib.load(f)
+except (FileNotFoundError, plistlib.InvalidFileException):
+    sys.exit(0)
+seen = set()
+for account, teams in (data.get("IDEProvisioningTeams") or {}).items():
+    for t in teams or []:
+        team_id = t.get("teamID")
+        if not team_id or team_id in seen:
+            continue
+        seen.add(team_id)
+        print(team_id + "\t" + t.get("teamName", "?") + " (" + account + ")")
+' 2>/dev/null)
+        TEAM_COUNT=$(printf '%s\n' "$TEAM_LIST" | grep -c . || true)
+        if [ "$TEAM_COUNT" -eq 1 ]; then
+            IOS_DEVELOPMENT_TEAM=$(printf '%s\n' "$TEAM_LIST" | cut -f1)
+            echo "Signing team: $(printf '%s\n' "$TEAM_LIST" | cut -f2) ($IOS_DEVELOPMENT_TEAM)"
+        elif [ "$TEAM_COUNT" -gt 1 ] && [ -t 0 ]; then
+            echo "Signing teams found in Xcode:"
+            i=0
+            printf '%s\n' "$TEAM_LIST" | while IFS='	' read -r id name; do
+                i=$((i + 1))
+                echo "  $i) $name ($id)"
+            done
+            printf 'Sign with which team? [1-%s]: ' "$TEAM_COUNT"
+            read -r PICK
+            IOS_DEVELOPMENT_TEAM=$(printf '%s\n' "$TEAM_LIST" | sed -n "${PICK}p" | cut -f1)
+            if [ -z "$IOS_DEVELOPMENT_TEAM" ]; then
+                echo "Invalid selection: $PICK" >&2
+                exit 1
+            fi
+        elif [ -t 0 ]; then
+            echo "No signing team found in Xcode's account cache. Sign in via" >&2
+            echo "Xcode > Settings > Accounts first, or enter one manually." >&2
+            printf 'Apple team ID (10 characters): '
+            read -r IOS_DEVELOPMENT_TEAM
+        fi
+        if [ -z "$IOS_DEVELOPMENT_TEAM" ]; then
+            echo "--device needs IOS_DEVELOPMENT_TEAM set to your 10-character Apple team ID." >&2
+            echo "(Xcode > Settings > Accounts lists the teams your signed-in Apple ID belongs to.)" >&2
+            exit 2
+        fi
+    fi
+fi
 
 # Everything that differs between the two applications. Set after the option
 # parsing so --editor can pick the defaults, but each is still overridable from
@@ -82,7 +267,7 @@ case "$TARGET" in
         BUILD_EDITOR=OFF
         APP_EXECUTABLE=BitBuster
         BUNDLE_ID=com.voxagine.bitbuster
-        DEFAULT_BUILD_DIR="$ROOT/Build/iOS/Game/Make"
+        DEFAULT_BUILD_ROOT="$ROOT/Build/iOS/Game"
         DEFAULT_IPA_NAME=Voxagine.ipa
         DEFAULT_APP_NAME="Bit Buster"
         ;;
@@ -91,7 +276,7 @@ case "$TARGET" in
         BUILD_EDITOR=ON
         APP_EXECUTABLE=Voxagine
         BUNDLE_ID=com.voxagine.bitbuster.editor
-        DEFAULT_BUILD_DIR="$ROOT/Build/iOS/Editor/Make"
+        DEFAULT_BUILD_ROOT="$ROOT/Build/iOS/Editor"
         DEFAULT_IPA_NAME=VoxagineEditor.ipa
         DEFAULT_APP_NAME="Voxagine Editor"
         ;;
@@ -101,7 +286,19 @@ case "$TARGET" in
         ;;
 esac
 
+# A device build needs the Xcode generator, for the XCODE_ATTRIBUTE_* signing
+# properties in CMakeLists.txt to take effect - the Makefile generator used
+# for --sidestore silently ignores them and links, unsigned, into ".../Make".
+# Different generator means a different cache, so it gets its own tree rather
+# than reconfiguring "Make" in place, which CMake refuses to do anyway.
+case "$DEST" in
+    device) DEFAULT_BUILD_DIR="$DEFAULT_BUILD_ROOT/Xcode" ;;
+    *) DEFAULT_BUILD_DIR="$DEFAULT_BUILD_ROOT/Make" ;;
+esac
+
 BUILD_DIR=${BUILD_DIR:-"$DEFAULT_BUILD_DIR"}
+APP_EXPLICIT=0
+[ -n "${APP:-}" ] && APP_EXPLICIT=1
 APP=${APP:-"$BUILD_DIR/bin/$APP_EXECUTABLE.app"}
 IPA_NAME=${IPA_NAME:-"$DEFAULT_IPA_NAME"}
 APP_NAME=${APP_NAME:-"$DEFAULT_APP_NAME"}
@@ -109,22 +306,52 @@ APP_NAME=${APP_NAME:-"$DEFAULT_APP_NAME"}
 if [ "$SKIP_BUILD" -eq 0 ]; then
     case "$(uname -s)" in
         Darwin)
-            cmake -S "$ROOT" -B "$BUILD_DIR" \
-                -DCMAKE_SYSTEM_NAME=iOS \
-                -DCMAKE_OSX_ARCHITECTURES=arm64 \
-                -DCMAKE_OSX_DEPLOYMENT_TARGET=16.0 \
-                -DVOXAGINE_BUILD_ENGINE=ON \
-                -DVOXAGINE_BUILD_EDITOR=$BUILD_EDITOR \
-                -DVOXAGINE_BUILD_BRINGUP=OFF \
-                -DVOXAGINE_ASSET_VERSION="$IOS_BUNDLE_VERSION" \
-                -DCMAKE_BUILD_TYPE=Release
-            cmake --build "$BUILD_DIR" --config Release --target "$CMAKE_TARGET"
+            if [ "$DEST" = device ]; then
+                cmake -S "$ROOT" -B "$BUILD_DIR" \
+                    -G Xcode \
+                    -DCMAKE_SYSTEM_NAME=iOS \
+                    -DCMAKE_OSX_ARCHITECTURES=arm64 \
+                    -DCMAKE_OSX_DEPLOYMENT_TARGET=16.0 \
+                    -DVOXAGINE_BUILD_ENGINE=ON \
+                    -DVOXAGINE_BUILD_EDITOR=$BUILD_EDITOR \
+                    -DVOXAGINE_BUILD_BRINGUP=OFF \
+                    -DVOXAGINE_ASSET_VERSION="$IOS_BUNDLE_VERSION" \
+                    -DVOXAGINE_IOS_DEVELOPMENT_TEAM="$IOS_DEVELOPMENT_TEAM" \
+                    -DCMAKE_BUILD_TYPE=$CONFIG
+                # -allowProvisioningUpdates lets Xcode create/download the
+                # provisioning profile for this bundle ID on demand instead of
+                # failing the build the first time a new app ID is signed.
+                cmake --build "$BUILD_DIR" --config "$CONFIG" --target "$CMAKE_TARGET" -- -allowProvisioningUpdates
+            else
+                cmake -S "$ROOT" -B "$BUILD_DIR" \
+                    -DCMAKE_SYSTEM_NAME=iOS \
+                    -DCMAKE_OSX_ARCHITECTURES=arm64 \
+                    -DCMAKE_OSX_DEPLOYMENT_TARGET=16.0 \
+                    -DVOXAGINE_BUILD_ENGINE=ON \
+                    -DVOXAGINE_BUILD_EDITOR=$BUILD_EDITOR \
+                    -DVOXAGINE_BUILD_BRINGUP=OFF \
+                    -DVOXAGINE_ASSET_VERSION="$IOS_BUNDLE_VERSION" \
+                    -DCMAKE_BUILD_TYPE=$CONFIG
+                cmake --build "$BUILD_DIR" --config "$CONFIG" --target "$CMAKE_TARGET"
+            fi
             ;;
         *)
             echo "iOS compilation requires macOS/Xcode. On Linux use --skip-build." >&2
             exit 2
             ;;
     esac
+fi
+
+# The Xcode generator nests the product under a Configuration(-Platform)
+# subdirectory that varies by Xcode version, rather than the flat "bin/" that
+# the single-config Makefile generator produces - so for --device, fall back
+# to a search instead of guessing that layout. An explicit $APP is trusted
+# as-is either way. Prefer a match whose path names the config actually just
+# built, in case both a Debug and Release .app exist side by side.
+if [ "$APP_EXPLICIT" -eq 0 ] && [ "$DEST" = device ] && [ ! -d "$APP" ]; then
+    FOUND_APP=$(find "$BUILD_DIR" -type d -path "*$CONFIG*/$APP_EXECUTABLE.app" -print -quit 2>/dev/null)
+    [ -z "$FOUND_APP" ] && FOUND_APP=$(find "$BUILD_DIR" -type d -name "$APP_EXECUTABLE.app" -print -quit 2>/dev/null)
+    [ -n "$FOUND_APP" ] && APP="$FOUND_APP"
 fi
 
 if [ ! -d "$APP" ] || [ ! -f "$APP/Info.plist" ] || [ ! -x "$APP/$APP_EXECUTABLE" ]; then
@@ -167,6 +394,34 @@ fi
 # CMake's bundle copy can pick up a temporary linker executable. It is not an
 # app resource and makes the IPA unnecessarily huge.
 find "$APP" -type f -name "$APP_EXECUTABLE.ld_*" -delete
+
+if [ "$DEST" = device ]; then
+    # The content sync above runs unconditionally (it also covers the
+    # shader-only-change gap noted above) and can touch files inside an
+    # already-signed bundle, which invalidates Xcode's signature. Capture the
+    # entitlements Xcode embedded before that happens and re-sign with them so
+    # devicectl's install still matches the provisioning profile it built
+    # against - a fresh "automatic" resolve here could pick a different
+    # identity/profile than the one -allowProvisioningUpdates just fetched.
+    ENTITLEMENTS="$DEVICE_TMP/entitlements.plist"
+    if ! codesign -d --entitlements ":-" "$APP" > "$ENTITLEMENTS" 2>/dev/null || [ ! -s "$ENTITLEMENTS" ]; then
+        echo "Could not read entitlements from the existing signature on $APP; was it built with --device?" >&2
+        exit 1
+    fi
+    SIGN_IDENTITY=$(codesign -d -vv "$APP" 2>&1 | awk -F'=' '/^Authority=/ { print $2; exit }')
+    if [ -z "$SIGN_IDENTITY" ]; then
+        echo "Could not determine the code signing identity already on $APP." >&2
+        exit 1
+    fi
+    codesign --force --deep --sign "$SIGN_IDENTITY" --entitlements "$ENTITLEMENTS" "$APP"
+
+    xcrun devicectl device install app --device "$DEVICE_ID" "$APP"
+    xcrun devicectl device process launch --device "$DEVICE_ID" "$BUNDLE_ID"
+
+    echo "Installed and launched $APP_NAME ($BUNDLE_ID) on device $DEVICE_ID"
+    exit 0
+fi
+
 # Unix Makefile builds do not expand Xcode's plist substitution tokens.
 # Replace the token before packaging so sideloaders see a valid identifier.
 if [ -f "$APP/Info.plist" ]; then

@@ -57,20 +57,56 @@ for UI regression checks - `LaunchOptions.h`. See `Docs/MOBILE_PORT_LOG.md`'s
 last section for the device measurements and what is still owed.
 
 **Chunk streaming has its own plan: `Docs/CHUNK_STREAMING_PLAN.md`; phases 0-5,
-8, 9, 11 and 12 are done and phase 6 is closed as *not taken*.** A window transition's
+8, 9, 11, 12 and 14 are done and phase 6 is closed as *not taken*.** A window transition's
 worst frame is **150.2 -> 10.3 ms** across them - the hitch gate passes and its
 `WILL_FAIL` is off - and `[world-switch] initialize` is **876 -> 317 ms**.
-**Three things remain, and they are ordered by criticality**: **14**, the only
-open item that kills the process - the asynchronous level switch dies
-intermittently under load (ledger M9), plus the pre-existing unsynchronised read
-of a chunk's CPU voxels by the render job; then **13**, a lifetime handle (id +
-generation, resolved on use) for the raw pointers game code holds into streamed
-content, which is four of the phase 9 play session's ten defects and ledger M8 -
-severity without a live symptom, since every instance it prevents is already
-fixed; then **10**, the editor session, which needs Joey at the machine, deletes
-`progressive-chunk-experiment`, and owns the one thing phase 9 left open -
-**pop-in has not been judged on screen**. The table in that plan is in
-execution order, not numeric order.
+**Two things remain, and they are ordered by criticality**: **13**, a lifetime
+handle (id + generation, resolved on use) for the raw pointers game code holds
+into streamed content, which is four of the phase 9 play session's ten defects
+and ledger M8 - severity without a live symptom, since every instance it prevents
+is already fixed; then **10**, the editor session, which needs Joey at the
+machine, deletes `progressive-chunk-experiment`, and owns the one thing phase 9
+left open - **pop-in has not been judged on screen**. The table in that plan is
+in execution order, not numeric order.
+
+**A world loaded on a job thread shares the whole process with the world that
+is still playing** (phase 14, ledger M9 - the intermittent death at the level
+switch, now fixed). `World::OpenWorldAsync` runs `World::PreLoad` on a worker,
+and deserializing an entity loads its model, its texture and its sound - while
+the outgoing level's chunk staging does exactly the same thing on the main
+thread. **Four pieces of process-global state on that path had no
+synchronisation at all**, and the fixture died inside the first:
+`ReferenceManager` (the map, *and* the check-then-load - two threads both
+finding a resource unloaded both run `Load` on it), `PosixFileSystem` (the
+handle map, and a `static uint32_t` counter that can hand two threads the same
+handle), `LoggingSystem` (the event vector, from any thread that logs) and
+`JsonSerializer::m_vOldPrefabIDs` (one prefab-id remap for two worlds, which is
+*also* wrong when it does not crash - it can redirect the other world's links).
+The three that stay shared are locked, and the remap is `World::m_vOldPrefabIDs`
+now. **The lock in `ReferenceManager` covers the load, not just the lookup**;
+`PosixFileSystem`'s covers the map and *not* the I/O, deliberately.
+
+**The other half of that crash: an entity of a world must never be destroyed
+after that world's systems.** `World::Unload` deletes the systems in
+`m_Systems` order - Script, **Audio**, Physics, Chunk - and `~ChunkSystem`
+destroys each chunk, and `~Chunk` deletes the roots it staged and never
+admitted, whose `AudioSource`s call straight into the audio system that died
+three deletions ago. It needs roots staged and unadmitted at the instant the
+world goes away, which is a window slide meeting a level switch, which is why it
+read as random. `World::Unload` calls `ChunkSystem::ReleaseStagedEntities` while
+its systems are alive, and nulls `m_pChunkSystem`/`m_pAudioSystem`/
+`m_pPhysicsSystem` after deleting them.
+`StreamingCounters::StagedRootsOutlivingSystems` must stay zero.
+
+**The instrument was a loop and a core dump, and it is the method to reuse.**
+Twenty runs keeping each run's stderr with `ulimit -c unlimited` reproduced both
+deaths in the first two; `coredumpctl debug <pid> --debugger-arguments="-nx
+-batch -ex 'thread apply all bt'"` printed the stacks in seconds. `gdb -ex run`
+is the wrong tool for these - the slowdown closes the window, which is what
+"never once under `gdb`" meant. And **`git log -S` beat re-running an old
+build**: at a 2-in-20 failure rate a green run of the pre-phase-12 binary proves
+nothing, while blame puts one defect at phase 3 and the rest at the initial
+commit exactly.
 
 **`gpu_destruction_sync_stress` runs again and is the widest gate in the tree**
 (phase 12). It had measured nothing since phase 4 - `--frames` is a main-loop
@@ -1990,8 +2026,15 @@ discovery into an authoring-time one.
   `Chunk::EncodeVoxels` frees a chunk's voxel vector and owner volume on a job
   thread while `VoxelGrid::m_ChunkVolumes`/`m_ChunkOwners` still point at them,
   so a main-thread `GetCell` can read freed storage. Tracked as
-  `Docs/DESTRUCTION_PLAN.md` ledger P7 and closed by its phase 1. Nothing else
-  touches the voxel array off the main thread.
+  `Docs/DESTRUCTION_PLAN.md` ledger P7 and closed by its phase 1. **One other
+  thing does touch the voxel array off the main thread and this used to say
+  otherwise**: `ChunkSystem::RenderChunk` reads every resident chunk's CPU
+  voxels on the worker that builds the incoming window, while destruction writes
+  them. Phase 14 adjudicated that and left it, with the argument next to the
+  code - the result is already repaired by phase 12's republish, the read is a
+  256-word `memcpy` into write-combined memory and cannot be made atomic without
+  giving up the burst, and ordering it the other way is a destruction stall for
+  the length of a window build.
 - **Chunk loading stalls the frame.** *Mostly fixed.* `LoadEntities` is gone:
   chunk streaming phase 3 split it into budgeted staging and budgeted
   admission, and the 44 ms per chunk it cost is now 7.4 ms of staging spread

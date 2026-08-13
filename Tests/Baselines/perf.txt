@@ -92,6 +92,7 @@ Streaming/WindowSlideAndReturn/roots-per-admission-slice               1.0000  w
 Streaming/WindowSlideAndReturn/roots-per-staging-slice                 2.0000  work
 Streaming/WindowSlideAndReturn/roots-per-unload-slice                  2.0000  work
 Streaming/WindowSlideAndReturn/staged-roots-high-water                 3.0000  work
+Streaming/WindowSlideAndReturn/staged-roots-outliving-systems          0.0000  work
 Streaming/WindowSlideAndReturn/staged-roots-rejected                   0.0000  work
 Streaming/WindowSlideAndReturn/voxel-stamp-diverging-erases            0.0000  work
 Streaming/WindowSlideAndReturn/voxel-words-written                589824.0000  work

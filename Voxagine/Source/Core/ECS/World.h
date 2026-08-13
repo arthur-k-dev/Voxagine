@@ -1,5 +1,6 @@
 #pragma once
 
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 #include "Core/Event.h"
@@ -346,6 +347,20 @@ private:
 	std::string m_GroundTexturePath = "";
 
 	std::vector<WorldConnectionInformation> m_vWorldConnections = {};
+
+	/* Old serialized id -> the id the entity was actually given, for the one
+	   deserialization pass that is remapping ids. JsonSerializer::ValueToEntity
+	   writes it and ResolveWorldLinks reads and clears it.
+	 *
+	 * It lived on the JsonSerializer, which belongs to the Application, and that
+	 * is chunk streaming phase 14: World::OpenWorldAsync deserializes the
+	 * incoming level on a job thread while the outgoing level's chunks are
+	 * staging their own roots on the main thread, so one unordered_map was being
+	 * inserted into from two threads at once - and, before it ever corrupted
+	 * anything, one world's remap could redirect the other world's links.
+	 * Per world it is single-threaded by construction: a world is deserialized
+	 * by exactly one thread and is not visible to any other until it is done. */
+	std::unordered_map<int64_t, int64_t> m_vOldPrefabIDs = {};
 
 	/* Grows by one per link actually made and shrinks when either end dies, so
 	   it is bounded by the number of live cross-entity references - tens, in

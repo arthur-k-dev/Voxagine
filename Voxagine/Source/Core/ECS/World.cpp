@@ -196,6 +196,19 @@ void World::Unload(bool bReleaseSharedRenderState)
 		DeleteEntity(pRemoveEntity);
 	}
 
+	/* The entities the world was never told about: roots a chunk constructed
+	   and had not admitted when the level went away. They were destroyed from
+	   ~Chunk, and ~Chunk runs from ~ChunkSystem - four systems into the loop
+	   below, with the AudioSystem their AudioSources hold a pointer to already
+	   deleted. That is M9's SIGSEGV, and it lands on the level switch because
+	   that is where an unload meets a window slide with roots in flight.
+
+	   The rule this restores is worth more than the ordering: every entity in a
+	   world is destroyed while every one of that world's systems is still
+	   alive. */
+	if (m_pChunkSystem != nullptr)
+		m_pChunkSystem->ReleaseStagedEntities();
+
 	for (ComponentSystem* system : m_Systems)
 	{
 		delete system;
@@ -204,6 +217,17 @@ void World::Unload(bool bReleaseSharedRenderState)
 
 	delete m_pRenderSystem;
 	m_pRenderSystem = nullptr;
+
+	/* The loop above deleted these; the pointers to them are members. Nulling
+	   them is the same move GetRenderContext and m_pCameraEntity made - an
+	   unloaded world is an ordinary state, and every reader can check for it -
+	   and it is load-bearing for the release above: Unload is reachable twice
+	   (a harness that unloads and then destroys, phase 8's activation followed
+	   by ClearWorlds), and the second call would otherwise ask a freed
+	   ChunkSystem to release its staged roots. */
+	m_pChunkSystem = nullptr;
+	m_pAudioSystem = nullptr;
+	m_pPhysicsSystem = nullptr;
 
 	m_RemovedEntities.clear();
 	m_Systems.clear();

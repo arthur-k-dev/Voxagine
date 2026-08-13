@@ -55,12 +55,31 @@ Chunk::~Chunk()
 {
 	/* Staged roots are this chunk's own - nothing in the world knows they
 	   exist - so a chunk that dies mid-load is the one place they can be
-	   leaked. A world unload does exactly that. */
-	for (Entity* pRoot : m_StagedRoots)
+	   leaked. A world unload does exactly that.
+
+	   It is also too late to destroy one here, which is M9's SIGSEGV: ~Chunk
+	   runs from ~ChunkSystem, and World::Unload deletes the AudioSystem several
+	   systems earlier - so ~AudioSource's Stop() call went into freed memory.
+	   World::Unload releases them itself now; anything still here is a path that
+	   does not, and the counter is what says so before a player finds out. */
+	uint64_t uiStillStaged = 0;
+	for (const Entity* pRoot : m_StagedRoots)
 	{
 		if (pRoot != nullptr)
-			DeleteEntity(pRoot);
+			++uiStillStaged;
 	}
+
+	/* Counted over the *non-null* slots only: admission nulls each one as it
+	   consumes it, so a chunk destroyed part-way through admitting holds a
+	   prefix of nulls that nobody has to destroy and that must not read as a
+	   violation. */
+	if (uiStillStaged > 0)
+	{
+		StreamingCounters::Get().StagedRootsOutlivingSystems.fetch_add(
+			uiStillStaged, std::memory_order_relaxed);
+	}
+
+	ReleaseStagedRoots();
 
 	delete m_pTextureReadData;
 }
@@ -364,6 +383,21 @@ void Chunk::EncodeVoxels()
 	}
 }
 
+void Chunk::ReleaseStagedRoots()
+{
+	for (Entity* pRoot : m_StagedRoots)
+	{
+		if (pRoot != nullptr)
+			DeleteEntity(pRoot);
+	}
+
+	m_StagedRoots.clear();
+	m_StagedRoots.shrink_to_fit();
+	m_uiNextStagedRoot = 0;
+	m_uiStagedGameplayCount = 0;
+	m_bStagedRootsOrdered = false;
+}
+
 void Chunk::ResetStreamingState()
 {
 	/* Nothing in flight. Deliberately an early return rather than an
@@ -379,21 +413,11 @@ void Chunk::ResetStreamingState()
 		   ownership argument the header makes for holding the pointers at all.
 		   m_RootEntities is untouched, so the next attempt re-stages from the
 		   same JSON. */
-		for (Entity* pRoot : m_StagedRoots)
-		{
-			if (pRoot != nullptr)
-				DeleteEntity(pRoot);
-		}
-
 		StreamingCounters::Get().CancelledStagings.fetch_add(1, std::memory_order_relaxed);
 	}
 
-	m_StagedRoots.clear();
-	m_StagedRoots.shrink_to_fit();
-	m_uiNextStagedRoot = 0;
+	ReleaseStagedRoots();
 	m_uiNextRootToStage = 0;
-	m_uiStagedGameplayCount = 0;
-	m_bStagedRootsOrdered = false;
 	m_bStagingPrepared = false;
 
 	if (m_bEncodePrepared)

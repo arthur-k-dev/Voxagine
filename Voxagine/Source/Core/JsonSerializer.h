@@ -94,8 +94,9 @@ private:
 	bool SetInstanceArrayProperty(rttr::instance& instance, const rttr::property& property, rttr::variant& variant, const rttr::type& variantType, const int& index);
 	bool SetInstanceProperty(rttr::instance& instance, const rttr::property& property, rttr::variant& variant, const rttr::type& variantType, bool bIsSequentialContainer = false);
 
-	// Keep reference for prefab id
-	std::unordered_map<int64_t, int64_t> m_vOldPrefabIDs = {};
+	/* The prefab id remap moved to World::m_vOldPrefabIDs - see the comment
+	   there. It was one map on an Application-owned serializer, written by
+	   whichever thread happened to be deserializing. */
 
 	//Change version to 1.10 when using chunk system
 	const double WORLD_VERSION = 1.10;

@@ -17,11 +17,14 @@ void ResourceManager::Unload()
 	m_soundManager.ClearAll();
 }
 
+/* Every Load* below acquires-or-creates the reference *and* performs the
+   first-time load inside the reference manager's lock. Splitting those two is
+   what the asynchronous level switch crashed on - see ReferenceManager.h. */
+
 TextureReference* ResourceManager::LoadTexture(const std::string& filePath)
 {
-	TextureReference* pTextureRef = m_textureManager.AddReference(filePath);
-
-	if (!pTextureRef->IsLoaded())
+	return m_textureManager.AddReferenceAndLoad(filePath,
+		[this, &filePath](TextureReference* pTextureRef)
 	{
 		pTextureRef->SetContext(m_pApp->GetPlatform().GetRenderContext());
 		pTextureRef->SetFileSystem(m_pApp->GetFileSystem());
@@ -30,18 +33,18 @@ TextureReference* ResourceManager::LoadTexture(const std::string& filePath)
 
 		if (!pTextureRef->IsLoaded())
 			LogFailedLoadResourceMessage("Texture", filePath);
-	}
-
-	return pTextureRef;
+	});
 }
 
 PlatformSoundReference* ResourceManager::LoadSound(const std::string& filePath)
 {
-	PlatformSoundReference* pSoundRef = m_soundManager.AddReference(filePath);
-	AudioContext* pAudioContext = m_pApp->GetPlatform().GetAudioContext();
-
-	if (!pSoundRef->IsLoaded() && pAudioContext)
+	return m_soundManager.AddReferenceAndLoad(filePath,
+		[this, &filePath](PlatformSoundReference* pSoundRef)
 	{
+		AudioContext* pAudioContext = m_pApp->GetPlatform().GetAudioContext();
+		if (!pAudioContext)
+			return;
+
 		pSoundRef->SetContext(pAudioContext);
 		pSoundRef->SetFileSystem(m_pApp->GetFileSystem());
 
@@ -50,15 +53,13 @@ PlatformSoundReference* ResourceManager::LoadSound(const std::string& filePath)
 
 		if (!pSoundRef->IsLoaded())
 			LogFailedLoadResourceMessage("Sound", filePath);
-	}
-
-	return pSoundRef;
+	});
 }
 
 VoxModel* ResourceManager::LoadVox(const std::string& filePath)
 {
-	VoxModel* pModel = m_voxManager.AddReference(filePath);
-	if (!pModel->IsLoaded())
+	return m_voxManager.AddReferenceAndLoad(filePath,
+		[this, &filePath](VoxModel* pModel)
 	{
 		pModel->SetContext(m_pApp->GetPlatform().GetRenderContext()->Get());
 		pModel->SetFileSystem(m_pApp->GetFileSystem());
@@ -67,8 +68,7 @@ VoxModel* ResourceManager::LoadVox(const std::string& filePath)
 
 		if (!pModel->IsLoaded())
 			LogFailedLoadResourceMessage("VoxModel", filePath);
-	}
-	return pModel;
+	});
 }
 
 std::vector<VoxModel*> ResourceManager::LoadVoxBatch(const std::string& filePath, const std::string& fileName)
@@ -78,18 +78,24 @@ std::vector<VoxModel*> ResourceManager::LoadVoxBatch(const std::string& filePath
 	for (uint32_t i = 0; i < UINT32_MAX; ++i)
 	{
 		std::string file = filePath + fileName + "_" + std::to_string(i) + ".vox";
-		VoxModel* pModel = m_voxManager.AddReference(file);
+		bool bFailed = false;
 
-		if (!pModel->IsLoaded())
+		VoxModel* pModel = m_voxManager.AddReferenceAndLoad(file,
+			[this, &file, &bFailed](VoxModel* pNewModel)
 		{
-			pModel->SetContext(m_pApp->GetPlatform().GetRenderContext()->Get());
-			pModel->SetFileSystem(m_pApp->GetFileSystem());
+			pNewModel->SetContext(m_pApp->GetPlatform().GetRenderContext()->Get());
+			pNewModel->SetFileSystem(m_pApp->GetFileSystem());
 
-			if (!pModel->Load(file))
-			{
-				m_voxManager.RemoveReference(file);
-				break;
-			}
+			bFailed = !pNewModel->Load(file);
+		});
+
+		/* The batch ends at the first index that is not there, which is an
+		   ordinary outcome rather than a failure: it is how the caller learns
+		   how many frames an animation has. */
+		if (bFailed)
+		{
+			m_voxManager.RemoveReference(file);
+			break;
 		}
 
 		models.push_back(pModel);
@@ -114,23 +120,26 @@ VoxModel* ResourceManager::CreateHollowVox(const std::string& filePath)
 
 	newFilePath.insert(len, "hollow_");
 
-	VoxModel* pHollowModel = m_voxManager.AddReference(newFilePath);
-	if (!pHollowModel->IsLoaded())
-	{
-		pHollowModel->SetContext(m_pApp->GetPlatform().GetRenderContext()->Get());
-		pHollowModel->SetFileSystem(m_pApp->GetFileSystem());
+	bool bFailed = false;
 
-		pHollowModel->Load(filePath);
-		
-		if (!pHollowModel->IsLoaded())
+	VoxModel* pHollowModel = m_voxManager.AddReferenceAndLoad(newFilePath,
+		[this, &filePath, &newFilePath, &bFailed](VoxModel* pNewModel)
+	{
+		pNewModel->SetContext(m_pApp->GetPlatform().GetRenderContext()->Get());
+		pNewModel->SetFileSystem(m_pApp->GetFileSystem());
+
+		pNewModel->Load(filePath);
+
+		if (!pNewModel->IsLoaded())
 		{
-			return nullptr;
+			bFailed = true;
+			return;
 		}
 
-		pHollowModel->MakeHollow(newFilePath);
-	}
+		pNewModel->MakeHollow(newFilePath);
+	});
 
-	return pHollowModel;
+	return bFailed ? nullptr : pHollowModel;
 }
 
 void ResourceManager::GetResourceFilePaths(const std::string fileExtension, std::vector<std::string>& resourceFilePaths)

@@ -25,6 +25,15 @@ public:
 
 	void SetGroundPlane(const std::string& texturePath);
 
+	/* Destroy every root every chunk staged and never admitted. Phase 14, and
+	   World::Unload is the only caller: those roots are entities, their
+	   components hold pointers to this world's systems, and until this existed
+	   they were destroyed from ~Chunk - which is inside ~ChunkSystem, four
+	   systems after the AudioSystem their AudioSources call into. It is called
+	   with every system still alive, so the rule it restores is the general one:
+	   no entity in a world is destroyed after any of that world's systems. */
+	void ReleaseStagedEntities();
+
 	UVector2 GetWorldSize() { return m_WorldSize; }
 	UVector2 GetChunkSize() const { return m_ChunkSize; }
 	const std::unordered_map<uint32_t, Chunk*>& GetChunks() { return m_Chunks; }

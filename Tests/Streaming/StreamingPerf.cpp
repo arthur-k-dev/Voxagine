@@ -129,6 +129,13 @@ VOXAGINE_BENCHMARK(Streaming, WindowSlideAndReturn)
 	result.AddWork("back-buffer-flush-races", static_cast<double>(counters.BackBufferFlushRaces.load()));
 	result.AddWork("publishes-outside-commit", static_cast<double>(counters.PublishesOutsideCommit.load()));
 
+	/* Phase 14. A staged root destroyed by ~Chunk rather than by the world that
+	   owns the systems its components point at - M9's SIGSEGV. Zero here because
+	   the harness settles its window before the benchmark runs, and checked in
+	   because the number that must never move is the one worth checking in. */
+	result.AddWork("staged-roots-outliving-systems",
+		static_cast<double>(counters.StagedRootsOutlivingSystems.load()));
+
 	/* M7. A static renderer re-stamped over voxels that were decoded with their
 	   damage in them is exactly "destroyed terrain comes back". There is no
 	   RenderSystem here so this is zero by construction; it is in the baseline

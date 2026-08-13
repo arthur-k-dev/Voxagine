@@ -415,6 +415,14 @@ void ChunkSystem::SetGroundPlane(const std::string& texturePath)
 	}
 }
 
+void ChunkSystem::ReleaseStagedEntities()
+{
+	for (auto& chunkIter : m_Chunks)
+	{
+		chunkIter.second->ReleaseStagedRoots();
+	}
+}
+
 void ChunkSystem::OnComponentAdded(Component* pComponent)
 {
 
@@ -1304,6 +1312,35 @@ void ChunkSystem::RepublishJournalledWrites(const Vector3& v3PreviousOffset)
 	StreamingCounters::Get().WindowCommitWritesLost.fetch_add(uiLost, std::memory_order_relaxed);
 }
 
+/* Runs on a worker for the whole of US_RENDERING, and reads every resident
+ * chunk's CPU voxels while the main thread is free to write them - destruction
+ * clearing voxels and debris baking them, through VoxelEditBatch. That is a
+ * data race in the standard's terms and it is deliberate. Phase 14 adjudicated
+ * it rather than removing it, and the argument is here rather than in a plan:
+ *
+ * - **The result is already correct.** Phase 12's journal records every voxel
+ *   the main thread writes while a build is in flight and republishes it into
+ *   the newly visible buffer inside the commit transaction, so a torn or stale
+ *   read heals at the swap. StreamingCounters::WindowCommitWritesReplayed is
+ *   the exact number of writes that overlapped a build, which is also the
+ *   number this race can be about - it is not an unmeasured hazard.
+ * - **The read cannot be made atomic.** It is a 256-word memcpy per row into
+ *   write-combined memory, and that shape is the reason the transfer is
+ *   affordable at all (RENDERING_PLAN.md 4d). A per-voxel atomic load gives up
+ *   the burst; making Voxel an atomic type gives up its assignability, which
+ *   every chunk codec and storage path depends on.
+ * - **Ordering it the other way costs the thing the phase bought.** "Do not
+ *   write a chunk's voxels while a build reads them" means blocking destruction
+ *   for the length of a window build - tens of milliseconds, on the frame the
+ *   player shoots - which is the hitch phases 1 to 9 exist to remove.
+ *
+ * What is left is a torn read of one 4-byte colour. Both shipping targets read
+ * and write an aligned 32-bit word indivisibly, so the value observed is some
+ * value the cell held, never a mixture; and whichever one it is, the republish
+ * puts the current one there. **TSan reports this and nothing else** - one
+ * warning over the whole 128-check suite, this read against a main-thread
+ * VoxelCell::SetColor - so the report is the expected one rather than a finding
+ * to chase, and a *second* warning appearing there is a real regression. */
 void ChunkSystem::RenderChunk(ChunkUpdateGroup::Item& updateItem, uint32_t* viewPortData, bool bBackBuffer)
 {
 	if (m_pVoxelWindow == nullptr || viewPortData == nullptr)

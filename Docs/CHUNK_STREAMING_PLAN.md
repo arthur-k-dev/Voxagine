@@ -56,7 +56,7 @@ world switch, and the loading screen.
 | 9 — Splitting one renderer's stamp | DONE | `chunk-streaming-phase-9` | **The hitch gate flips: peak 27.9 → 9.82 / 10.15 / 10.31 ms against 16.67, and the `WILL_FAIL` is off.** The walk turned out not to be what lost the 580 k voxels — it is resume-identical at every budget from 1 up, checked against two real models — so the fixes are the two *interactions*: `Bake` no longer clears a half-written renderer, and the bake bookkeeping is written at the start of a stamp rather than the end. Occupancy identical at four slice sizes over eight runs; coverage, sync and pyramid audits clean during streaming — **not** with combat, whatever this row said before: the `fire` token does not work and phase 11 owns it. Costs **728–779 → 910–1,071 held ticks** before gameplay starts. Left open: **Joey has not judged pop-in on screen**. (`gpu_destruction_sync_stress` was broken *on master* and is repaired in phase 12 — see its notes.) |
 | 11 — `--ui-script fire`, and the first headless run that destroys a voxel | DONE | `chunk-streaming-phase-11` | **The token was never broken; the script's clock was.** It counted display frames from process start, so a level whose hold ran long spent every token before `Player::Start` had bound anything — 621 held ticks in one Release run and **2,930** in the next, same binary, same command line, which is the whole of why it read as intermittent. The clock now stops while `World::IsGameplayHeld()`. A scripted run destroys **25,062 voxels over 32 bursts** where it destroyed 0, ever; `[destruction]` is printed by every run. **Both prior diagnoses were wrong** — see the notes. The acceptance run reproduces phase 12 headlessly (228 CPU-only voxels), which is the point of doing 11 first. |
 | 12 — The CPU/GPU voxel disagreement during play | DONE | `chunk-streaming-phase-12` | **The window commit was throwing writes away.** A slide rebuilds the whole incoming window into the back buffer from the chunks' CPU voxels and then swaps, so every voxel the main thread writes while that build is in flight lands in the buffer the swap retires — the CPU keeps it, the image loses it. Destruction is what writes voxels during play, which is why it needed phase 11 to be reproducible at all. Those writes are journalled and republished inside the same commit transaction: `VOXAGINE_SYNC_AUDIT` **106–188 → 0 of 75,497,472**, on a run that destroys 23–38 k voxels, slides the window and switches world. **The first hypothesis — `VoxelBaker::Clear` erasing an unowned voxel — was wrong and its counter says so**, which is why that counter stayed. |
-| 14 — The two streaming races phase 12 left standing | OPEN — **next, and the most critical thing left: it is the only open item that kills the process** | | M9: the asynchronous `Beat1 -> Beat2` switch dies intermittently under the destruction stress route — once `SIGSEGV`, once an abort in about twenty runs, always at the switch, never under `gdb`. Plus the pre-existing unsynchronised read of a chunk's CPU voxels by the render job, whose *result* phase 12 made correct without making the read safe. Both engine-side, both surfaced by phase 12, neither caused by it — and whether M9 predates phase 12 is one build away and has not been checked. |
+| 14 — The two streaming races phase 12 left standing | DONE | `chunk-streaming-phase-14` | **M9 was two deaths sharing a moment, and neither was the job queue.** A loop of twenty runs keeping every run's stderr and a core reproduced both in the first two: a `SIGSEGV` in `AudioSystem::Stop`, from a staged root destroyed by `~Chunk` *after* `World::Unload` deleted the audio system four systems earlier; and an abort in `VoxModel::Reset` on the loader's job thread, because `World::PreLoad` on a worker shares the resource managers, the file system, the logger and the prefab-id map with the world that is still playing. Five fixes, one new must-stay-zero counter, two checks - one of them verified to fail without its fix - and **20 consecutive green runs against 2 failures in the 20 before**. Both predate phase 12, and `git log -S` says so where the build-the-old-commit experiment this phase proposed cannot: at a 10% failure rate a green run of `e71cafe` proves nothing. The `RenderChunk` read is **adjudicated rather than fixed**, with the argument next to the code; **M10** is opened for the one hazard reading the job manager turned up and measurement did not. |
 | 13 — A lifetime handle for streamed content | OPEN | | Four of the ten defects the phase 9 play session found are one shape, and so is ledger M8: a raw pointer to streamed content, held across a frame, with nothing to say the target died. More guards is not the answer — two of them crashed *inside* the guard. `PlayerSlot` generalised into a handle (id + generation, resolved on use). |
 | 10 — Editor session and closing the plan | OPEN — **last** | | Needs Joey at the machine. Runs after 11, 12, 14 and 13: it deletes `progressive-chunk-experiment` and its acceptance is the whole suite green, so it cannot honestly precede work that is still landing. **No longer owns `gpu_destruction_sync_stress`** — phase 12 repaired it and gave it a representation audit, so `-L gpu` is three green. What is left here is the pop-in judgement. |
 
@@ -187,23 +187,43 @@ Release at phase 0).
   `EncodeVoxels`; `FindEntitiesInChunk` + `SaveAndDeleteEntities` (full RTTR
   serialization) run on the main thread first. CLAUDE.md's "Chunk loading
   stalls the frame" ledger entry is this.
-- **M9 — OPEN (found by phase 12's repair of `gpu_destruction_sync_stress`;
-  owned by phase 14).**
-  **The asynchronous level switch dies intermittently**, in Release, under a
-  route that has been destroying geometry and sliding the window for minutes:
-  `Beat1 -> Beat2` through `World::OpenWorldAsync`, always at the switch and
-  never before it. Twice in about twenty runs - once `SIGSEGV`, once an abort -
-  and not once in the twelve runs since, six of them under `gdb`. So it is a
-  rare race that a debugger closes, and the next thing to capture is what it
-  says as it dies: run the fixture in a loop keeping each run's stderr, or
-  arrange a core dump. `gdb -ex run` is exactly the wrong tool here. It is **not** a representation defect: the audit immediately before
-  the switch agrees on all 75,497,472 voxels. The obvious shape to check first
-  is a lifetime one, which is why this is phase 13's: `OpenWorldAsync` enqueues
-  onto the *old* world's job queue and its completion destroys that world, and
-  the chunk render job captures `this` and `&group` - so the ordering of
-  `DiscardJobQueue`, the completion callbacks it then runs, and `~ChunkSystem`
-  is where to start. Reproduce with `ctest -L gpu -R gpu_destruction_sync_stress`
-  in Release, repeatedly.
+- **M9 — FIXED (phase 14).** **The asynchronous level switch died
+  intermittently**, in Release, under a route that had been destroying geometry
+  and sliding the window for minutes: `Beat1 -> Beat2` through
+  `World::OpenWorldAsync`, always at the switch and never before it.
+
+  It was **two deaths with nothing in common but the moment**, and reproducing
+  it was a loop of twenty runs keeping each run's stderr and a core: run 1
+  aborted with `double free or corruption (!prev)`, run 2 segfaulted, the other
+  eighteen were green. `coredumpctl debug` gave both stacks immediately, and
+  neither is in a job-lifetime path:
+
+  - a **use-after-free of the deleted `AudioSystem`**, from a staged root's
+    destructor inside `~Chunk` inside `~ChunkSystem` inside `World::Unload` -
+    which deletes the audio system four systems earlier;
+  - an **abort inside `VoxModel::Reset`, on the loader's job thread**, because
+    `World::PreLoad` on a worker shares the process's resource managers, file
+    system, logger and prefab-id map with the world that is still playing.
+
+  Both predate phase 12 and one of them predates the plan: `git log -S` puts the
+  staged-root deletion at phase 3 (`a83b4d4`, #58) and `ReferenceManager`,
+  `OpenWorldAsync` and `PosixFileSystem` at the initial commit and the port.
+  Phase 12 touched fifteen files and not one appears in either stack. See the
+  phase 14 notes for the full mechanism, the five fixes and what they are gated
+  by.
+
+- **M10 — OPEN (found by phase 14, not observed).** `JobManager::ThreadLoop`
+  publishes a finished job in two steps - `pThread->SetRunningJob(nullptr)` and
+  then `m_FinishedJobQueue.enqueue(newJob)` - and `DiscardJobQueue` scans the
+  running-job pointers between them and finds nothing. So a job that finished in
+  that window survives the discard, and its completion callback runs later
+  against a world that has since been deleted. The chunk render job's callback
+  is `[&group] { group.SetState(...) }`, a reference into a destroyed
+  `ChunkSystem`'s vector, which is exactly the shape M9 was assumed to be.
+  **It was not what killed the fixture** - both M9 stacks are elsewhere - and it
+  has never been observed, so it is recorded rather than fixed on speculation.
+  The fix is one of: enqueue before clearing the running pointer, or make
+  `ProcessFinishedJobs` drop a job whose queue handle no longer exists.
 - **M1 — FIXED (phase 1).** `VoxelBrickGrid::FlushDirty` walked *both*
   buffers' dirty bits on the main thread every frame while
   `ChunkSystem::RenderChunk` wrote back-buffer bits from the worker: a data
@@ -2578,7 +2598,11 @@ debugger's slowdown closes and a rare one. It is *not* the representation
 defect - every audit up to the switch agrees, including the one immediately
 before it - and it is recorded as ledger **M9** rather than fixed here, because
 this session's phase is 12 and a lifetime defect in the world switch is phase
-13's shape exactly. **The gate is registered anyway**: an intermittent death on
+13's shape exactly. (**It was not.** Phase 14 caught both deaths and neither is
+a lifetime defect in the job queue: one is `World::Unload` destroying a chunk's
+staged roots after it has deleted the systems they point at, and the other is
+the asynchronous loader sharing the process's resource managers, file system and
+logger with the world that is still playing. See the phase 14 notes.) **The gate is registered anyway**: an intermittent death on
 a real code path is a finding, and hiding it until it is convenient is how the
 hitch stayed unmeasured for four phases.
 
@@ -2697,6 +2721,182 @@ way; and whichever exact counter would have caught it added to
 `StreamingCounters` and gated in `Tests/Baselines/perf.txt`, on phase 12's rule
 that a fix with no counter behind it leaves the next instance to be found by
 crashing.
+
+#### Phase 14 notes — M9 was a teardown order and a shared-state class, and neither was the job queue
+
+**Reproducing it took a loop and a core dump, and both arrived in the first two
+runs.** Twenty runs of `gpu_destruction_sync_stress` in Release, each run's
+stderr kept and `ulimit -c unlimited`: **run 1 aborted with `double free or
+corruption (!prev)`, run 2 took `SIGSEGV`, and eighteen were green** - the same
+2-in-20 rate the fixture reported when it found this. Both died at the level
+switch, immediately after the incoming world's first chunks loaded.
+`coredumpctl debug <pid> --debugger-arguments="-nx -batch -ex 'thread apply all
+bt'"` printed both stacks in seconds. **That is the whole method**: the
+instrument is a loop plus a core, and `gdb -ex run` is the wrong tool because a
+debugger's slowdown closes both windows.
+
+**They are two unrelated defects that share only the moment.**
+
+**The SIGSEGV: `World::Unload` destroys entities after it has deleted the
+systems those entities point at.**
+
+```
+AudioSystem::Stop  <-  ~AudioSource  <-  ~Entity  <-  ~Chunk  <-  ~ChunkSystem
+   <-  World::Unload  <-  WorldManager::LoadWorld's deferred func  <-  SwapWorlds
+```
+
+A staged root is an entity nothing in the world knows about, so the chunk owns
+it and `~Chunk` deletes it. `~Chunk` runs from `~ChunkSystem`, and `World::
+Unload` deletes the systems in `m_Systems` order - ScriptSystem, **AudioSystem**,
+PhysicsSystem, ChunkSystem - so by the time the chunk system is destroyed the
+audio system those roots' `AudioSource`s hold a pointer to has been freed for
+three deletions. It is intermittent for exactly one reason: it needs roots
+*staged and not yet admitted* at the instant the world goes away, which is a
+window slide meeting a level switch. `World::Unload` releases them itself now
+(`ChunkSystem::ReleaseStagedEntities`), before any system is deleted.
+
+**The rule is worth more than the ordering**: every entity in a world is
+destroyed while every one of that world's systems is still alive. The counter is
+`StreamingCounters::StagedRootsOutlivingSystems` - staged roots destroyed by
+`~Chunk` - and it must stay zero;
+`Streaming/AWorldUnloadDestroysStagedRootsBeforeItsSystems` puts a chunk in that
+state deliberately and was **verified to fail without the fix** (1 vs 0).
+
+`World::Unload` also nulls `m_pChunkSystem`, `m_pAudioSystem` and
+`m_pPhysicsSystem` after deleting them, which it never did. That is the same
+move `GetRenderContext` and `m_pCameraEntity` already made, and it is
+load-bearing here: `Unload` is reachable twice, and the second call would
+otherwise ask a freed chunk system to release its roots.
+
+**The abort: the asynchronous loader shares the process's mutable state with the
+world that is still playing.**
+
+```
+abort in VoxModel::Reset  <-  VoxModel::Read  <-  ResourceManager::LoadVox
+   <-  VoxRenderer::SetModelFilePath  <-  JsonSerializer::ValueToComponent
+   <-  Chunk::StageEntityBatch  <-  JsonSerializer::DeserializeWorld
+   <-  World::OpenWorldAsync's background lambda  <-  JobManager::ThreadLoop
+```
+
+`OpenWorldAsync` runs `World::PreLoad` on a job thread, and deserializing an
+entity loads its model, its texture and its sound - while the outgoing level's
+own chunk staging is doing exactly the same thing on the main thread. **Four
+pieces of process-global state on that path had no synchronisation at all**, and
+every one of them can produce precisely the abort that was observed:
+
+- **`ReferenceManager<T>`** - one `unordered_map` inserted into from both
+  threads, *and* a check-then-load: two threads both finding a resource unloaded
+  both run `Load` on the same object, which is a free of a buffer the other one
+  is rebuilding. That is the stack above, exactly.
+- **`PosixFileSystem`** - the handle map, and a `static uint32_t` handle
+  counter incremented non-atomically. Two threads opening a file at the same
+  moment can be handed **the same handle**, after which one closes the other's
+  file.
+- **`LoggingSystem`** - `m_LogEvents.push_back` and the category map, from any
+  thread that logs. Only error paths log off the main thread, which is why this
+  is the least likely of the four and still a corrupted heap when it happens.
+- **`JsonSerializer::m_vOldPrefabIDs`** - one prefab-id remap on an
+  Application-owned serializer, written by whichever thread is deserializing.
+  This one is *also* wrong when it does not crash: one world's remap can
+  redirect the other world's links. It is `World::m_vOldPrefabIDs` now, which
+  needs no lock - a world is deserialized by one thread and is invisible to
+  every other until it is done.
+
+The three that stay shared are locked. `ReferenceManager::AddReferenceAndLoad`
+holds the lock across the first-time load, because "is it loaded, and if not
+load it" has to be one decision; the file system locks the map and **not** the
+I/O, so two threads reading two files still overlap; the logger locks the two
+containers and calls its subscribers outside them.
+
+`Tests/Foundation/ReferenceManagerChecks.cpp` drives four threads through the
+exact shape. A race check cannot fail deterministically, so the claim was
+measured instead: the pre-fix manager and these two loops, reduced to one
+standalone translation unit, **segfaulted on five runs of five**, and the locked
+one is clean on five of five.
+
+**The ordering question this phase said to check first was the wrong one, and it
+is worth saying why.** `OpenWorldAsync` really does enqueue onto the *old*
+world's job queue, and `World::Unload` really does call `DiscardJobQueue` from
+inside a completion callback. But `WorldManager::LoadWorld` only *queues a
+deferred function*: the unload and the delete happen in `SwapWorlds`, on the
+main thread, a frame later, with that queue already discarded. Neither stack is
+anywhere near a job's lifetime.
+
+**Reading that path did find something, and it is recorded rather than fixed.**
+`JobManager::ThreadLoop` clears the running-job pointer *before* enqueueing the
+finished job, and `DiscardJobQueue` scans those pointers in between - so a job
+that finished in that window outlives the discard and its callback runs against
+a deleted world. That is ledger **M10**. It is not what killed the fixture, it
+has never been observed, and phase 12's own lesson is that a hypothesis with no
+measurement behind it stays a hypothesis.
+
+**Does it predate phase 12? Yes, and `git log -S` answers it where a run cannot.**
+The plan proposed building `e71cafe` and running the loop, and that experiment
+is close to worthless here: at 2 crashes in 20 runs, twenty green runs of the
+old binary still leaves a 12% chance of having missed it. The exact lines are
+better evidence. The staged-root deletion in `~Chunk` arrived with **phase 3**
+(`a83b4d4`, #58); `ReferenceManager`, `OpenWorldAsync` and
+`JsonSerializer::m_vOldPrefabIDs` are in the **initial commit**;
+`PosixFileSystem` came with the **port**. Phase 12 touched fifteen files and not
+one of them appears in either stack.
+
+**The second half: the `RenderChunk` read is adjudicated, not fixed, and the
+argument is next to the code.** The render job reads every resident chunk's CPU
+voxels on a worker while the main thread writes them through `VoxelEditBatch`.
+Three things settle it:
+
+- **the result is already correct** - phase 12's journal republishes every voxel
+  written during a build, so a torn or stale read heals at the swap, and
+  `WindowCommitWritesReplayed` is the exact count of writes that overlapped one;
+- **the read cannot be made atomic** - it is a 256-word `memcpy` per row into
+  write-combined memory, which is the shape that makes the transfer affordable
+  (`RENDERING_PLAN.md` 4d); a per-voxel atomic load gives up the burst and an
+  atomic `Voxel` gives up assignability, which every codec depends on;
+- **ordering it the other way costs what the plan bought** - "do not write a
+  chunk's voxels while a build reads them" is a destruction stall for the length
+  of a window build, on the frame the player shoots.
+
+What is left is a torn read of one aligned 32-bit colour, which neither shipping
+target can tear, and whose value the republish corrects regardless.
+
+**The TSan verdict, recorded as the phase asked: it reports this and nothing
+else.** A `-fsanitize=thread` build of `voxagine_tests` (Release, one extra
+build directory, no GPU needed) runs the whole suite - **128 checks, 0 failed,
+exactly one ThreadSanitizer warning**, and it is `ChunkSystem::RenderChunk`'s
+read on the chunk worker against a main-thread `VoxelCell::SetColor`, in
+`Streaming/ARandomWalkAcrossBoundariesAlwaysSettles`. So the suite already
+drives the race - no new fixture was needed - and the one report is the one
+that is deliberate. **A second warning there is a regression**, and that is
+worth more than the first one being expected:
+
+```bash
+cmake -S . -B Build/Linux/Game/TSan -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DVOXAGINE_BUILD_ENGINE=ON -DVOXAGINE_BUILD_BRINGUP=OFF -DVOXAGINE_BUILD_TESTS=ON \
+  -DCMAKE_CXX_FLAGS="-fsanitize=thread -fno-omit-frame-pointer -g" \
+  -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"
+cmake --build Build/Linux/Game/TSan
+cd Game && TSAN_OPTIONS=halt_on_error=0 VOXAGINE_AUDIO_NULL_DEVICE=1 \
+  ../Build/Linux/Game/TSan/bin/voxagine_tests checks
+```
+
+**Cost: none the fixture can measure**, which is the number that matters for
+the resource lock - it serializes the main thread against the loader for the
+length of one resource load. `CPU peaks (steady/chunk/level)` over the eighteen
+completed runs before the fix span **6.86-11.19 / 16.08-18.71 /
+551.2-577.6 ms**; over the twenty after, **6.92-11.53 / 16.31-18.10 /
+550.8-577.6 ms**. The same distribution, and the level-switch frame - the one
+the lock can lengthen - is unmoved against a 2,000 ms limit.
+
+**Acceptance:** **`gpu_destruction_sync_stress` green twenty consecutive runs in
+Release, against 2 failures in the twenty before it** - 31-37 s each, same
+route, same machine, nothing else running. M9 named and demonstrated with both
+stacks and both messages;
+whether it predates phase 12 answered exactly rather than probabilistically;
+`gpu_destruction_sync_stress` green **twenty consecutive runs** in Release
+against 2 failures in the twenty before; two new checks in `Tests/`, one of them
+verified to fail without its fix; `staged-roots-outliving-systems` gated at 0 in
+`Tests/Baselines/perf.txt`; a TSan verdict recorded - one warning, and it is the adjudicated read; and M10 opened for the one
+thing reading the job queue found and measurement did not.
 
 ### Phase 13 — A lifetime handle for streamed content
 
@@ -2833,6 +3033,35 @@ cd Game && VOXAGINE_AUDIO_NULL_DEVICE=1 VOXAGINE_SYNC_AUDIT=10 VOXAGINE_COVERAGE
 # no `join` token: player one is auto-joined, and a `join` in front of the
 # confirms leaves the menu on a different item and the level never loads.
 ```
+
+**Hunting an intermittent crash (phase 14's method, and it worked in two
+runs).** A single `ctest` run of an intermittent defect proves nothing, and
+`gdb -ex run` closes exactly the windows worth catching — six runs under it
+never reproduced M9. Loop the fixture instead, keep every run's stderr, and let
+the kernel take the core:
+
+```bash
+ulimit -c unlimited
+cd Game
+for i in $(seq 1 20); do
+  VOXAGINE_AUDIO_NULL_DEVICE=1 timeout 900 \
+    ../Build/Linux/Game/Release/bin/voxagine_gpu_destruction_stress \
+    --hidden --uncapped --size 640x360 --frames 200000 \
+    --map Content/Worlds/Fishing_Village/Fishing_Village_Beat1.wld \
+    > /tmp/run$i.out 2> /tmp/run$i.err
+  echo "run $i: exit=$?"
+done
+
+# An abort names its own reason on stderr - `double free or corruption (!prev)`
+# was half of M9's diagnosis - and the core has the stack:
+coredumpctl list
+coredumpctl debug <pid> --debugger-arguments="-nx -batch -ex 'thread apply all bt'"
+```
+
+Exit 134 is an abort, 139 a segfault. **And before attributing anything to the
+most recent phase, `git log -S` the exact lines the stack names**: at a 2-in-20
+failure rate, re-running an older build cannot tell you whether it was already
+broken, and blame can.
 
 Headless always (`--hidden`, never a window on Joey's display), quiet machine
 for numbers, `journalctl -k | grep Xid` before blaming a new change for a

@@ -616,3 +616,60 @@ VOXAGINE_CHECK(Streaming, SavingAWorldMidStreamIsRefusedRatherThanTruncated)
 	CHECK_TRUE(serializer.IsWorldSerializable(&harness.GetWorld()))
 		<< "a settled world still reports itself unsafe to write";
 }
+
+/* Phase 14, and M9's SIGSEGV expressed without a GPU.
+ *
+ * A staged root is an entity nothing in the world knows about, so the chunk is
+ * what destroys it - and it was doing that from ~Chunk, which runs inside
+ * ~ChunkSystem, which World::Unload reaches *after* it has deleted every other
+ * system in m_Systems. The AudioSystem is the first of those and ~AudioSource
+ * calls straight into it, so a level switch that happened to catch a chunk
+ * mid-staging died in AudioSystem::Stop on freed memory. It is intermittent for
+ * exactly one reason: it needs roots staged and not yet admitted at the instant
+ * the world goes away, which is a window slide meeting a level switch.
+ *
+ * The counter is the instrument rather than a sanitizer run, and deliberately:
+ * this harness world has no AudioSystem to free, so the use-after-free is not
+ * reachable here at all. What is reachable is the ordering that produces it -
+ * an entity of this world destroyed after this world's systems - and that is
+ * the thing worth asserting anyway. */
+VOXAGINE_CHECK(Streaming, AWorldUnloadDestroysStagedRootsBeforeItsSystems)
+{
+	StreamingCounters::Reset();
+
+	const StreamingBudgetOverride override(SingleStepBudgets());
+
+	StreamingHarness harness("StreamingGrid5x5");
+	harness.PlaceCamera(k_v3AtOffsetZero);
+	REQUIRE_TRUE(harness.Settle());
+
+	harness.PlaceCamera(k_v3AtOffset32);
+
+	/* Stop the moment some chunk is holding roots it has not admitted, which is
+	   the state the crash needs and the only one this check is about. */
+	bool bHoldingStagedRoots = false;
+
+	for (uint32_t uiFrame = 0; uiFrame < 20000 && !bHoldingStagedRoots; ++uiFrame)
+	{
+		harness.Frame();
+
+		for (const auto& chunkIter : harness.Chunks().GetChunks())
+		{
+			if (chunkIter.second->HasStagedRoots())
+			{
+				bHoldingStagedRoots = true;
+				break;
+			}
+		}
+	}
+
+	REQUIRE_TRUE(bHoldingStagedRoots)
+		<< "no chunk ever held an unadmitted staged root, so the unload this "
+		   "check is about never happens";
+
+	harness.GetWorld().Unload();
+
+	CHECK_EQ(StreamingCounters::Get().StagedRootsOutlivingSystems.load(), 0u)
+		<< "a staged root was destroyed by ~Chunk, which runs after World::Unload "
+		   "has deleted the systems its components hold pointers to";
+}

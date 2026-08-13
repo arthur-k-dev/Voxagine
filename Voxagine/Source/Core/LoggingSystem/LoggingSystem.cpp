@@ -59,9 +59,6 @@ void LoggingSystem::Log(const LogLevel & level, const std::string & category, co
 #endif
 
 	LogEvent* event = new LogEvent();
-	m_LogEvents.push_back(event);
-	LogEvent& NewLogEvent = *m_LogEvents.back();
-	unsigned long NewLogEventID = static_cast<unsigned long>(m_LogEvents.size() - 1);
 
 	/* There is not always a clock. A log line can be emitted before
 	   Platform::Initialize has created the game timer, and by a process that
@@ -69,13 +66,23 @@ void LoggingSystem::Log(const LogLevel & level, const std::string & category, co
 	   logger, i.e. the one place least able to report it. */
 	const GameTimer* pTimer = m_pApplication != nullptr ? m_pApplication->TryGetTimer() : nullptr;
 
-	NewLogEvent.EventTime = pTimer != nullptr ? pTimer->GetCurrentSystemTime() : Time{ 0, 0, 0 };
-	NewLogEvent.Level = level;
-	NewLogEvent.Category = category;
-	NewLogEvent.Description = description;
+	event->EventTime = pTimer != nullptr ? pTimer->GetCurrentSystemTime() : Time{ 0, 0, 0 };
+	event->Level = level;
+	event->Category = category;
+	event->Description = description;
 
-	CreateCategory(category);
-	m_Categories[category].push_back(NewLogEventID);
+	LogEvent& NewLogEvent = *event;
+	unsigned long NewLogEventID = 0;
+
+	{
+		std::lock_guard<std::recursive_mutex> lock(m_Mutex);
+
+		m_LogEvents.push_back(event);
+		NewLogEventID = static_cast<unsigned long>(m_LogEvents.size() - 1);
+
+		CreateCategory(category);
+		m_Categories[category].push_back(NewLogEventID);
+	}
 
 	/* The editor observes LogEventCreated, but a game on a phone has no editor
 	   console. Publish the exact same event through the platform sink rather
@@ -87,6 +94,8 @@ void LoggingSystem::Log(const LogLevel & level, const std::string & category, co
 
 void LoggingSystem::CreateCategory(const std::string & newCategory)
 {
+	std::lock_guard<std::recursive_mutex> lock(m_Mutex);
+
 	std::unordered_map<std::string, std::vector<unsigned long>>::iterator found = m_Categories.find(newCategory);
 
 	if (found == m_Categories.end())

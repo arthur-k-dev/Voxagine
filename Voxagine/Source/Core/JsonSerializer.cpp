@@ -407,7 +407,7 @@ Entity* JsonSerializer::ValueToEntity(Value& val, World& world, bool bGenerateNe
 		if (prop.get_name().to_string() == "ID" && bGenerateNewId)
 		{
 			if (val.HasMember(prop.get_name().to_string()))
-				m_vOldPrefabIDs.insert({ val[prop.get_name().to_string()].GetInt64(), pEntity->GetId() });
+				world.m_vOldPrefabIDs.insert({ val[prop.get_name().to_string()].GetInt64(), pEntity->GetId() });
 			continue;
 		}
 
@@ -1314,9 +1314,9 @@ void JsonSerializer::ResolveWorldLinks(World& pWorld)
 		   the map having to survive at all. */
 		if (connection.uiAttempts == 0)
 		{
-			const auto fIter = m_vOldPrefabIDs.find(connection.iEntityId);
+			const auto fIter = pWorld.m_vOldPrefabIDs.find(connection.iEntityId);
 
-			if (fIter != m_vOldPrefabIDs.end())
+			if (fIter != pWorld.m_vOldPrefabIDs.end())
 				connection.iEntityId = fIter->second;
 		}
 
@@ -1535,7 +1535,7 @@ void JsonSerializer::ResolveWorldLinks(World& pWorld)
 	   remap describes the pass that just ran and nothing else. Pending
 	   connections carry an already-remapped target id (see above), so they do
 	   not need it. */
-	m_vOldPrefabIDs.clear();
+	pWorld.m_vOldPrefabIDs.clear();
 }
 
 void JsonSerializer::ClearEntityLinks(World& world, Entity* pEntity)

@@ -70,6 +70,15 @@ public:
 	   exactly where they were and the chunk is simply still resident. */
 	void ResetStreamingState();
 
+	/* Destroy every root this chunk staged and never admitted, now. Phase 14:
+	   a staged root is an entity nothing else knows about, so *this chunk* is
+	   what destroys it - and a chunk destroyed with the world was doing that
+	   from ~Chunk, which runs inside ~ChunkSystem, which World::Unload reaches
+	   *after* it has deleted the AudioSystem those roots' AudioSources point at.
+	   Calling this while the world's systems are still alive is what keeps every
+	   entity destruction in a world ahead of every system deletion. */
+	void ReleaseStagedRoots();
+
 	bool IsLoaded() const { return m_bIsLoaded; }
 	bool IsLoading() const { return m_bIsLoading; }
 	bool IsUnloading() const { return m_bIsUnloading; }

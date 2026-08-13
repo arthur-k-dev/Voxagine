@@ -100,6 +100,7 @@ set(VOXAGINE_TEST_SOURCES
     # Engine-wide primitives that are not about voxels at all.
     ${VOXAGINE_TEST_DIR}/Foundation/GameTimerChecks.cpp
     ${VOXAGINE_TEST_DIR}/Foundation/JobManagerConfigChecks.cpp
+    ${VOXAGINE_TEST_DIR}/Foundation/ReferenceManagerChecks.cpp
     ${VOXAGINE_TEST_DIR}/Foundation/DateTimeChecks.cpp
     ${VOXAGINE_TEST_DIR}/Foundation/MathUtilsChecks.cpp
     ${VOXAGINE_TEST_DIR}/Foundation/AudioDecodeChecks.cpp

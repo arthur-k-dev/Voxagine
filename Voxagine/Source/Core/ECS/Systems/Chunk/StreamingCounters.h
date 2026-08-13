@@ -160,6 +160,15 @@ struct StreamingCounters
 	   commit transaction. */
 	std::atomic<uint64_t> PublishesOutsideCommit{ 0 };
 
+	/* A staged root destroyed by ~Chunk - that is, one that was still a chunk's
+	   to delete when the chunk itself went away. Phase 14, and it must stay
+	   zero: ~Chunk runs from ~ChunkSystem, which World::Unload reaches after it
+	   has deleted the AudioSystem, the PhysicsSystem and the ScriptSystem, so a
+	   root destroyed there runs component destructors against freed systems.
+	   World::Unload releases them while its systems are alive; a non-zero count
+	   names a teardown path that does not, before it names a crash. */
+	std::atomic<uint64_t> StagedRootsOutlivingSystems{ 0 };
+
 	/* A static renderer re-stamped by VoxelBaker while its chunk instance was
 	   restored from encoded chunk storage - M7. The decoded voxels are what that
 	   chunk looked like when it left, damage included; stamping the pristine
@@ -267,6 +276,7 @@ struct StreamingCounters
 		c.ChunkStorageAllocated.store(0, std::memory_order_relaxed);
 		c.BackBufferFlushRaces.store(0, std::memory_order_relaxed);
 		c.PublishesOutsideCommit.store(0, std::memory_order_relaxed);
+		c.StagedRootsOutlivingSystems.store(0, std::memory_order_relaxed);
 		c.ChunkInstanceRestamps.store(0, std::memory_order_relaxed);
 		c.VoxelStampSlices.store(0, std::memory_order_relaxed);
 		c.VoxelStampRestarts.store(0, std::memory_order_relaxed);

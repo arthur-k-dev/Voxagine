@@ -17,6 +17,7 @@
 #include "Core/ECS/Entities/Camera.h"
 #include "Core/ECS/Components/VoxRenderer.h"
 #include "Core/ECS/Systems/Physics/IntegrityChecker.h"
+#include "Core/ECS/Systems/Chunk/StreamingCounters.h"
 #include "Core/ECS/Components/Particles/ParticleSystem.h"
 #include "Core/ECS/Components/Particles/ParticlePool.h"
 #include <iostream>
@@ -820,6 +821,14 @@ void PhysicsSystem::ApplySphericalDestruction(const Vector3& position, float fRa
 			        fRadius, SphericalDestruction::k_fMaxRadius);
 		}
 	}
+
+	/* Phase 11. Counted before the early-out, because a burst that destroyed
+	   nothing is a result and not a non-event: it says the shot connected with
+	   indestructible geometry, or with air, and those are different lines in a
+	   headless run's report. Once per burst, never per voxel. */
+	StreamingCounters::Get().DestructionBursts.fetch_add(1, std::memory_order_relaxed);
+	StreamingCounters::Get().VoxelsDestroyed.fetch_add(result.uiDestroyed, std::memory_order_relaxed);
+	StreamingCounters::Get().VoxelsProtected.fetch_add(result.uiProtected, std::memory_order_relaxed);
 
 	if (result.uiDestroyed == 0)
 		return;

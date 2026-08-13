@@ -20,7 +20,11 @@ world switch, and the loading screen.
    (2026-08-12); re-verify any `file:line` before editing — lines drift.
 2. Find the first phase in **Progress** that is not `DONE` or `NOT TAKEN`. Do
    **only that phase**. Each phase says *why this order*; do not skip ahead or
-   bundle.
+   bundle. **The table is in execution order, which is no longer numeric
+   order**: 11, 12 and 13 were opened after 10 and run before it, because 10
+   needs Joey at the machine and deletes the reference branch. Phase numbers
+   are identities and are not renumbered — the notes, the branch names and the
+   merged PRs all refer to them.
 3. Meet the phase's **Acceptance** criteria before marking it done. If you
    cannot, you have two honest options and "PARTLY" is neither of them: mark it
    `BLOCKED` with a note, or - if what you landed is a complete mechanism and
@@ -49,8 +53,19 @@ world switch, and the loading screen.
 | 6 — Occupancy-cell proxies + march budget (**gated**) | **NOT TAKEN** | — | Closed on phase 5's measurements, which is what the gate asked for. Every remaining frame over budget is *CPU*, and named: one `VoxelBaker` stamp of 140,640 voxels. During a slide the GPU passes read Voxel 0.24 ms, Sun Shadow 0.34, Pyramid Upload 0.82 — three orders of magnitude below the frames that break the budget. Neither proxy submission nor voxel-pass overdraw is a remaining cost, so E5 and E6 stay open and unmeasured rather than being re-derived on speculation. |
 | 7 — The save guard | DONE | `chunk-streaming-phase-7` | `JsonSerializer::SerializeWorld` refuses a world whose chunks are still streaming, with a harness check. A data-loss class rather than tidiness — see the phase 7 notes. **Renamed from "Editor integration and guards": everything needing the editor open is phase 10**, which cannot be done headless and should not sit inside a phase that can. |
 | 8 — World switch behind the loading screen | DONE except three named items | `chunk-streaming-phase-8` | K5's world-manager half. A level is initialized hidden, streamed over frames the loading screen keeps drawing, and swapped in whole: the same **~300 ms** `initialize` is paid behind the loading screen instead of in the one frame the player waits through, plus **1666–1717 ms** of streaming over **2518–3716 drawn frames**, plus a **16.8–19.0 ms** activation. Readiness folds in the far field and that is free, which closes phase 4's horizon judgement call. `join` and the auto-joined player one landed first, so menu → level is scriptable headlessly at all. **Not done and not attempted: `RenderSystem::Start`'s 258 ms, the far-field harness scenarios, E9's sprite-only *flag* (the sprite discard itself landed).** Confirmed on screen by Joey after the black-frame fix. |
-| 9 — Splitting one renderer's stamp | DONE | `chunk-streaming-phase-9` | **The hitch gate flips: peak 27.9 → 9.82 / 10.15 / 10.31 ms against 16.67, and the `WILL_FAIL` is off.** The walk turned out not to be what lost the 580 k voxels — it is resume-identical at every budget from 1 up, checked against two real models — so the fixes are the two *interactions*: `Bake` no longer clears a half-written renderer, and the bake bookkeeping is written at the start of a stamp rather than the end. Occupancy identical at four slice sizes over eight runs; coverage, sync and pyramid audits clean during streaming with combat. Costs **728–779 → 910–1,071 held ticks** before gameplay starts. Left open: **Joey has not judged pop-in on screen**, and `gpu_destruction_sync_stress` is broken *on master* — see the notes. |
-| 10 — Editor session and closing the plan | OPEN | | Needs Joey at the machine. Deletes `progressive-chunk-experiment`. |
+| 9 — Splitting one renderer's stamp | DONE | `chunk-streaming-phase-9` | **The hitch gate flips: peak 27.9 → 9.82 / 10.15 / 10.31 ms against 16.67, and the `WILL_FAIL` is off.** The walk turned out not to be what lost the 580 k voxels — it is resume-identical at every budget from 1 up, checked against two real models — so the fixes are the two *interactions*: `Bake` no longer clears a half-written renderer, and the bake bookkeeping is written at the start of a stamp rather than the end. Occupancy identical at four slice sizes over eight runs; coverage, sync and pyramid audits clean during streaming — **not** with combat, whatever this row said before: the `fire` token does not work and phase 11 owns it. Costs **728–779 → 910–1,071 held ticks** before gameplay starts. Left open: **Joey has not judged pop-in on screen**, and `gpu_destruction_sync_stress` is broken *on master* — see the notes. |
+| 11 — `--ui-script fire`, and the first headless run that destroys a voxel | DONE | `chunk-streaming-phase-11` | **The token was never broken; the script's clock was.** It counted display frames from process start, so a level whose hold ran long spent every token before `Player::Start` had bound anything — 621 held ticks in one Release run and **2,930** in the next, same binary, same command line, which is the whole of why it read as intermittent. The clock now stops while `World::IsGameplayHeld()`. A scripted run destroys **25,062 voxels over 32 bursts** where it destroyed 0, ever; `[destruction]` is printed by every run. **Both prior diagnoses were wrong** — see the notes. The acceptance run reproduces phase 12 headlessly (228 CPU-only voxels), which is the point of doing 11 first. |
+| 12 — The CPU/GPU voxel disagreement during play | OPEN — **has a headless repro now** | | 540 voxels present only on the CPU (invisible but solid) and 4,426 only on the GPU (visible and not there), seen by Joey in play after phase 9. Phase 11's acceptance run reproduces the CPU-only half in four minutes: **228 of 75.5 M**, against **0** for the identical run with the `fire` tokens replaced by `wait`. Caused by destruction, and *not* an audit race — see the phase 11 notes for both, and do not re-derive either. |
+| 13 — A lifetime handle for streamed content | OPEN | | Four of the ten defects the phase 9 play session found are one shape, and so is ledger M8: a raw pointer to streamed content, held across a frame, with nothing to say the target died. More guards is not the answer — two of them crashed *inside* the guard. `PlayerSlot` generalised into a handle (id + generation, resolved on use). |
+| 10 — Editor session and closing the plan | OPEN — **last** | | Needs Joey at the machine. Runs after 11–13: it deletes `progressive-chunk-experiment` and its acceptance is the whole suite green, so it cannot honestly precede work that is still landing. Also owns `gpu_destruction_sync_stress` (broken on master, see the phase 9 notes) and the pop-in judgement. |
+
+**The order to fix, and why it is this one.** 11 first because it is small and
+because 12 cannot be *measured* without it. 12 second because it is a live
+correctness defect the player can see, and because the instrument that finds it
+(`VOXAGINE_SYNC_AUDIT` over a run that destroys geometry) is exactly what 11
+delivers. 13 third because it is the largest and the least urgent — the crashes
+it prevents are known and individually fixed — and because it will touch code
+11 and 12 are editing. 10 last, unchanged.
 
 ---
 
@@ -2137,8 +2152,7 @@ as a class since M8 and each instance is still being found by crashing. The
 answer is not more guards - two of mine crashed *inside* the guard - but a
 handle type (id plus generation, resolved on use) that game code uses instead of
 `Entity*`/`Component*` for anything it keeps. `PlayerSlot` is that, for one
-case. **That is the next piece of work this plan should own**, and it is bigger
-than a phase note.
+case. It was bigger than a phase note, so it is **phase 13** now.
 
 **Open, and not this branch's**: the CPU voxels and the mapping disagree during
 play - 540 voxels present only on the CPU (invisible but solid) and 4,426 only
@@ -2149,12 +2163,286 @@ input, destruction or a world switch to appear. The map-load reading of
 `149800 of 8388608` is probably an artefact of auditing during a phase-8 world
 switch, where two worlds are alive and the audit compares one world's voxels
 against the other's mapping. Chasing it needs a headless run that actually
-destroys voxels, which needs the `fire` token fixed first.
+destroys voxels, which needs the `fire` token fixed first. That is **phase 12**,
+after **phase 11**, and the ordering is the reason those two are numbered the
+way round they are.
+
+### Phase 11 — `--ui-script fire`, and the first headless run that destroys a voxel
+
+*First, because it is the smallest of the four and because phase 12 cannot be
+measured without it. The verification reference at the bottom of this file has
+claimed "a scripted boundary crossing with combat" for four phases and it has
+never been true: nothing headless in this tree destroys a voxel, so the
+destruction audits' in-game half has only ever been run by hand.*
+
+**What is already known.** Verified 2026-08-13; re-check the line numbers, they
+drift.
+
+- The token exists and is mapped the whole way to the keyboard snapshot:
+  `ScancodeForToken` returns `SDL_SCANCODE_P` (`SDLKeyboard.cpp:45`) and
+  `applyScriptedScancode` sets `state.P` (`SDLKeyboard.cpp:316`). So this is
+  *not* the `backward-on` failure, where a token had no case in the overlay and
+  spent ninety scripted seconds doing nothing in silence.
+- **`KeyboardController::Update` is the only caller of `Keyboard::GetState()`
+  in the tree** (`KeyboardController.cpp:50`), once per display frame from
+  `Application::Run` → `InputContextNew::Update` (`Application.cpp:219`). That
+  kills the most attractive theory before anyone builds on it — a second reader
+  consuming the one frame the scripted key is true, which would explain why
+  `forward-on` works (it uses `Held`, which persists across calls) and `fire`
+  does not. Checked, not assumed.
+- `UpdateKeyState(IK_P, keyboardState.P)` (`KeyboardController.cpp:104`) is what
+  turns it into `IKS_PRESSED`, and `VoxApp.cpp:71` registers "Fire" on `IK_P`
+  with exactly that status.
+- What phase 9 measured: `Weapon::Fire`'s first line printed nothing across
+  2,500 headless frames with `join` and four `fire`s.
+
+**Two hypotheses to price before touching any input code.** Both are free —
+they need one run each with an environment variable already in the tree — and
+between them they split "the input never arrives" from "the input arrives and
+does something else", which phase 9 never actually distinguished.
+
+1. **The binding does not exist yet.** `Player::Start` binds "Fire"
+   (`Player.cpp:265`), and gameplay does not tick while `World::IsGameplayHeld()`
+   — a Debug `Fishing_Village_Beat1` holds **910–1,071 ticks** after phase 9.
+   A script at `--ui-script-interval 60` has spent its first sixteen tokens
+   inside that hold, and the presses land where no player has bound anything.
+   Read the `[ui] step` lines against `[world] gameplay held N ticks`; both
+   already print. This is the same mis-attribution shape as the link retry
+   budget (see phase 3's notes) — a budget burned during the hold.
+2. **The callback runs and takes another branch.** The Fire binding prints
+   receiver / ammo / incoming / casted / partner / return on entry under
+   `VOXAGINE_GAMEPLAY_DEBUG=1` (`Player.cpp:270`), which is *upstream* of
+   `Weapon::Fire`. If that line prints, the input path is healthy and the branch
+   chosen is the recall path, which is a gameplay question and not this phase's.
+
+**Scope it small.** A token that works, and — if the fix is timing — a token
+that *waits on gameplay* rather than a longer interval, which goes stale the
+next time a level's hold changes. `--ui-script` is a test harness; it does not
+need a scripting language.
+
+**Aiming is part of the acceptance and is easy to forget.** A throw that hits
+nothing destroys nothing, so "the weapon fired" is not the deliverable. Pick a
+level and a start position where firing forward hits destructible geometry, and
+say which in the phase notes so the run is reproducible.
+
+**Acceptance:**
+
+- A headless run destroys voxels, and the count is printed — not inferred from
+  a screenshot. If nothing counts destroyed voxels today, add the counter to
+  `StreamingCounters`, where the exact/machine-independent rule already applies.
+- `VOXAGINE_SYNC_AUDIT`, `VOXAGINE_COVERAGE_AUDIT` and `VOXAGINE_PYRAMID_AUDIT`
+  clean over a single run that **both** slides the window and destroys geometry.
+  That is the case every audit in this plan exists for and has never had.
+- The "**Not combat**" caveat comes out of the verification reference below and
+  out of `CLAUDE.md`, and nothing replaces it with a claim the run does not
+  support.
+- CPU suites green in Debug and Release; `Tests/Baselines/perf.txt` unmoved.
+
+#### Phase 11 notes — the clock was the bug, and both prior diagnoses were wrong
+
+**The token was never broken. The script's *clock* was.** `StepUIScript` counted
+display frames from process start, and a level spends hundreds of them with
+gameplay held while its initial window streams in — so the tokens were spent
+into a world where no entity had ticked and `Player::Start` had not run, which
+means nothing had bound "Fire" to anything. The keys arrived; there was no
+listener.
+
+**It was intermittent for one reason and the reason is in `CLAUDE.md` already**:
+how long the hold lasts is how long the bake takes. Two Release runs of the same
+binary, the same command line and the same level measured **621** and **2,930**
+held ticks. At `--ui-script-interval 60` that is the difference between a script
+whose tokens land in gameplay and one that spends all twelve of them before the
+level exists. The 621-tick run *did* enter the Fire callback — which is why the
+first diagnostic run of this phase disproved phase 9's conclusion before any
+code was written.
+
+**Both recorded diagnoses were wrong, and both were wrong in the same way.**
+Phase 9 instrumented `Weapon::Fire`'s first line, saw nothing, and concluded the
+input stopped "somewhere between the synthetic key event and
+`InputHandler::BindAction`". The `[player] Fire on ...` line under
+`VOXAGINE_GAMEPLAY_DEBUG=1` is *upstream* of `Weapon::Fire` and was already in
+the tree; one run with it on separates "no input" from "input, other branch",
+and phase 9 never ran it. This phase's own notes then predicted the second
+hypothesis (the callback runs and picks recall) and that was wrong too — the
+callback did not run at all, for a third reason neither had named.
+**When two hypotheses are cheap, run both before writing either down as the
+answer.**
+
+**The fix is one rule: the script's clock does not run while gameplay is held.**
+`Keyboard::SetUIScriptPaused`, set each frame from `Application::Run` off
+`World::IsGameplayHeld`. Deliberately *not* a longer interval — an interval is
+tuned against a hold that varies 5x between runs of the same binary — and
+deliberately not a new `wait-for-gameplay` token, which would leave every
+existing script silently broken. **Both worlds are asked**: during a phase 8
+switch the top world is the sprite-only loading screen, which is never held,
+while the level behind it is, and pressing keys at a loading screen is the same
+defect one indirection along. It prints
+`[ui] script paused: gameplay held` / `[ui] script resumed after N held frames`
+on the transition, which is the line that tells a later session whether a script
+that "did nothing" was ever running at all.
+
+**Measured, `Fishing_Village_Beat1`, Release, headless:**
+
+| | |
+|---|---|
+| `fire` tokens reaching the Fire callback | 0 of 4 (when the hold is long) → **4 of 4** |
+| voxels destroyed by a scripted run | 0, ever → **25,062 over 32 bursts** |
+| chunk transition in the same run | yes — chunks at Y = 3 arrive mid-run |
+
+Four `fire` tokens produce more than four bursts because a thrown bullet is
+recalled, ricochets and explodes; the count is of `ApplySphericalDestruction`
+calls, not of trigger pulls.
+
+**`[destruction] N voxels destroyed, M protected, over B bursts` is printed by
+every run, unconditionally**, at the end of `Application::Run`, from three new
+`StreamingCounters`. Destroyed and protected are separate because a shot that
+hits only indestructible geometry destroys nothing and is *not* the same event
+as a shot that hit air — and because the cheapest guard against this plan
+claiming combat coverage again for four more phases is a run that reports zero.
+The counters do not move in `voxagine_tests`: the harness drives
+`SphericalDestruction::Apply` directly and never constructs a `PhysicsSystem`,
+so `Tests/Baselines/perf.txt` is unchanged.
+
+**Aiming turned out to matter and is worth knowing before writing a script.**
+`Weapon::Fire` throws along `Player::GetDirection()`, and with two players
+present the partner catches it: the first acceptance attempt on
+`Fishing_Village_Beat2` produced a perfect throw/catch/recall loop and
+**0 bursts**. Beat1, walking forward into the village first, destroys 20–25 k
+voxels. *The weapon firing and the weapon hitting something are different
+acceptances, and only the second one is what the audits need.*
+
+##### What the acceptance run found, which is phase 12's
+
+The run this phase exists to make possible — window slide **and** destruction,
+Beat1, all three audits — is clean on two of the three:
+
+- **Coverage: 0 uncovered bricks above the ground row** (25,766 in the
+  deliberately-uncovered y = 0 row), 456 proxies.
+- **Pyramid: 0 of 10,785,024 texels disagree** over 5 mips; brick/bitmap
+  validation 0 of 75,497,472.
+- **Sync: 228 of 75,497,472 voxels occupied only on the CPU** — invisible but
+  solid. 0 only on the GPU.
+
+**That is phase 12's defect, reproduced headlessly for the first time**, and the
+run is four minutes. Two things are already established about it and neither
+needed a hypothesis:
+
+- **It is caused by destruction.** The identical script with every `fire`
+  replaced by `wait` reports **0** disagreements and 0 bursts. Same level, same
+  walk, same audit, same window slide.
+- **It is not an audit race, and that theory should not be retried.** The audit
+  stages the whole mapping on the main thread with the world not ticking, so
+  there is no window in which the CPU grid can move under it. The 10 s in
+  `staged ... in 10073.5 ms` is PCIe read time inside one frame, not a period
+  during which the game ran.
+
+The direction is the opposite of the play session's larger number (540 CPU-only
+*and* 4,426 GPU-only there, 228 CPU-only and 0 GPU-only here), so this may be
+one half of it rather than all of it — phase 12 should say which rather than
+assume.
+
+### Phase 12 — The CPU/GPU voxel disagreement during play
+
+*Second, because it is a live correctness defect a player can see, and because
+the instrument that finds it is the run phase 11 delivers.*
+
+**The symptom, from Joey's play session after phase 9**: `VOXAGINE_SYNC_AUDIT`
+reports **540 voxels present only on the CPU** — invisible but solid — and
+**4,426 only on the GPU** — visible and not there. On screen that is a destroyed
+pillar coming back visually while collision stays correct.
+
+**Not phase 9's**: master `c5595d3` and the phase 9 branch both report **0**
+disagreements on the same headless run. It needs input, destruction or a world
+switch to appear, which is the whole reason phase 11 comes first.
+
+**Start from phase 11's repro, it is four minutes and it is exact.** Beat1,
+`--ui-script "wait,forward-on,fire,wait,fire,wait,fire,wait,wait,fire,wait,fire,wait,forward-off,fire,wait,fire,wait"`
+at interval 60 with `VOXAGINE_SYNC_AUDIT=10`: **228 of 75,497,472 voxels
+occupied only on the CPU**, 0 only on the GPU. The same script with every `fire`
+replaced by `wait` reports 0, so destruction is the cause and the window slide
+is not. The audit is not racing the world (it stages on the main thread with
+nothing ticking) — phase 11's notes have both, and neither is worth re-deriving.
+
+**Two things to rule in or out before theorising**, both cheap and both exact:
+
+- **`StreamingCounters::ChunkInstanceRestamps` must be zero.** A re-stamp over
+  decoded voxels is the *known* way this tree produces "destroyed terrain came
+  back" (M7), and the counter exists precisely so the answer is a number rather
+  than an argument. GPU-visible-only voxels are that defect's exact shape.
+- **The `149800 of 8388608` reading at map load is probably an audit bug.**
+  Phase 8 keeps two worlds alive during a switch; if the audit takes the voxels
+  of one and the mapping of the other it will report garbage while nothing is
+  wrong. Check its world selection against
+  `WorldManager::LoadWorldAfterStreaming`/`UpdateStreamingWorld` — and note that
+  `RenderContext::ResizeWorldBuffer` had the *same* bug in phase 8, taking the
+  visible world where it needed the world being sized. If that is what this is,
+  fixing the audit is this phase's work and the play-session numbers still need
+  explaining separately.
+
+**Do not re-derive the encode-vs-`Clear` ordering race** (M7's notes): it was
+measured and the damage survives the codec exactly.
+
+**Acceptance:** a headless repro; the mechanism *named and demonstrated*, not
+inferred; `VOXAGINE_SYNC_AUDIT` reporting 0 of 75.5 M over a run that destroys
+geometry, slides the window **and** switches world; and whichever exact counter
+would have caught it earlier added to `StreamingCounters` and gated in
+`Tests/Baselines/perf.txt`. A fix with no counter behind it leaves the next
+instance to be found by crashing, which is how this one was found.
+
+### Phase 13 — A lifetime handle for streamed content
+
+*Third: the largest of the four, the least urgent — every crash it prevents has
+already been fixed individually — and the one most likely to touch code phases
+11 and 12 are editing, which is why it is not first.*
+
+**The class.** Four of the ten defects the phase 9 play session found, and
+ledger M8, are one sentence: *a raw pointer to streamed content, held across a
+frame, with nothing to tell it the target died.* Chunk streaming destroys
+entities routinely, so this tree manufactures the hazard as a matter of course.
+`CLAUDE.md` has documented it as a class since M8 and every instance since has
+still been found by crashing.
+
+**More guards is not the fix, and that is measured rather than aesthetic**: two
+of the crashes were *inside* the guard —
+`pSpawner->GetOwner()->IsDestroyed()` where the owner was not null but freed.
+**A pointer you must dereference to validate cannot be validated.**
+
+**What the answer looks like**, and both halves already exist as one-offs worth
+generalising rather than copying a third time:
+
+- `PlayerSlot` (`Game/Source/General/PlayerSlot.h`) — an empty slot re-resolves
+  by index every tick, forever, so there is no deadline to lose and a player
+  destroyed by a chunk unload re-attaches when it comes back.
+- `SpawnerManager` — reduces each link to an entity id on the frame it is
+  written and resolves ids from then on.
+
+One handle type (id + generation, resolved on use) that game code holds instead
+of `Entity*`/`Component*` for anything it keeps across a frame boundary.
+
+**What it is not.** Not an ECS rewrite, and not a replacement for
+`World::EntityLinkRecord`/`JsonSerializer::ClearEntityLinks` — those repair
+*reflected* `Entity*` properties, which is a different mechanism and the reason
+this was invisible for the life of the tree (no engine type has one; every one
+is game code, which the test suite does not link).
+
+**The first deliverable is the list, not the conversion.** Audit what holds a
+pointer to an entity or component across a frame — managers, components, the
+weapon/bullet lists, the camera's players — and write it into the phase notes
+before converting anything. A conversion list assembled from memory will miss
+the holder that crashes.
+
+**Acceptance:** the handle type exists with checks in `Tests/`; every holder on
+the audited list converted or explicitly excused in the notes;
+`Tests/Harness/StreamingProbe.h` grown a case that destroys a target and then
+resolves a stale handle, green under **ASan** (it is what found M8's
+use-after-free on its first run); the streaming fuzz run with targets being
+destroyed under load, clean; CPU suites green in Debug and Release.
 
 ### Phase 10 — Editor session and closing the plan
 
-*Last, and it is the only phase that cannot be done headless. Everything it
-asks for needs the editor open in front of somebody.*
+*Last of all four remaining phases — see the order note under Progress — and the
+only one that cannot be done headless. Everything it asks for needs the editor
+open in front of somebody.*
 
 - Guard the remaining editor operations that assume a settled world - play-mode
   enter and map switch wait on (or refuse during) `ChunkSystem::IsStreaming()`.
@@ -2163,10 +2451,21 @@ asks for needs the editor open in front of somebody.*
   `Validate Coverage Pyramid`, `Validate Voxel Representations`) must be correct
   against the double-buffered flush semantics phase 1 introduced - take the
   branch's `Validate(bBack)` split.
+- **Fix `gpu_destruction_sync_stress`, or retire it and say so.** It has
+  measured nothing since phase 4 and fails identically on master - see the
+  phase 9 notes for what was tried and why raising `--frames` is not the whole
+  of it. Until then `-L gpu` is two green and one red, and a red gate nobody
+  expects to pass is worse than no gate.
+- **Joey judges pop-in on screen.** The streaming budget constants are tuned
+  against a judgement nobody has made yet, and phase 9's sliced stamping moved
+  work into more frames precisely where that shows. Whether
+  `StreamingBudgets::VoxelBaking`'s 2 ms is right while a loading screen is the
+  only thing competing for the frame is the same question and is asked in
+  phase 9's notes.
 - Sweep the diff for anything in the keep list not yet landed, then **delete
-  `progressive-chunk-experiment` (local and origin)**. Not before: while phases
-  8 and 9 are open, K5's world-manager half, K9/K10's remainder and E9 are
-  unlanded and the branch is still the reference for them.
+  `progressive-chunk-experiment` (local and origin)**. Not before: E5, E6 and
+  E9's sprite-only flag are unlanded and the branch is still the reference for
+  them, and phases 11-13 may want to read it.
 - Update `CLAUDE.md`'s streaming sections and the ledgers here, and move this
   plan's summary paragraph into `CLAUDE.md` the way the other plans do.
 
@@ -2175,7 +2474,7 @@ play, stop, switch world - with validation layers on and zero errors; a saved
 world diff-identical to a save taken at rest (phase 7's refusal makes
 truncation impossible, which is not the same claim); the complete suite -
 checks, scenarios (ASan, single-step sweep, fuzz), perf counters, both GPU
-gates - green in Debug and Release; branch deleted.
+gates - green in Debug and Release; pop-in judged on screen; branch deleted.
 
 ---
 
@@ -2192,16 +2491,27 @@ ctest --test-dir Build/Linux/Editor/Release --output-on-failure
 # The streaming hitch gate and the destruction stress (GPU, local only):
 ctest --test-dir Build/Linux/Game/Release -L gpu --output-on-failure
 
-# A scripted boundary crossing, headless, audits on. **Not combat**: the `fire`
-# token presses P, and P never reaches Weapon::Fire in a headless run - measured
-# by instrumenting that function's first line, which printed nothing across a
-# 2,500-frame run with `join` and four `fire`s. Movement and streaming are
-# driven; destruction is not, and no headless script in this tree destroys a
-# voxel today. Say "with combat" only once that is fixed.
+# A scripted boundary crossing with combat, headless, audits on. Real combat as
+# of phase 11: every run ends with a `[destruction] N voxels destroyed` line, and
+# a run that reports 0 has not tested destruction whatever else it did.
+#
+# Beat1 rather than Beat2, and walk before firing: the throw goes along the
+# player's facing direction, and on Beat2 from spawn the partner simply catches
+# it - a perfect throw/catch loop and 0 bursts. Expect ~20-25 k voxels over
+# ~23-32 bursts here, and chunks arriving at Y = 3 as the window slides.
+#
+# --frames is a main-loop iteration count and the initial-window hold spends
+# hundreds of them, so budget several thousand more than the script needs. The
+# script's own clock no longer runs during that hold (phase 11).
 cd Game && VOXAGINE_AUDIO_NULL_DEVICE=1 VOXAGINE_SYNC_AUDIT=10 VOXAGINE_COVERAGE_AUDIT=10 \
-  ../Build/Linux/Game/Release/bin/BitBuster --hidden --size 1440x810 --frames 3000 \
-  --map Content/Worlds/Fishing_Village/Fishing_Village_Beat2.wld \
-  --ui-script "wait,wait,forward-on,wait,fire,wait,wait,forward-off" --ui-script-interval 60
+  VOXAGINE_PYRAMID_AUDIT=10 \
+  ../Build/Linux/Game/Release/bin/BitBuster --hidden --size 1440x810 --frames 12000 \
+  --map Content/Worlds/Fishing_Village/Fishing_Village_Beat1.wld \
+  --ui-script "wait,forward-on,fire,wait,fire,wait,fire,wait,wait,fire,wait,fire,wait,forward-off,fire,wait,fire,wait" \
+  --ui-script-interval 60
+# Add VOXAGINE_GAMEPLAY_DEBUG=1 to see the Fire callback's branch per press.
+# The sync audit reports 228 CPU-only voxels on this run: that is phase 12's
+# open defect, not a regression in whatever you are checking.
 ```
 
 Headless always (`--hidden`, never a window on Joey's display), quiet machine

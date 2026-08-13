@@ -30,6 +30,8 @@ namespace
 		uint32_t uiFrame = 0;
 		SDL_Scancode Held = SDL_SCANCODE_UNKNOWN;
 		bool bParsed = false;
+		bool bPaused = false;
+		uint32_t uiPausedFrames = 0;
 	};
 
 	UIScript g_UIScript;
@@ -99,6 +101,25 @@ namespace
 		if (!g_UIScript.bParsed)
 			ParseUIScript();
 
+		/* The clock does not run while gameplay is held. It counted display
+		   frames from process start, and a world holds gameplay for as long as
+		   its initial window takes to stream - 621 ticks in one Release run of
+		   Fishing_Village_Beat2 and 2,930 in the next, on the same binary and
+		   the same command line, because the only variable is how long the bake
+		   takes. At the shipping interval of 60 that is the difference between a
+		   script whose tokens land in gameplay and one that spends all twelve of
+		   them before a single entity has ticked - which is exactly why `fire`
+		   read as "the input never arrives" for four phases. Nothing has bound
+		   an action yet: Player::Start has not run.
+
+		   Frames, not ticks: this is the same clock the tokens are spent on.
+		   See CHUNK_STREAMING_PLAN.md phase 11. */
+		if (g_UIScript.bPaused)
+		{
+			++g_UIScript.uiPausedFrames;
+			return SDL_SCANCODE_UNKNOWN;
+		}
+
 		const uint32_t uiInterval = LaunchOptions::Get().GetUIScriptInterval();
 
 		if (g_UIScript.uiFrame++ % uiInterval != 0)
@@ -144,6 +165,24 @@ Keyboard::~Keyboard()
 {
 	if (s_pInstance == this)
 		s_pInstance = nullptr;
+}
+
+void Keyboard::SetUIScriptPaused(bool bPaused)
+{
+	if (bPaused == g_UIScript.bPaused)
+		return;
+
+	g_UIScript.bPaused = bPaused;
+
+	/* Printed on the transition only, and it is the line that tells a later
+	   session whether a script that "did nothing" was ever running. */
+	if (bPaused)
+		printf("[ui] script paused: gameplay held\n");
+	else
+		printf("[ui] script resumed after %u held frames\n", g_UIScript.uiPausedFrames);
+
+	if (!bPaused)
+		g_UIScript.uiPausedFrames = 0;
 }
 
 Keyboard& Keyboard::Get()

@@ -57,15 +57,22 @@ for UI regression checks - `LaunchOptions.h`. See `Docs/MOBILE_PORT_LOG.md`'s
 last section for the device measurements and what is still owed.
 
 **Chunk streaming has its own plan: `Docs/CHUNK_STREAMING_PLAN.md`; phases 0-5,
-8 and 9 are done, phase 6 is closed as *not taken*, and all that remains is
-phase 10 (editor session, and deleting the experiment branch).** A window
-transition's worst frame is **150.2 -> 10.3 ms** across them - the hitch gate
-passes and its `WILL_FAIL` is off - and `[world-switch] initialize` is
-**876 -> 317 ms**. Two things phase 9 left open: **Joey has not judged pop-in on
-screen**, which is what the budget constants are tuned against, and
-`gpu_destruction_sync_stress` is broken *on master* (its `--frames` budget
-expires before R1 releases gameplay, so it has measured nothing since phase 4);
-phase 10 owns it.
+8, 9 and 11 are done and phase 6 is closed as *not taken*.** A window transition's
+worst frame is **150.2 -> 10.3 ms** across them - the hitch gate passes and its
+`WILL_FAIL` is off - and `[world-switch] initialize` is **876 -> 317 ms**.
+**Three things remain, in the order to fix them**: 12, the
+CPU/GPU voxel disagreement Joey saw in play (540 voxels CPU-only, 4,426 GPU-only
+- a destroyed pillar coming back visually while collision stays correct), which
+**phase 11 reproduced headlessly**: 228 CPU-only voxels on a four-minute Beat1
+run with destruction, against 0 on the identical run without it; 13, a lifetime handle (id
++ generation, resolved on use) for the raw pointers game code holds into
+streamed content, which is four of the phase 9 play session's ten defects and
+ledger M8; then 10, the editor session, which needs Joey at the machine, deletes
+`progressive-chunk-experiment`, and owns both of the things phase 9 left open -
+**pop-in has not been judged on screen**, and `gpu_destruction_sync_stress` is
+broken *on master* (its `--frames` budget expires before R1 releases gameplay,
+so it has measured nothing since phase 4). The table in that plan is in
+execution order, not numeric order.
 
 **A world switch with a loading screen brings the new world up *behind* it.**
 `WorldManager::LoadWorldAfterStreaming`/`UpdateStreamingWorld` (phase 8): the
@@ -144,16 +151,28 @@ independently.
   two identical NaN lines as "diverged". They are explicit identities now, and
   **`Quaternion x;` in this tree is always a bug**.
 
-**`--ui-script` cannot fire a weapon, and the plans have claimed otherwise for
-four phases.** The `fire` token presses P, `VoxApp` registers the "Fire" action
-on `IK_P`, and `Weapon::Fire` is still never entered - instrumenting its first
-line printed nothing across 2,500 headless frames with `join` and four `fire`s,
-so the input stops somewhere between the synthetic key event and the player's
-`InputHandler::BindAction`. **No headless run in this tree destroys a voxel**,
-which means every "scripted boundary crossing with combat" is a boundary
-crossing with movement; the destruction audits' in-game half has only ever been
-run by hand. Fixing the token is small and would give the sync/coverage/pyramid
-audits the case they exist for.
+**A scripted run destroys voxels now, and the token was never what was broken -
+the script's *clock* was.** Chunk streaming phase 11. `StepUIScript` counted
+display frames from process start, and a level spends hundreds of them with
+gameplay held while its initial window streams, so the tokens were spent into a
+world where no entity had ticked and `Player::Start` had not bound "Fire" to
+anything. The keys arrived; there was no listener. It read as intermittent
+because **how long the hold lasts is how long the bake takes**: 621 held ticks
+in one Release run and 2,930 in the next, same binary, same command line. The
+clock now stops while `World::IsGameplayHeld()` (`Keyboard::SetUIScriptPaused`,
+set from `Application::Run`, asking *both* the top world and the streaming one
+so a script cannot press keys at a loading screen either), and it prints
+`[ui] script paused/resumed`. **Every run now ends with
+`[destruction] N voxels destroyed, M protected, over B bursts`** from three
+`StreamingCounters`; a run reporting 0 has not tested destruction whatever else
+it did. Two lessons outlived the fix: the recorded diagnosis ("the input stops
+between the synthetic key event and `InputHandler::BindAction`") came from
+instrumenting `Weapon::Fire` only, when `VOXAGINE_GAMEPLAY_DEBUG=1` already
+prints one line *upstream* of it and separates "no input" from "input, other
+branch" in a single run - **when two hypotheses are both free, run both**. And
+**a weapon firing is not a weapon hitting something**: the throw goes along
+`Player::GetDirection()`, so on Beat2 from spawn the partner catches it and a
+run with four perfect throws destroys nothing. Walk into Beat1's village first.
 
 **The game is written as two roles, and one player used to hit a null in every
 one of them.** `Weapon::Fire` dereferenced the linked player unguarded, so a solo

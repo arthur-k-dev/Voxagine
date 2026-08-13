@@ -181,6 +181,23 @@ struct StreamingCounters
 	   stamp would then never complete. */
 	std::atomic<uint64_t> VoxelStampRestarts{ 0 };
 
+	/* --- phase 11: did this run destroy anything? ---------------------------
+	   Not streaming, and here anyway because this is the tree's one place for
+	   exact machine-independent counts and because the question these answer is
+	   asked *of a streaming run*: every audit in this plan wants a run that
+	   slides the window and destroys geometry in the same session, and until
+	   phase 11 no headless run in this tree destroyed a single voxel.
+
+	   Incremented once per burst with the burst's totals, never per voxel.
+	   Destroyed and protected are counted apart because a shot that hits only
+	   indestructible geometry destroys nothing and is not the same event as a
+	   shot that hit air - which is the difference between "the weapon fired"
+	   and "the weapon fired at something", and only the second one is what the
+	   audits need. */
+	std::atomic<uint64_t> DestructionBursts{ 0 };
+	std::atomic<uint64_t> VoxelsDestroyed{ 0 };
+	std::atomic<uint64_t> VoxelsProtected{ 0 };
+
 	static StreamingCounters& Get() { return s_Counters; }
 
 	static void Reset()
@@ -215,6 +232,9 @@ struct StreamingCounters
 		c.ChunkInstanceRestamps.store(0, std::memory_order_relaxed);
 		c.VoxelStampSlices.store(0, std::memory_order_relaxed);
 		c.VoxelStampRestarts.store(0, std::memory_order_relaxed);
+		c.DestructionBursts.store(0, std::memory_order_relaxed);
+		c.VoxelsDestroyed.store(0, std::memory_order_relaxed);
+		c.VoxelsProtected.store(0, std::memory_order_relaxed);
 	}
 
 	static void RaiseMax(std::atomic<uint64_t>& target, uint64_t uiValue)

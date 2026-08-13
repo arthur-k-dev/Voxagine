@@ -11,6 +11,8 @@
 #include "Core/System/FileSystem.h"
 #include "Platform/Window/WindowContext.h"
 #include "Platform/Input/Temp/InputContextNew.h"
+#include "Core/Platform/Input/SDL/SDLKeyboard.h"
+#include "Core/ECS/Systems/Chunk/StreamingCounters.h"
 #include "Platform/Rendering/RenderContext.h"
 #include "Editor/imgui/ImguiSystem.h"
 
@@ -214,6 +216,23 @@ void Application::Run()
 				   limit set (this game's default) that gate does nothing. */
 				std::this_thread::sleep_for(std::chrono::milliseconds(100));
 				return;
+			}
+
+			/* --ui-script's clock is stopped while gameplay is held, so a
+			   scripted token is never spent on a world where no entity has
+			   ticked. Both worlds are asked: during a phase 8 switch the top
+			   world is the sprite-only loading screen, which is never held,
+			   while the level streaming in behind it is - and pressing keys at
+			   a loading screen is the same defect one indirection along.
+			   No-op unless --ui-script is set. See Keyboard::SetUIScriptPaused. */
+			if (LaunchOptions::Get().HasUIScript())
+			{
+				const World* pTopWorld = m_WorldManager.GetTopWorld();
+				const World* pStreamingWorld = m_WorldManager.GetStreamingWorld();
+
+				Keyboard::SetUIScriptPaused(
+					(pTopWorld != nullptr && pTopWorld->IsGameplayHeld()) ||
+					(pStreamingWorld != nullptr && pStreamingWorld->IsGameplayHeld()));
 			}
 
 			m_Platform.GetInputContext()->Update();
@@ -428,6 +447,20 @@ void Application::Run()
 			std::printf(pFPS);
 #endif
 		});
+	}
+
+	/* One line, always, so a headless run says whether it destroyed anything
+	   rather than leaving it to be inferred from a screenshot. Phase 11 exists
+	   because "a scripted boundary crossing with combat" was claimed for four
+	   phases while no headless run in this tree destroyed a single voxel, and
+	   the cheapest guard against saying it again is a run that reports zero. */
+	{
+		const StreamingCounters& counters = StreamingCounters::Get();
+
+		fprintf(stderr, "[destruction] %llu voxels destroyed, %llu protected, over %llu bursts\n",
+			static_cast<unsigned long long>(counters.VoxelsDestroyed.load(std::memory_order_relaxed)),
+			static_cast<unsigned long long>(counters.VoxelsProtected.load(std::memory_order_relaxed)),
+			static_cast<unsigned long long>(counters.DestructionBursts.load(std::memory_order_relaxed)));
 	}
 
 	// Stop application-level producers while all of their dependencies are alive.

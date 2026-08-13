@@ -6,12 +6,14 @@
 #include <vector>
 
 #include "Core/Application.h"
+#include "Core/ECS/Systems/Chunk/StreamingBudgets.h"
 #include "Core/Math.h"
 #include "Core/Platform/Rendering/VoxelBrickGrid.h"
 #include "Core/Voxels/VoxelWindow.h"
 
 class Camera;
 class ChunkSystem;
+class Entity;
 class VoxelGrid;
 class World;
 
@@ -88,6 +90,26 @@ private:
 	uint32_t m_uiSwaps = 0;
 };
 
+/* Replaces the whole budget set for as long as it is in scope. T2: wall clock is
+   the right runtime behaviour and the wrong test behaviour, so every scenario
+   states its budgets in *units* and gets the same number of slices on any
+   machine - and `Units(1)` sweeps every resumption point rather than the ones a
+   fast machine happens to land on. Scoped rather than set-and-forget because the
+   budgets are process-global and the next check must not inherit them. */
+class StreamingBudgetOverride
+{
+public:
+	explicit StreamingBudgetOverride(const StreamingBudgets& budgets)
+	{
+		StreamingBudgets::Set(budgets);
+	}
+
+	~StreamingBudgetOverride() { StreamingBudgets::Reset(); }
+
+	StreamingBudgetOverride(const StreamingBudgetOverride&) = delete;
+	StreamingBudgetOverride& operator=(const StreamingBudgetOverride&) = delete;
+};
+
 class StreamingHarness
 {
 public:
@@ -124,6 +146,11 @@ public:
 	/* Named entities the world holds, for asserting that an incoming chunk's
 	   roots were admitted and an outgoing chunk's were taken away. */
 	uint32_t CountEntitiesNamed(const std::string& sPrefix) const;
+
+	/* One entity by exact name, or null. Streaming deletes and rebuilds the
+	   entity, so a test must re-ask after every transition rather than holding
+	   the pointer across one (R4). */
+	Entity* FindEntityNamed(const std::string& sName) const;
 
 private:
 	/* One Application per process, not per harness: PlayerPrefs asserts on a

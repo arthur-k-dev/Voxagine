@@ -22,8 +22,15 @@ public:
 		US_COMMIT,
 		/* Deserializing incoming roots and refreshing moved ones. After the
 		   commit, so a static renderer's stamp lands against the offset it will
-		   actually be drawn at. Still unbounded - phases 2 and 3. */
+		   actually be drawn at. Still unbounded - phase 3. */
 		US_LOADING_ENTITIES,
+		/* Serializing each outgoing chunk's roots back out to JSON and
+		   destroying them, a bounded number of roots per display frame
+		   (StreamingBudgets::UnloadSerialization). */
+		US_START_UNLOADING,
+		/* RLE-encoding each outgoing chunk's voxels, a bounded number of runs
+		   per display frame (StreamingBudgets::VoxelEncoding). */
+		US_ENCODING,
 		US_UNLOADING
 	};
 
@@ -86,6 +93,14 @@ public:
 	uint32_t GetAdvanceCount() const { return m_uiAdvances; }
 	void CountAdvance() { ++m_uiAdvances; }
 
+	/* Where a budgeted state left off in this group's item list. One cursor
+	   rather than one per state: a state owns it for its whole length and
+	   resets it on the way out, so two states can never be part-way through the
+	   list at once. K3 of the plan's keep list. */
+	size_t GetItemCursor() const { return m_uiItemCursor; }
+	void AdvanceItemCursor() { ++m_uiItemCursor; }
+	void ResetItemCursor() { m_uiItemCursor = 0; }
+
 	inline bool operator()(const ChunkUpdateGroup& group) const { return group.m_uiUpdateId == m_uiUpdateId; }
 
 private:
@@ -95,6 +110,7 @@ private:
 	Vector3 m_worldOffset = Vector3(0);
 	bool m_bRendering = false;
 	bool m_bCommitted = false;
+	size_t m_uiItemCursor = 0;
 
 	std::chrono::steady_clock::time_point m_Created = std::chrono::steady_clock::now();
 	uint32_t m_uiAdvances = 0;

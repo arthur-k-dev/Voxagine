@@ -844,8 +844,20 @@ void RenderSystem::OnComponentDestroyed(Component* pComponent)
 
 		if (iter != m_VoxRenderers.end())
 		{
-			/* Remove old voxels if array is valid */
-			m_VoxelBaker.Clear(*iter);
+			/* A chunk unload is the one destruction that must not erase
+			   anything. It happens *after* the replacement window has been
+			   published (CHUNK_STREAMING_PLAN.md phase 1's US_COMMIT), so this
+			   renderer's recorded positions name addresses that now hold the
+			   geometry the window slid over. Clear shifts them by the offset
+			   delta and declines to erase a cell another renderer owns - which
+			   covers models, and covers neither the ground row nor settled
+			   debris, since neither has an owner. Its colours are safe in the
+			   departing chunk's own voxels; drop the stamp and touch nothing. */
+			if ((*iter)->IsChunkUnloading())
+				m_VoxelBaker.ForgetChunkStamp(*iter);
+			else
+				m_VoxelBaker.Clear(*iter);
+
 			m_VoxRenderers.erase(iter);
 		}
 	}

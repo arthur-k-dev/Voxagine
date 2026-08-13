@@ -30,6 +30,15 @@ static bool ChunkIoTimingsEnabled()
 	return s_bEnabled;
 }
 
+/* Milliseconds since a mark. Every budgeted state reports one, and each of them
+   having its own lambda was how the two that existed already drifted apart on
+   whether the clock was read when profiling was off. */
+static double MillisecondsSince(const std::chrono::steady_clock::time_point& start)
+{
+	return std::chrono::duration<double, std::milli>(
+		std::chrono::steady_clock::now() - start).count();
+}
+
 ChunkSystem::ChunkSystem(World* pWorld, std::unordered_map<uint32_t, Chunk*> chunks, UVector2 chunkSize, UVector2 worldSize) :
 	ComponentSystem(pWorld)
 {
@@ -70,6 +79,16 @@ void ChunkSystem::Start()
 	m_pWorld->Resumed += Event<World*>::Subscriber(std::bind(&ChunkSystem::OnWorldResumed, this, std::placeholders::_1), this);
 
 	Camera* pCamera = m_pWorld->GetMainCamera();
+
+	/* The camera is this system's only input, and it is not guaranteed to
+	   exist: a chunk unload destroys every non-persistent root inside it, and
+	   the default Camera that World::Initialize creates is not persistent - so
+	   a window that slides over the camera takes it with it. Every reader here
+	   checks rather than assuming, which is the state World::DeleteEntityFromLists
+	   now publishes instead of a dangling pointer. */
+	if (pCamera == nullptr)
+		return;
+
 	Vector3 cameraPos = pCamera->GetTransform()->GetPosition() + m_CameraLoadOffset;
 	Vector3 worldOffset = CalculateWorldOffset(cameraPos);
 
@@ -157,11 +176,26 @@ void ChunkSystem::Tick(float fDeltaTime)
 
 void ChunkSystem::FixedTick(const GameTimer& fixedTimer)
 {
-	Vector3 cameraPosition = m_pWorld->GetMainCamera()->GetTransform()->GetPosition() + m_CameraLoadOffset;
+	Camera* pCamera = m_pWorld->GetMainCamera();
+
+	if (pCamera == nullptr)
+		return;
+
+	Vector3 cameraPosition = pCamera->GetTransform()->GetPosition() + m_CameraLoadOffset;
 	int chunkXPos = static_cast<int>(floor((cameraPosition.x) / (float)m_ChunkSize.x));
 	int chunkYPos = static_cast<int>(floor((cameraPosition.z) / (float)m_ChunkSize.y));
 	chunkXPos = std::min(std::max(chunkXPos, 0), (int)m_uiNumChunkX);
 	chunkYPos = std::min(std::max(chunkYPos, 0), (int)m_uiNumChunkY);
+
+	/* Where the streaming decision is made, and the first thing to check when a
+	   headless run produces no transitions at all: this says whether the camera
+	   is moving, separately from whether the window followed it. */
+	if (ChunkIoTimingsEnabled() &&
+		(m_ClampedCameraPosition.x != (uint32_t)chunkXPos || m_ClampedCameraPosition.y != (uint32_t)chunkYPos))
+	{
+		fprintf(stderr, "[chunk] camera entered chunk (%d,%d) at (%.0f, %.0f)\n",
+			chunkXPos, chunkYPos, cameraPosition.x, cameraPosition.z);
+	}
 
 	//Make sure we don't go diagonally as the chunk system does not support this
 	if (m_ClampedCameraPosition.x != (uint32_t)chunkXPos && m_ClampedCameraPosition.y != (uint32_t)chunkYPos)
@@ -332,8 +366,11 @@ void ChunkSystem::UpdateChunks(IVector2 gridOffset, ChunkUpdateGroup& group, boo
 	   Stable, so equal distances keep grid order and the sequence is
 	   reproducible. */
 	Camera* pMainCamera = m_pWorld->GetMainCamera();
-	const Vector3 cameraPosition = pMainCamera->GetTransform()->GetPosition();
-	const Vector3 cameraForward = pMainCamera->GetTransform()->GetForward();
+
+	const Vector3 cameraPosition = pMainCamera != nullptr
+		? pMainCamera->GetTransform()->GetPosition() : group.GetWorldOffset();
+	const Vector3 cameraForward = pMainCamera != nullptr
+		? pMainCamera->GetTransform()->GetForward() : Vector3(0.f, -1.f, 0.f);
 
 	Vector3 groundFocus = cameraPosition;
 
@@ -409,7 +446,14 @@ void ChunkSystem::UpdateGroup(ChunkUpdateGroup& group)
 		for (ChunkUpdateGroup::Item& item : group.GetItems())
 		{
 			if (item.ItemTarget == ChunkUpdateGroup::Item::Target::T_ASYNC_LOAD)
+			{
+				/* Here, on the main thread, before the job that will resize into
+				   it exists: the pool is this system's state and the load job is
+				   not allowed to touch it. */
+				AcquireChunkStorage(*item.pChunk);
+
 				item.pChunk->LoadAsync(&item, std::bind(&ChunkSystem::OnChunkLoaded, this, std::placeholders::_1));
+			}
 		}
 		group.SetState(ChunkUpdateGroup::UpdateState::US_WAIT);
 		break;
@@ -506,15 +550,8 @@ void ChunkSystem::UpdateGroup(ChunkUpdateGroup& group)
 		   *outgoing* offset, then swapped the buffer those stamps went into. */
 		const bool bProfiling = FrameProfiler::Get().IsEnabled();
 
-		auto now = []() { return std::chrono::steady_clock::now(); };
-		auto since = [](const std::chrono::steady_clock::time_point& start)
-		{
-			return std::chrono::duration<double, std::milli>(
-				std::chrono::steady_clock::now() - start).count();
-		};
-
-		std::chrono::steady_clock::time_point phase =
-			bProfiling ? now() : std::chrono::steady_clock::time_point();
+		const std::chrono::steady_clock::time_point phase =
+			bProfiling ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
 
 		uint32_t uiLoaded = 0;
 		uint64_t uiRoots = 0;
@@ -543,33 +580,150 @@ void ChunkSystem::UpdateGroup(ChunkUpdateGroup& group)
 		if (bProfiling)
 		{
 			FrameProfiler::Get().Report(
-				uiLoaded > 0 ? "CPU Chunk LoadEntities" : "CPU Chunk UpdateEntities", since(phase));
-			phase = now();
+				uiLoaded > 0 ? "CPU Chunk LoadEntities" : "CPU Chunk UpdateEntities",
+				MillisecondsSince(phase));
 		}
 
-		// Unload chunk with entities
-		for (ChunkUpdateGroup::Item& item : group.GetItems())
-		{
-			if (item.ItemTarget == ChunkUpdateGroup::Item::Target::T_ASYNC_UNLOAD)
-			{
-				/* Detach before enqueuing, not after it finishes. UnloadAsync's
-				   job body calls EncodeVoxels, which frees this chunk's voxel
-				   vector and owner volume on a worker thread - and the grid
-				   still pointed at both, so a main-thread GetCell could read
-				   freed storage (ledger P7). Nulling the slot here, on this
-				   thread, before the job exists, means a reader sees "not
-				   resident" instead. Every grid accessor already handles that;
-				   since phase 1 they all check for it. */
-				m_pVoxelGrid->DetachChunkStorage(&item.pChunk->GetVoxelData());
+		group.ResetItemCursor();
+		group.SetState(ChunkUpdateGroup::UpdateState::US_START_UNLOADING);
+		break;
+	}
+	case ChunkUpdateGroup::UpdateState::US_START_UNLOADING:
+	{
+		/* The main-thread half of unloading, one chunk at a time, a bounded
+		   number of roots per display frame. Master did every outgoing chunk's
+		   FindEntitiesInChunk and full RTTR serialization in one go inside the
+		   render job's completion callback.
 
-				item.bIsDone = false;
-				item.pChunk->UnloadAsync(&item, std::bind(&ChunkSystem::OnChunkUnloaded, this, std::placeholders::_1));
+		   The budget is per *state entry*, not per chunk: three outgoing chunks
+		   share one slice rather than getting one each, or "bounded per frame"
+		   would mean three times the bound whenever a corner slide leaves
+		   three. */
+		const bool bProfiling = FrameProfiler::Get().IsEnabled();
+		const std::chrono::steady_clock::time_point start =
+			bProfiling ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
+
+		StreamingBudget::Scope budget(StreamingBudgets::Get().UnloadSerialization);
+
+		std::vector<ChunkUpdateGroup::Item>& items = group.GetItems();
+
+		while (group.GetItemCursor() < items.size())
+		{
+			ChunkUpdateGroup::Item& item = items[group.GetItemCursor()];
+
+			if (item.ItemTarget != ChunkUpdateGroup::Item::Target::T_ASYNC_UNLOAD)
+			{
+				group.AdvanceItemCursor();
+				continue;
 			}
+
+			/* **Unloading a chunk that was never loaded destroys it**, and that
+			   is not a hypothetical: a chunk can reach this state with no voxels
+			   and no entities in the world, because group creation reads
+			   `IsTargetLoaded()` - a promise a *queued* group made - and emits
+			   T_MOVE for a chunk that a later cancellation then never loads.
+			   Serializing it writes an empty root list over the level's copy of
+			   its entities, and encoding it writes an empty RLE stream over its
+			   voxels. Both are permanent: nothing else holds either.
+
+			   Pre-existing, and master loses exactly the same data by the same
+			   route - `SaveAndDeleteEntities` cleared and resized the root list
+			   to however many entities it found, which is zero. Found by the
+			   seeded walk in Tests/Streaming/ChunkUnloadChecks.cpp, which is
+			   what makes this the phase that can fix it: nothing before could
+			   express "a chunk came back empty". */
+			if (!item.pChunk->IsLoaded())
+			{
+				StreamingCounters::Get().UnloadsOfUnloadedChunks.fetch_add(1, std::memory_order_relaxed);
+
+				item.pChunk->SetTargetLoaded(false);
+				group.AdvanceItemCursor();
+				continue;
+			}
+
+			/* Not done: leave the cursor where it is and come back to this same
+			   chunk next frame. */
+			if (!item.pChunk->PrepareUnloadBatch(budget))
+				break;
+
+			/* This chunk's entities are gone and its voxels are about to be.
+			   Detach here, on this thread, before anything can read the storage
+			   as if it were still in the window (ledger P7): every grid accessor
+			   treats a detached slot as "not resident", which is what an
+			   unloading chunk is. */
+			m_pVoxelGrid->DetachChunkStorage(&item.pChunk->GetVoxelData());
+
+			item.pChunk->m_bIsLoaded = false;
+			item.pChunk->BeginVoxelEncoding();
+			item.bIsDone = false;
+
+			group.AdvanceItemCursor();
+
+			if (budget.Exhausted())
+				break;
 		}
 
 		if (bProfiling)
-			FrameProfiler::Get().Report("CPU Chunk Unload", since(phase));
+			FrameProfiler::Get().Report("CPU Chunk Unload", MillisecondsSince(start));
 
+		if (group.GetItemCursor() < items.size())
+			break;
+
+		group.ResetItemCursor();
+		group.SetState(ChunkUpdateGroup::UpdateState::US_ENCODING);
+		break;
+	}
+	case ChunkUpdateGroup::UpdateState::US_ENCODING:
+	{
+		/* RLE compression of each outgoing chunk's voxels, in bounded slices on
+		   this thread rather than in one uninterrupted pass on a worker.
+
+		   Moving it here is not obviously the right direction and is worth the
+		   sentence: a worker costs the main thread nothing, and encode is 9-12 ms
+		   per chunk. What it costs instead is a 32 MiB read and a 48 MiB free
+		   competing with the main thread for memory bandwidth during exactly the
+		   frames a transition is already expensive, plus the storage being freed
+		   somewhere the grid used to still point at. Slicing it here makes the
+		   cost a bounded 2 ms a frame, and the pool below removes the free
+		   altogether. What it buys back is paid in transition latency - see
+		   StreamingBudgets.h. */
+		const bool bProfiling = FrameProfiler::Get().IsEnabled();
+		const std::chrono::steady_clock::time_point start =
+			bProfiling ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
+
+		StreamingBudget::Scope budget(StreamingBudgets::Get().VoxelEncoding);
+
+		std::vector<ChunkUpdateGroup::Item>& items = group.GetItems();
+
+		while (group.GetItemCursor() < items.size())
+		{
+			ChunkUpdateGroup::Item& item = items[group.GetItemCursor()];
+
+			if (item.ItemTarget != ChunkUpdateGroup::Item::Target::T_ASYNC_UNLOAD || item.bIsDone)
+			{
+				group.AdvanceItemCursor();
+				continue;
+			}
+
+			if (!item.pChunk->EncodeVoxelBatch(budget))
+				break;
+
+			item.pChunk->m_bIsUnloading = false;
+			OnChunkUnloaded(&item);
+
+			group.AdvanceItemCursor();
+
+			if (budget.Exhausted())
+				break;
+		}
+
+		if (bProfiling)
+			FrameProfiler::Get().Report("CPU Chunk Encode", MillisecondsSince(start));
+
+		if (group.GetItemCursor() < items.size())
+			break;
+
+		group.ResetItemCursor();
 		group.SetState(ChunkUpdateGroup::UpdateState::US_UNLOADING);
 		break;
 	}
@@ -602,8 +756,25 @@ std::vector<ChunkUpdateGroup>::iterator ChunkSystem::RemoveUpdateGroup(const std
 	   is no longer the one wanted. Counted rather than merely allowed, so a
 	   cancellation scenario can assert it actually cancelled something instead
 	   of quietly racing the transition to completion. */
-	if (!iter->HasCommitted())
+	const bool bCancelled = !iter->HasCommitted();
+
+	if (bCancelled)
 		StreamingCounters::Get().CancelledGroups.fetch_add(1, std::memory_order_relaxed);
+
+	/* Which chunk state this group is entitled to reset (R5), and it is *its
+	   own* only. A chunk can be an item of several groups at once - the front
+	   one unloading it, a queued one scheduled to load it back - so "reset every
+	   chunk this cancelled group mentions" reaches into a transaction another
+	   group is half-way through. It did: resetting m_bUnloadPrepared under the
+	   front group made its next slice prepare a second time, clear the roots it
+	   had already written, and re-serialize entities it had already destroyed -
+	   so the chunk came back empty. Intermittent, because it needs a queued
+	   group to be cancelled while the front group is inside US_START_UNLOADING.
+	   A group that never advanced past the commit has created no per-chunk state
+	   and must therefore touch none. */
+	const bool bOwnsChunkState =
+		iter->GetState() == ChunkUpdateGroup::UpdateState::US_START_UNLOADING ||
+		iter->GetState() == ChunkUpdateGroup::UpdateState::US_ENCODING;
 
 	/* What the player actually waits: boundary crossed -> new chunks there.
 	   Off by default; see the comment on MillisecondsSinceCreated. */
@@ -616,6 +787,14 @@ std::vector<ChunkUpdateGroup>::iterator ChunkSystem::RemoveUpdateGroup(const std
 
 	for (ChunkUpdateGroup::Item& item : iter->GetItems())
 	{
+		/* R5, ledger E2. Everything a partly-run unload left on a chunk goes
+		   back to its post-construction value, or the next group inherits it:
+		   a half-filled serialized-root list, an encode cursor part-way through
+		   a volume, m_bIsUnloading stuck on. Only for a group that got far
+		   enough to have created any - see bOwnsChunkState above. */
+		if (bCancelled && bOwnsChunkState)
+			item.pChunk->ResetStreamingState();
+
 		if (item.ItemTarget == ChunkUpdateGroup::Item::Target::T_ASYNC_LOAD &&
 			(!item.pChunk->IsLoaded() || item.pChunk->IsUnloading() ||
 			m_UpdateGroups[0].IsChunkScheduledFor(item.pChunk, ChunkUpdateGroup::Item::Target::T_ASYNC_UNLOAD)))
@@ -679,11 +858,13 @@ void ChunkSystem::CommitWindow(ChunkUpdateGroup& group)
 		m_pVoxelWindow->Swap();
 	}
 
-	Camera* pMainCamera = m_pWorld->GetMainCamera();
-	pMainCamera->SetCameraOffset(group.GetWorldOffset());
-	pMainCamera->GetTransform()->SetFromMatrix(pMainCamera->GetTransform()->GetMatrix());
-	pMainCamera->Recalculate();
-	pMainCamera->ForceUpdate();
+	if (Camera* pMainCamera = m_pWorld->GetMainCamera())
+	{
+		pMainCamera->SetCameraOffset(group.GetWorldOffset());
+		pMainCamera->GetTransform()->SetFromMatrix(pMainCamera->GetTransform()->GetMatrix());
+		pMainCamera->Recalculate();
+		pMainCamera->ForceUpdate();
+	}
 
 	group.MarkCommitted();
 
@@ -801,8 +982,73 @@ void ChunkSystem::OnChunkLoaded(ChunkUpdateGroup::Item* pUpdateItem)
 	m_pWorld->GetApplication()->GetLoggingSystem().Log(LOGLEVEL_MESSAGE, "ChunkSystem", "Chunk loaded at " + chunkLoc);
 }
 
+void ChunkSystem::AcquireChunkStorage(Chunk& chunk)
+{
+	/* A resident chunk is 48 MiB of voxels and owner slots (RENDERING_PLAN.md
+	   4d). A slide turns over three of them, so without this every transition
+	   frees three blocks of that size and allocates three more - which is the
+	   allocator and TLB churn the experiment measured as main-thread
+	   descheduling, arriving from a completely different direction than the code
+	   that appears to be doing the work.
+	 *
+	 * Simplified against the experiment's version, per ledger E10: no free-list
+	 * re-sort (every block in it is the same size by construction), a hard cap,
+	 * and a per-world dimension assert instead of a size negotiation. The pool
+	 * belongs to this system, so it dies with the world - a second world with a
+	 * different chunk size cannot see it. */
+	/* Already holds its own - a chunk whose encode was cancelled part-way is
+	   still fully resident, so there is nothing to hand it and nothing to
+	   count. */
+	if (chunk.m_VoxelData.capacity() >= ChunkVoxelCount(chunk))
+		return;
+
+	if (m_ChunkStoragePool.empty())
+	{
+		StreamingCounters::Get().ChunkStorageAllocated.fetch_add(1, std::memory_order_relaxed);
+		return;
+	}
+
+	ChunkStorage& storage = m_ChunkStoragePool.back();
+
+	assert(storage.Voxels.capacity() >= ChunkVoxelCount(chunk) &&
+		"a pooled chunk block is too small for this world's chunks");
+
+	chunk.m_VoxelData = std::move(storage.Voxels);
+	chunk.m_OwnerVolume = std::move(storage.Owners);
+
+	m_ChunkStoragePool.pop_back();
+
+	StreamingCounters::Get().ChunkStorageReused.fetch_add(1, std::memory_order_relaxed);
+}
+
+void ChunkSystem::RecycleChunkStorage(Chunk& chunk)
+{
+	/* The encode cleared the logical sizes and left the allocations alone; this
+	   is the move that makes that worth doing. Constant time, on the main
+	   thread, with the grid slot already detached. */
+	if (chunk.m_VoxelData.capacity() < ChunkVoxelCount(chunk) ||
+		m_ChunkStoragePool.size() >= k_uiMaxPooledChunkStorage)
+	{
+		chunk.m_VoxelData.shrink_to_fit();
+		chunk.m_OwnerVolume.Release();
+		return;
+	}
+
+	m_ChunkStoragePool.push_back(
+		ChunkStorage{ std::move(chunk.m_VoxelData), std::move(chunk.m_OwnerVolume) });
+}
+
+size_t ChunkSystem::ChunkVoxelCount(const Chunk& chunk)
+{
+	const UVector3 v3Size = chunk.GetChunkSize();
+
+	return static_cast<size_t>(v3Size.x) * v3Size.y * v3Size.z;
+}
+
 void ChunkSystem::OnChunkUnloaded(ChunkUpdateGroup::Item* pUpdateItem)
 {
+	RecycleChunkStorage(*pUpdateItem->pChunk);
+
 	pUpdateItem->bIsDone = true;
 
 	UVector2 chunkIndex = pUpdateItem->pChunk->GetChunkIndex();

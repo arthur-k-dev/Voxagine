@@ -639,6 +639,23 @@ void World::DeleteEntityFromLists(Entity * pEntity)
 	if (iterToAdd != m_AddedEntities.end())
 		m_AddedEntities.erase(iterToAdd);
 
+	/* A world that keeps a raw pointer to a deleted entity is CLAUDE.md's "raw
+	   pointers to resources outlive the resources" with the world as the owner,
+	   and the main camera is the instance that bites: a chunk unload serializes
+	   and destroys every non-persistent root whose position is inside it, and
+	   the camera stands in exactly the chunk that is about to leave. The next
+	   ChunkSystem::FixedTick then reads a freed Camera to decide where the
+	   window goes - found by the seeded walk in
+	   Tests/Streaming/ChunkUnloadChecks.cpp under ASan, and pre-existing: the
+	   GPU stress fixture works around it by pinning its camera persistent and
+	   says so in a comment.
+
+	   Nulling it here does not conjure a camera, but it turns a use-after-free
+	   into a state every reader can check for, which is the same move
+	   World::GetRenderContext made in phase 1. */
+	if (m_pCameraEntity == pEntity)
+		m_pCameraEntity = nullptr;
+
 	EntityRemoved(pEntity);
 }
 

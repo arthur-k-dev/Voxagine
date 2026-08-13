@@ -32,6 +32,12 @@ public:
 	   stopped from provoking another one - see NotifyClearedRegion. */
 	virtual void Clear(VoxRenderer* pRenderer, VoxRenderer::BakeData* pBakeData = nullptr, bool bNotify = true);
 
+	/* Clear's counterpart for a renderer leaving with its chunk: forget what was
+	   stamped without erasing a single voxel. Everything Clear resets is reset
+	   here too, so a renderer that comes back with the chunk starts from "never
+	   baked" rather than from a stale generation. */
+	void ForgetChunkStamp(VoxRenderer* pRenderer);
+
 	/* What Occupy would stamp, as a value: see VoxRenderer::BakeData::StampKey.
 	   O(1) - it computes the stamp transform and reads three fields, it does
 	   not walk the model. */

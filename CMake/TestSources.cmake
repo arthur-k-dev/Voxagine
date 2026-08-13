@@ -68,6 +68,8 @@ set(VOXAGINE_TEST_SOURCES
 
     # Chunk streaming: the window commit transaction and what survives a slide.
     ${VOXAGINE_TEST_DIR}/Streaming/WindowCommitChecks.cpp
+    ${VOXAGINE_TEST_DIR}/Streaming/ChunkReloadChecks.cpp
+    ${VOXAGINE_TEST_DIR}/Streaming/ChunkUnloadChecks.cpp
     ${VOXAGINE_TEST_DIR}/Streaming/StreamingPerf.cpp
 
     # Connectivity: which geometry is still holding itself up.

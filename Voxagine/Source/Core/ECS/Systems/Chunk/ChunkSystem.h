@@ -1,6 +1,9 @@
 #pragma once
 #include "Core/ECS/ComponentSystem.h"
 #include "Core/ECS/Systems/Chunk/ChunkUpdateGroup.h"
+#include "Core/ECS/Systems/Physics/VoxelGrid.h"
+
+#include <vector>
 
 #define GRID_SIZE 3
 #define GRID_CENTER_OFFSET 1
@@ -72,14 +75,36 @@ protected:
 	void OnChunkLoaded(ChunkUpdateGroup::Item* pUpdateItem);
 	void OnChunkUnloaded(ChunkUpdateGroup::Item* pUpdateItem);
 
+	/* The 48 MiB a resident chunk's voxels and owner slots occupy, moved from
+	   the chunk that just left to the chunk that is arriving instead of going
+	   back to the allocator and coming out of it again. Ledger E10, simplified:
+	   one block size per world, a hard cap, no re-sorting. */
+	void AcquireChunkStorage(Chunk& chunk);
+	void RecycleChunkStorage(Chunk& chunk);
+
+	static size_t ChunkVoxelCount(const Chunk& chunk);
+
 	void OnWorldResumed(World* pWorld);
 
 private:
+	struct ChunkStorage
+	{
+		std::vector<Voxel> Voxels;
+		VoxelOwnerVolume Owners;
+	};
+
+	/* Six: a straight slide turns over three chunks and a second group can be
+	   queued behind the first, so six is the most that can be in the air at
+	   once. Anything past that is a block the pool would hold indefinitely,
+	   which is what E10 objects to - those go back to the allocator. */
+	static constexpr size_t k_uiMaxPooledChunkStorage = 6;
+
 	VoxelGrid* m_pVoxelGrid;
 	IVoxelWindow* m_pVoxelWindow = nullptr;
 	std::unordered_map<uint32_t, Chunk*> m_Chunks;
 
 	std::vector<ChunkUpdateGroup> m_UpdateGroups;
+	std::vector<ChunkStorage> m_ChunkStoragePool;
 
 	UVector2 m_WorldSize;
 	UVector2 m_ChunkSize;

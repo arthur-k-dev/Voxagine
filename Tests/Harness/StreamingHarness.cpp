@@ -158,6 +158,18 @@ StreamingHarness::StreamingHarness(const std::string& sFixture) :
 	m_pWorld->Initialize();
 	m_pWorld->PreTick();
 
+	/* The shipped levels' camera is a persistent `CameraMultiplayer`; the
+	   default one World::Initialize creates is not, and a chunk unload
+	   serializes and destroys every non-persistent root standing inside it - so
+	   the window sliding over the camera deletes the thing that decides where
+	   the window goes. That is a real defect and it is guarded now
+	   (World::DeleteEntityFromLists nulls the world's pointer, ChunkSystem
+	   checks it), but leaving it unpinned here would mean the streaming
+	   scenarios were mostly measuring how long it takes to lose the camera.
+	   Same call, and the same reason, as the GPU stress fixture's. */
+	if (Camera* pCamera = m_pWorld->GetMainCamera())
+		pCamera->SetPersistent(true);
+
 	/* The chunk grid, in voxels per chunk. GetWorldSize is the level; the
 	   window is three chunks across wherever the level is bigger than one. */
 	m_ChunkSize = UVector2(m_v3WindowSize.x / 3, m_v3WindowSize.z / 3);
@@ -241,6 +253,17 @@ uint32_t StreamingHarness::ResidentChunkCount() const
 	}
 
 	return uiResident;
+}
+
+Entity* StreamingHarness::FindEntityNamed(const std::string& sName) const
+{
+	for (Entity* pEntity : m_pWorld->GetEntities())
+	{
+		if (pEntity->GetName() == sName)
+			return pEntity;
+	}
+
+	return nullptr;
 }
 
 uint32_t StreamingHarness::CountEntitiesNamed(const std::string& sPrefix) const

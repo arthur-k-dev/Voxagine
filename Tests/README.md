@@ -56,10 +56,13 @@ Framework/     the runner, the four registries, the assertion macros, the baseli
 Harness/       a whole voxel world with no GPU (VoxelWorldHarness), the destruction
                pipeline driven once (DestructionRun), and a whole chunk-streaming
                world with no render context (StreamingHarness)
-Fixtures/      synthetic .wld worlds the streaming harness loads
+Fixtures/      synthetic .wld worlds the streaming harness loads - a 5x5 chunk
+               level, and a copy of it whose chunks lead with deliberately
+               malformed roots (T7)
 Baselines/     the checked-in perf baseline
 
-Streaming/     ChunkSystem - the window commit transaction and what survives a slide
+Streaming/     ChunkSystem - the window commit transaction, the bounded unload,
+               and what survives a chunk leaving and coming back
 VoxelStorage/  VoxelGrid, VoxelBrickGrid, owner slots
 VoxelEditing/  VoxelEditBatch — the one voxel write path
 Destruction/   SphericalDestruction, plus the scenarios and invariants
@@ -71,6 +74,17 @@ Foundation/    engine-wide primitives that are not about voxels at all
 Within a system: `<Thing>Checks.cpp` and `<Thing>Perf.cpp`. Scenarios and
 invariants get one file each, named for the situation they set up or the
 property they assert.
+
+**Streaming budgets are injectable, and a streaming test must say so.** Every
+resumable step in `ChunkSystem`/`Chunk` takes its bound from
+`StreamingBudgets` — a wall-clock allowance in the game, a *unit count* in a
+test. Wrap a scenario in `StreamingBudgetOverride` (`Harness/StreamingHarness.h`)
+and the slice boundaries land in the same places on every machine;
+`Units(1)` puts one between every root and every RLE run, which is how all of
+the resumption points get exercised rather than the ones this machine is fast
+enough to reach. `Streaming/StreamingPerf.cpp` does the same thing for the
+opposite reason: with unit budgets its per-slice counters are exact numbers
+the baseline can hold.
 
 ## The four kinds, and when to write which
 

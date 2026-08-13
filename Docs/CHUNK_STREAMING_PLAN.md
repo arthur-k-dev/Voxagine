@@ -35,7 +35,7 @@ world switch, and the loading screen.
 |---|---|---|---|
 | 0 — Foundations, baselines, standalone fixes | DONE except T1 | `chunk-streaming-phase-0`, PR #55 | Symptom recorded (E12), standalone fixes landed, hitch gate in with a 150 ms baseline, all numbers below, ASan lane green, 60 Hz feel and un-pausing confirmed on screen. **T1 (the streaming harness) is BLOCKED on a render-context seam — see the phase 0 notes; phase 1 owns it.** |
 | 1 — Atomic off-thread window commit | DONE | `chunk-streaming-phase-1` | T1's seam and harness landed with it. Hitch gate **150.2 → 102.4–104.7 ms** peak, 7 → 2 violations; `FlushDirty` 68.8 → 0.001 ms peak on a slide. ASan + TSan clean. |
-| 2 — Bounded unload (serialize + encode) | OPEN | | **Also owns M7** — destroyed terrain respawning on chunk reload |
+| 2 — Bounded unload (serialize + encode) | DONE | `chunk-streaming-phase-2` | M7 diagnosed and fixed — it was a re-stamp on reload, not the codec. Unload is two budgeted states; `Chunk Unload` 2.70 → 0.37 ms peak, `Chunk Encode` 2.00 ms peak over 14 slices. Four further defects found by the phase's own fuzz and failure injection, three of them pre-existing on master. Hitch gate unchanged at 101.7–112.6 ms: what is left is phases 3 and 5. |
 | 3 — Bounded load and the gameplay contract | OPEN | | |
 | 4 — Streamed world switch behind the loading screen | OPEN | | |
 | 5 — Bounded stamping of admitted renderers | OPEN | | |
@@ -190,8 +190,19 @@ Release at phase 0).
   (allocator/TLB interruptions of the main thread — experiment measured
   18–31 ms of main-thread descheduling), and prints timing to stderr
   unconditionally.
-- **M7 (reported by Joey after phase 0, unreproduced): destroyed terrain comes
-  back when its chunk reloads.** Not covered anywhere else in this plan, which
+- **M7 — FIXED (phase 2). It was a re-stamp on reload; the codec was innocent,
+  and the entry below was wrong about where to look.** Kept whole because two
+  of its three bullets were confidently wrong and that is the useful part: the
+  guard it says suppresses the stamp is **anded with `!UpdateRequested()`**, and
+  a reload always requests one — the chunk re-serializes its roots from the
+  *live* reflection registration, so the JSON it carries gains an `"Emissive"`
+  member the level on disk never had, and that setter requested a bake update
+  unconditionally. The unload-order race it names as "the first thing to
+  measure" is not it: the instrument it asks for was built and shows damage
+  surviving encode, decode and republication exactly. Read the phase 2 notes.
+
+  **The original entry, as written:** destroyed terrain comes
+  back when its chunk reloads. Not covered anywhere else in this plan, which
   is about *when* streaming work happens rather than what survives it — but the
   whole mechanism is in the unload/reload path, so **phase 2 owns it** and must
   not close without it. Three things established by reading, before anyone
@@ -254,11 +265,17 @@ instead of being freed.
 What must **not** be reproduced when re-deriving. E-numbers are referenced
 from the phases.
 
-- **E1 (memory safety) — OPEN.** `Chunk::PrepareUnloadBatch` snapshots raw
-  `Entity*` into `m_PendingUnloadEntities` and serializes them across many
-  fixed ticks *while gameplay runs and can destroy/delete them*. `IsDestroyed()`
-  is only consulted after a root finishes serializing; the serializer itself
-  walks freed memory. Phase 2 defines the defense.
+- **E1 (memory safety) — FIXED (phase 2), by not reproducing it.** The
+  experiment's `Chunk::PrepareUnloadBatch` snapshots raw `Entity*` into
+  `m_PendingUnloadEntities` and serializes them across many fixed ticks *while
+  gameplay runs and can destroy/delete them*; `IsDestroyed()` is only consulted
+  after a root finishes, so the serializer itself walks freed memory. The
+  re-derived version holds no `Entity*` across a frame boundary at all: the
+  chunk's entities are re-discovered every slice (0.06 ms) and a root is
+  serialized whole inside one slice. Defense (b) of the two the phase offered,
+  chosen on the measurement it asked for — the largest root hierarchy in any
+  shipped level is 68 nodes. `Streaming/AnEntityDestroyedMidUnloadIsNotSerialized`
+  is the repro, and it runs under ASan.
 - **E2 (memory safety / state leak) — OPEN.** Group cancellation
   (`RemoveUpdateGroup`) can erase a group mid `US_LOADING_*` /
   `US_START_UNLOADING` / `US_ENCODING`. The per-chunk resumable state
@@ -267,6 +284,17 @@ from the phases.
   next group: duplicate admissions, staged roots deleted only at chunk
   destruction, half-encoded chunks recycled into the pool. Rule R5; phases 2
   and 3 must each add the walk-back test.
+
+  **Phase 2's half is done, and it found the trap in the obvious fix.**
+  `Chunk::ResetStreamingState` exists, asserts its own completeness, and
+  `RemoveUpdateGroup` calls it — but *only for chunk state the erased group
+  actually created*. Resetting every chunk a cancelled group mentions reaches
+  into a transaction the **front** group is half-way through, because a chunk is
+  an item of several groups at once; it made the front group re-prepare an
+  unload, clear the roots it had already written and re-serialize entities it
+  had already destroyed, so the chunk came back empty. Intermittent, and only
+  the seeded walk found it. Phase 3's staging cursors join the same reset and
+  the same rule.
 - **E3 (design) — OPEN.** Gameplay ticks against a half-admitted world and
   every cross-chunk link becomes a transient null, patched per manager
   (`GameManager::ResolvePlayers`, `SpawnerManager::RefreshSpawnerLinks` polled
@@ -304,6 +332,15 @@ from the phases.
   chunk sizes, re-sort the free list on every recycle, and never return heap
   fallback blocks. Phases 2 (pool) and 5 (arena, if measurement still wants
   it) land simplified versions with stated bounds.
+
+  **The pool half is done (phase 2).** One block size per world (asserted), a
+  hard cap of six — a slide turns over three chunks and one group can be queued
+  behind another — no re-sorting, anything past the cap goes back to the
+  allocator, and the whole pool dies with the `ChunkSystem`, so a second world
+  with a different chunk size cannot see it. `ChunkStorageReused` against
+  `ChunkStorageAllocated` is in `perf.txt`: a settled slide reuses three and
+  allocates none. The stamp arena is still phase 5's, and still gated on
+  measurement.
 - **E11 (observability) — FIXED by not repeating it.** Unconditional stderr
   prints and per-node profiler reports in hot loops (R9).
 - **E12 (reported by Joey, phase 0 step 1) — OPEN. Two flows, neither covered
@@ -920,6 +957,167 @@ round-trip) clean during slides with
 destruction happening in the real game (debris + owner slots exercise the
 RLE); the walk-back ui-script survives an ASan Debug game run; hitch gate
 number recorded; suites green.
+
+#### Phase 2 notes — what landed, and the five defects it found
+
+All Release, headless, quiet machine (RTX 4070 SUPER), compared against the
+phase 1 table above.
+
+| What | Phase 1 | Phase 2 |
+|---|---|---|
+| **Peak frame across a Beat2 window transition** (three runs) | 104.7 / 102.6 / 102.4 ms | **111.1 / 101.7 / 112.6 ms** |
+| Violations of the 16.7 ms budget, per run | 2 of ~3,760 | 2 of ~3,700 |
+| `CPU Chunk Unload` (find + serialize), peak | 2.70 ms, once | **0.37 ms**, 4 slices/s |
+| `CPU Chunk FindEntitiesInChunk`, peak | 0.04 ms | 0.06 ms, 6/s (once per slice now) |
+| `CPU Chunk Encode` | 9–12 ms per chunk, on a worker | **2.00 ms peak, 14 slices/s**, on the main thread |
+| `CPU Chunk LoadEntities`, peak | 48.4 ms | 44.2 ms |
+| `CPU Occupy added (static)`, peak | 17.4 ms | 17.6 ms |
+
+**The hitch gate did not move, and that is the expected result.** Unload was
+2.7 ms of a 102 ms transition frame. What is left is `LoadEntities` (44 ms,
+phase 3) and the admitted renderers' stamps (17.6 ms, phase 5), exactly as
+phase 1 predicted. Phase 2's subject was where the *rest* of the unload cost
+lives and whether interrupting it is safe, not the peak.
+
+**Encode moved onto the main thread, on purpose, and the trade is stated.**
+The branch's reason - a worker freeing 48 MiB deschedules the game thread -
+is not reproducible here in Release, so it is not the argument. The argument
+is that a 32 MiB scan and a 48 MiB free competing for memory bandwidth during
+the frames a transition is already expensive is worth converting into a
+bounded 2 ms a frame, and that the storage pool removes the free entirely.
+What it costs is transition *latency*: 14 slices is roughly 230 ms before the
+group drains and the next one may start. Affordable because a chunk is 256
+units across, so two crossings are seconds apart; `MillisecondsSinceCreated`
+is the number to watch if that ever stops being true.
+
+**The branch's shallow post-order serialization stack did not land, and
+should not.** It exists to bound work below one root. Measured first, as the
+plan asks: the largest root hierarchy in any shipped level is **68 nodes**
+(over all 17 `.wld` files and 3,430 roots; the next largest is 34, the median
+is 1), against a whole chunk's roots serializing in 1.10 ms. Bounding below a
+root buys tens of microseconds and costs a resumable stack holding half-built
+JSON and a raw `Entity*` across frames - which *is* ledger E1. Roots are
+serialized whole instead, and the E1 defense is that plus re-discovering the
+chunk's entities every slice (0.06 ms) rather than snapshotting pointers: **no
+`Entity*` crosses a frame boundary at all.**
+
+##### M7: it was never the codec
+
+**Diagnosed before anything was touched, and the plan's own first theory was
+wrong.** The ground-truth entry pointed at the unload ordering race -
+`Clear` running after `EncodeVoxels` was enqueued - and named the two guards
+that suppress a re-stamp. Both were checked and both are innocent:
+`DamageSurvivesAnUnloadAndReload` shows a cleared voxel surviving encode,
+unload, decode and republication exactly.
+
+**What actually puts the model back is a third route through the guards.**
+`VoxelBaker::Bake` consults `IsChunkInstanceLoaded()` only as
+`(!Updated || bIsStaticChunkLoaded)`, **anded** with `!UpdateRequested()` - so
+an explicit update request walks straight past it. And a reload always makes
+one: `Chunk::SaveAndDeleteEntities` re-serializes departing entities from the
+*live* reflection registration, so the JSON a chunk carries in memory gains
+every property this build knows about even when the level on disk predates
+them, and `VoxRenderer`'s "Emissive" setter called `RequestUpdate()`
+unconditionally. First unload adds `"Emissive"`; every reload after it hands
+the baker a renderer that says it was edited, and the pristine model is
+stamped over voxels that were decoded with their damage in them.
+
+Fixed in two places, deliberately: `SetEmissive` only requests an update on a
+*change* (setting a value to itself should not be work), and
+`SetChunkInstanceLoaded(true)` clears `m_bUpdateRequested`/`m_bIsFrameChanged`
+- which closes the class rather than the one setter that happened to reach it,
+at the one point that knows the decoded voxels are authoritative.
+
+**Expressible now, in two halves.** There is no `RenderSystem` in the harness,
+so `Tests/Streaming/ChunkReloadChecks.cpp` asserts the *decision* - no
+chunk-restored static renderer may ask to be re-stamped - and
+`StreamingCounters::ChunkInstanceRestamps` asserts the *consequence* in the
+game and in `perf.txt`. Same division as destruction's: harness for the
+algorithm, in-game audit for the pixels. The fixture gained a static
+`VoxRenderer` root per chunk to make the first half possible at all, with no
+`"Emissive"` member - which is how every shipped level is stored, and the
+condition M7 needs.
+
+##### Four more defects, three of them pre-existing on master
+
+The fuzz (T6) and failure injection (T7) each earned their place on first run.
+
+- **A cancelled group reset a chunk another group was mid-way through.**
+  Introduced by this phase and caught by the seeded walk. A chunk is an item
+  of several groups at once - the front one unloading it, a queued one about
+  to load it back - so "reset every chunk this cancelled group mentions"
+  reaches into a live transaction. It made the front group prepare a second
+  time, clear the roots it had already written and re-serialize entities it
+  had already destroyed, so the chunk came back **empty**. `RemoveUpdateGroup`
+  now resets only chunk state a group actually created.
+- **Unloading a chunk that was never loaded destroys it.** *Pre-existing.*
+  Group creation reads `IsTargetLoaded()` - a promise a *queued* group made -
+  and emits `T_MOVE` for a chunk a later cancellation then never loads.
+  Serializing it writes an empty root list over the level's only copy of its
+  entities and encoding it writes an empty RLE stream over its voxels; master
+  loses the same data by the same route, since `SaveAndDeleteEntities` cleared
+  and resized to however many entities it found. Skipped and counted
+  (`UnloadsOfUnloadedChunks`) rather than fixed at the scheduling layer, which
+  is a bigger change and belongs with phase 3's ordering work.
+- **A chunk unload can delete the world's main camera, and everything then
+  reads it freed.** *Pre-existing*, and known: the GPU stress fixture pins its
+  camera persistent and says why in a comment. The default `Camera`
+  `World::Initialize` creates is not persistent, so a window sliding over it
+  serializes and destroys it, and the next `ChunkSystem::FixedTick` reads a
+  freed `Camera` to decide where the window goes. Caught by the fuzz under
+  ASan. `World::DeleteEntityFromLists` nulls the world's pointer and every
+  `ChunkSystem` reader checks it - the same move `World::GetRenderContext`
+  made in phase 1 - and the harness pins its camera the way the game's
+  `CameraMultiplayer` is.
+- **Two aborts in the deserializer on malformed chunk data.** *Pre-existing.*
+  `GetHighestEntityID` and `ValueToEntity` index `"Children"` and
+  `"Components"` without asking whether they exist; rapidjson's `operator[]`
+  on a missing member asserts in Debug and returns a static null in Release.
+  A root with no children is legal data - an older save, a hand-edited world.
+  Both ask now, and T7's fixture keeps them honest.
+
+Also fixed while rewriting the same function: `m_CopyDoc`'s pool allocator was
+never reset, so every unload of a chunk added a fresh copy of its whole root
+hierarchy to an arena that only grew, for the life of the level.
+
+##### The instruments that stay
+
+`VOXAGINE_CHUNK_IO_TIMINGS` now reports occupied-voxel counts either side of
+the codec (`[chunk] (x,y) encode N ms, M occupied`) and the chunk the camera
+has entered - the first thing to check when a headless run produces no window
+transitions at all, which cost this session two runs. `--ui-script` gained
+`backward-on`/`backward-off`: walking *back* is the only way a script reaches
+the reload path, and M7 lives there.
+
+##### Verification
+
+Whole suite green in Debug and Release, and green under ASan+UBSan (checks
+102, scenarios 31, perf 0 regressions, no reports). The fuzz was run 60 times
+consecutively after the last fix with no failures - worth stating, because the
+harness drives real worker threads, so the interleaving is not reproducible
+and a defect that needs one is a *frequency*, not a pass/fail.
+
+**In the real game**, Beat2, headless, with destruction and window transitions:
+`VOXAGINE_VOXEL_AUDIT` reports **0 diverging voxels over 9 loaded chunks**, and
+the encode/decode occupancy either side of the codec matches to the voxel on
+every chunk. Destruction is visible in those numbers - chunk (1,1) encodes
+235,819 occupied after three bursts against 236,234 pristine - so the codec is
+demonstrably carrying damage rather than agreeing about nothing.
+
+**And the whole of M7, observed rather than inferred**, in a Debug **ASan**
+game run of Beat2 with destruction, a window slide out and a walk back: chunk
+(1,1) took damage (236,077 occupied against 236,234 pristine), encoded 236,077
+on the way out, decoded **236,077** on the way back, and the run reports **zero
+`ChunkInstanceRestamps`** - no static renderer was re-stamped over its restored
+voxels. No ASan reports.
+
+**Two things about scripting this that cost more time than the work did.**
+A `--ui-script` token whose scancode is missing from `applyScriptedScancode`
+does nothing, silently, and the run still looks healthy - `backward-on` spent
+ninety scripted seconds not moving the player before that was noticed. And a
+headless run that produces *no* window transition at all is usually the camera,
+not the streaming: `VOXAGINE_CHUNK_IO_TIMINGS` now prints the chunk the camera
+enters, which answers that in one grep.
 
 ### Phase 3 — Bounded load and the gameplay contract
 

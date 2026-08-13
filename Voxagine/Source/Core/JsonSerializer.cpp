@@ -354,36 +354,54 @@ Entity* JsonSerializer::ValueToEntity(Value& val, World& world, bool bGenerateNe
 		}
 	}
 
-	// Create and add all components to entity
-	Value& componentsVal = val["Components"];
-	for (SizeType i = 0; i < componentsVal.Size(); i++)
+	/* "Components" and "Children" are both optional as far as the file format is
+	   concerned - an entity with neither is a legal, if useless, root - and
+	   rapidjson's operator[] on a missing member aborts in Debug and hands back
+	   a static null Value in Release. Streamed content is data and data is
+	   hostile (CHUNK_STREAMING_PLAN.md T7); an entity missing a member is
+	   skipped past, not crashed on.
+	   Create and add all components to entity */
+	if (val.HasMember("Components") && val["Components"].IsArray())
 	{
-		std::string compTypeName = componentsVal[i]["ComponentType"].GetString();
-		if (compTypeName != "Transform")
+		Value& componentsVal = val["Components"];
+
+		for (SizeType i = 0; i < componentsVal.Size(); i++)
 		{
-			Component* pComponent = ValueToComponent(world, componentsVal[i], pEntity);
-			pEntity->AddComponent(pComponent);
-		}
-		else
-		{
-			// Special case for transform since its already added in the entity constructor
-			rttr::instance transformInstance = *pEntity->GetTransform();
-			for (rttr::property prop : rttr::type::get<Transform>().get_properties())
+			if (!componentsVal[i].HasMember("ComponentType"))
+				continue;
+
+			std::string compTypeName = componentsVal[i]["ComponentType"].GetString();
+			if (compTypeName != "Transform")
 			{
-				if (componentsVal[i].HasMember(prop.get_name().to_string()))
+				Component* pComponent = ValueToComponent(world, componentsVal[i], pEntity);
+				pEntity->AddComponent(pComponent);
+			}
+			else
+			{
+				// Special case for transform since its already added in the entity constructor
+				rttr::instance transformInstance = *pEntity->GetTransform();
+				for (rttr::property prop : rttr::type::get<Transform>().get_properties())
 				{
-					SetPropertyFromValue(&world, componentsVal[i][prop.get_name().to_string()], prop, transformInstance);
+					if (componentsVal[i].HasMember(prop.get_name().to_string()))
+					{
+						SetPropertyFromValue(&world, componentsVal[i][prop.get_name().to_string()], prop, transformInstance);
+					}
 				}
 			}
 		}
 	}
 
 	// Create and add all entity children to parent entity
-	Value& childrenVal = val["Children"];
-	for (SizeType i = 0; i < childrenVal.Size(); i++)
+	if (val.HasMember("Children") && val["Children"].IsArray())
 	{
-		ValueToEntity(childrenVal[i], world, bGenerateNewId, pEntity);
+		Value& childrenVal = val["Children"];
+
+		for (SizeType i = 0; i < childrenVal.Size(); i++)
+		{
+			ValueToEntity(childrenVal[i], world, bGenerateNewId, pEntity);
+		}
 	}
+
 	return pEntity;
 }
 
@@ -1057,6 +1075,13 @@ uint64_t JsonSerializer::GetHighestEntityID(Value& rootEntityVal)
 			if (entityId > id)
 				id = entityId;
 		}
+
+		/* A root with no "Children" is legal data - an older save, a hand-edited
+		   world - and rapidjson's operator[] on a missing member is an assert in
+		   Debug and a read of a static null Value in Release, so the recursion
+		   below has to ask first. CHUNK_STREAMING_PLAN.md T7. */
+		if (!rootEntityVal[i].HasMember("Children") || !rootEntityVal[i]["Children"].IsArray())
+			continue;
 
 		uint64_t highestChildId = GetHighestEntityID(rootEntityVal[i]["Children"]);
 		if (highestChildId > id)

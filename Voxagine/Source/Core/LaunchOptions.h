@@ -115,6 +115,10 @@ public:
 	 *   confirm             the menus' accept key
 	 *   back                escape / pause
 	 *   wait                do nothing this slot, for a world load to settle
+	 *   fire                the player's weapon
+	 *   forward-on/-off     hold/release walk forward, for a window slide
+	 *   backward-on/-off    hold/release walk back, which is what makes a chunk
+	 *                       unload and then reload
 	 *
 	 * Turning it on also traces every focus change and binding map switch as
 	 * [ui] lines, which is the actual output - the sequence is just how you get

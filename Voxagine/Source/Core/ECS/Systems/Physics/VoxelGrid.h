@@ -70,6 +70,15 @@ public:
 		m_Slots.shrink_to_fit();
 	}
 
+	/* Logical size only, keeping the allocation. What a chunk does when its
+	   storage is going into ChunkSystem's reuse pool rather than back to the
+	   allocator - see ChunkSystem::RecycleChunkStorage. */
+	void Clear() { m_Slots.clear(); }
+
+	/* Whether this volume still owns an allocation, which is how a pooled block
+	   is told apart from a fresh one. */
+	size_t Capacity() const { return m_Slots.capacity(); }
+
 	size_t Size() const { return m_Slots.size(); }
 
 	uint16_t GetSlot(uint32_t uiIndex) const { return m_Slots[uiIndex]; }

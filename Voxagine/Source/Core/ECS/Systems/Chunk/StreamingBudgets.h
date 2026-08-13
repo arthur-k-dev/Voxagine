@@ -26,6 +26,17 @@
  * the honest description of a step this plan has not made resumable yet, and
  * naming it here is what makes the remaining unbounded work greppable instead
  * of invisible.
+ *
+ * **Every budgeted state is inside the update group, and that is a choice with
+ * a cost.** Spreading the unload across frames removes it from the transition
+ * frame and adds it to the transition's end-to-end latency: three chunks'
+ * encode is 27-36 ms of work, which at 2 ms a frame is around 300 ms before the
+ * group drains and the next one may start. That is affordable only because a
+ * chunk is 256 units across, so two boundary crossings are seconds apart, not
+ * milliseconds - the one case it can be felt is a player standing on a boundary
+ * and re-crossing it immediately, which is the cancellation path the tests
+ * cover. ChunkUpdateGroup::MillisecondsSinceCreated is the number to watch if
+ * that trade ever needs revisiting.
  */
 class StreamingBudget
 {
@@ -109,11 +120,24 @@ struct StreamingBudgets
 	   records what master actually does. */
 	StreamingBudget EntityWork = StreamingBudget::Unbounded();
 
-	/* Serializing an outgoing chunk's roots out to JSON. Phase 2. */
-	StreamingBudget UnloadSerialization = StreamingBudget::Unbounded();
+	/* Serializing an outgoing chunk's roots out to JSON, in units of *roots*.
+	   Phase 2.
 
-	/* RLE-encoding an outgoing chunk's voxels. Phase 2. */
-	StreamingBudget VoxelEncoding = StreamingBudget::Unbounded();
+	   A root is the smallest unit deliberately: the largest root hierarchy in
+	   any shipped level is 68 nodes (measured across all 17 `.wld` files, 3430
+	   roots; the next largest is 34 and the median is 1), against a whole
+	   chunk's roots serializing in 1.10 ms. Bounding below a root would need a
+	   resumable post-order walk holding half-built JSON and a raw `Entity*`
+	   across frames - which is exactly where the experiment's ledger E1 lives -
+	   to save a few tens of microseconds. See Chunk::PrepareUnloadBatch. */
+	StreamingBudget UnloadSerialization = StreamingBudget::Milliseconds(2.0);
+
+	/* RLE-encoding an outgoing chunk's voxels, in units of *runs*. Phase 2.
+
+	   A run covers at most 256 source voxels, so charging per run gives the
+	   budget a fine upper bound without putting a clock read in the per-voxel
+	   comparison. */
+	StreamingBudget VoxelEncoding = StreamingBudget::Milliseconds(2.0);
 
 	static const StreamingBudgets& Get() { return s_Active; }
 

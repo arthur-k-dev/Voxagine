@@ -5,6 +5,7 @@
 #include "Core/ECS/Systems/Physics/PhysicsSystem.h"
 
 #include "Core/ECS/Components/VoxRenderer.h"
+#include "Core/ECS/Systems/Chunk/StreamingCounters.h"
 #include "Core/ECS/Systems/Rendering/VoxelStamp.h"
 #include "Core/Resources/Formats/VoxModel.h"
 #include "Core/Application.h"
@@ -148,6 +149,28 @@ void VoxelBaker::Bake()
 		   below - a disabled renderer clears without stamping, which is real
 		   work and would otherwise vanish from the count. */
 		const bool bRendererStatic = pRenderer->GetOwner()->IsStatic();
+
+		/* M7 (CHUNK_STREAMING_PLAN.md). A chunk that comes back is restored from
+		   its encoded voxels, which are what it looked like when it left - damage
+		   included. Re-stamping the pristine model over them is precisely
+		   "destroyed terrain comes back", and nothing said so until this counter
+		   existed. Counted here rather than asserted because it has to be
+		   visible to a Release headless run and to the perf gate. */
+		if (bRendererStatic && pRenderer->IsChunkInstanceLoaded())
+		{
+			StreamingCounters::Get().ChunkInstanceRestamps.fetch_add(1, std::memory_order_relaxed);
+
+			static const bool s_bAudit = std::getenv("VOXAGINE_CHUNK_IO_TIMINGS") != nullptr;
+
+			if (s_bAudit)
+			{
+				fprintf(stderr, "[chunk] re-stamping reloaded '%s' (updateRequested %d, updated %d, forced %d)\n",
+					pRenderer->GetOwner()->GetName().c_str(),
+					pRenderer->UpdateRequested() ? 1 : 0,
+					pRenderer->m_BakeData.Updated ? 1 : 0,
+					bForced ? 1 : 0);
+			}
+		}
 
 		const std::chrono::steady_clock::time_point rendererStart =
 			bProfiling ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
@@ -563,6 +586,24 @@ void VoxelBaker::NotifyClearedRegion(VoxRenderer* pCleared, const Vector3& v3Gri
 	if (bProfiling)
 		m_fRepairMilliseconds +=
 			std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+}
+
+void VoxelBaker::ForgetChunkStamp(VoxRenderer* pRenderer)
+{
+	if (pRenderer == nullptr)
+		return;
+
+	VoxRenderer::BakeData& data = pRenderer->m_BakeData;
+
+	delete[] data.Positions;
+
+	data.Positions = nullptr;
+	data.Size = 0;
+	data.IsStatic = false;
+	data.Generation = 0;
+	data.Stamp = VoxRenderer::BakeData::StampKey();
+	data.StampMin = Vector3(1.f);
+	data.StampMax = Vector3(0.f);
 }
 
 void VoxelBaker::Clear(VoxRenderer* pRenderer, VoxRenderer::BakeData* pBakeData, bool bNotify)

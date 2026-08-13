@@ -17,6 +17,7 @@
 #include "Core/ECS/Systems/Chunk/StreamingCounters.h"
 #include "Core/ECS/Systems/Physics/PhysicsSystem.h"
 #include "Core/ECS/Systems/Physics/VoxelGrid.h"
+#include "Core/Voxels/VoxelEditBatch.h"
 #include "Core/ECS/World.h"
 #include "Core/GameTimer.h"
 
@@ -247,7 +248,15 @@ void StreamingHarness::PlaceCamera(const Vector3& v3Position)
 
 void StreamingHarness::Frame()
 {
+	Frame(std::function<void()>());
+}
+
+void StreamingHarness::Frame(const std::function<void()>& fnAfterJobs)
+{
 	m_Application.GetJobManager().ProcessFinishedJobs();
+
+	if (fnAfterJobs)
+		fnAfterJobs();
 
 	m_pWorld->PreTick();
 
@@ -289,6 +298,24 @@ bool StreamingHarness::Settle(uint32_t uiMaxFrames)
 	}
 
 	return false;
+}
+
+VoxelEditTarget StreamingHarness::MakeEditTarget()
+{
+	VoxelEditTarget target;
+
+	target.pGrid = &Grid();
+	target.pBricks = &Bricks();
+	target.pWords = m_Window.GetFrontData();
+	target.uiWordCount = m_Window.GetWordCount();
+	target.v3WindowSize = m_v3WindowSize;
+
+	/* No loose-voxel sink: that is a RenderSystem service and this world has no
+	   RenderSystem. VoxelWorldHarness has RecordingLooseVoxelSink for checks
+	   that are about the registry. */
+	target.pLooseVoxels = nullptr;
+
+	return target;
 }
 
 uint32_t StreamingHarness::ResidentChunkCount() const

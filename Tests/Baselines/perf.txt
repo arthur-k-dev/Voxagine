@@ -39,6 +39,13 @@
 # slides. chunk-regions-written 19 -> 18 and chunk-storage-allocated 3 -> 0 for
 # exactly that reason: the initial load's region and its three allocations are
 # no longer inside the measurement, and the pool is warm by the time it starts.
+#
+# Re-recorded 2026-08-13 (chunk streaming phase 12). Three new work entries, all
+# zero and all meant to stay zero *for this benchmark*: it writes no voxels of
+# its own, so a slide over a world nobody wrote to must republish nothing. The
+# non-zero case - a write made while the back buffer was being built - is
+# Streaming/AVoxelWrittenWhileTheWindowIsBuildingSurvivesTheSwap, which asserts
+# the exact number rather than a bound.
 
 Destruction/BurstIntoSolidRock/bursts                                 49.0000  work
 Destruction/BurstIntoSolidRock/integrity-seeds                    205898.0000  work
@@ -86,7 +93,10 @@ Streaming/WindowSlideAndReturn/roots-per-staging-slice                 2.0000  w
 Streaming/WindowSlideAndReturn/roots-per-unload-slice                  2.0000  work
 Streaming/WindowSlideAndReturn/staged-roots-high-water                 3.0000  work
 Streaming/WindowSlideAndReturn/staged-roots-rejected                   0.0000  work
+Streaming/WindowSlideAndReturn/voxel-stamp-diverging-erases            0.0000  work
 Streaming/WindowSlideAndReturn/voxel-words-written                589824.0000  work
+Streaming/WindowSlideAndReturn/window-commit-writes-lost               0.0000  work
+Streaming/WindowSlideAndReturn/window-commit-writes-replayed           0.0000  work
 Streaming/WindowSlideAndReturn/window-swaps                            2.0000  work
 Streaming/WindowSlideAndReturn/world-links-abandoned                   0.0000  work
 Streaming/WindowSlideAndReturn/world-links-source-lost                 0.0000  work

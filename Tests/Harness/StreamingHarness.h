@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -9,6 +10,7 @@
 #include "Core/ECS/Systems/Chunk/StreamingBudgets.h"
 #include "Core/Math.h"
 #include "Core/Platform/Rendering/VoxelBrickGrid.h"
+#include "Core/Voxels/VoxelEditBatch.h"
 #include "Core/Voxels/VoxelWindow.h"
 
 class Camera;
@@ -142,6 +144,13 @@ public:
 	HarnessVoxelWindow& Window() { return m_Window; }
 	VoxelBrickGrid& Bricks() { return m_Window.GetBrickGrid(); }
 
+	/* The streaming world addressed the way destruction addresses it -
+	   RenderSystem::MakeEditTarget's counterpart, over the harness window. What
+	   it buys is a check that can write voxels *during* a transition, which is
+	   the only way to express phase 12: a write and a window commit racing is
+	   not a thing either harness could describe on its own. */
+	VoxelEditTarget MakeEditTarget();
+
 	UVector2 ChunkSize() const { return m_ChunkSize; }
 	UVector3 WindowSize() const { return m_v3WindowSize; }
 
@@ -160,8 +169,15 @@ public:
 
 	/* One simulated frame, in the order Application::Run runs them: completion
 	   callbacks, the world's add/remove queues, then the chunk system's fixed
-	   tick and display tick. */
+	   tick and display tick.
+
+	   fnAfterJobs runs between the completion callbacks and the ticks, which is
+	   the one moment a check can occupy the state phase 12 is about: the render
+	   job has published its finished back buffer to the state machine and the
+	   commit that swaps it in has not run yet. Frame granularity cannot express
+	   that - both happen inside the same call. */
 	void Frame();
+	void Frame(const std::function<void()>& fnAfterJobs);
 
 	/* Frames until nothing is streaming. False if it never settles, which is a
 	   wedged state machine and always a failure. */

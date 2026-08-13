@@ -45,6 +45,10 @@ const std::array<uint8_t, 256> VoxelBrickGrid::k_LinearFromSrgb = BuildLinearFro
 
 void VoxelBrickGrid::Resize(const UVector3& v3WorldSize)
 {
+	/* A journalled id names a voxel of the window that is going away, so
+	   replaying it into the new one would write an unrelated place. Phase 12. */
+	EndWriteJournal();
+
 	/* Deliberately touches only CPU state: the mirrors belong to a Mapper the
 	   caller has not resized yet, so the pointers in m_pGPU are about to be
 	   freed. The caller resizes the mapper, calls SetBuffers, then Flush. */
@@ -430,6 +434,10 @@ void VoxelBrickGrid::Flush()
 
 void VoxelBrickGrid::ClearAll()
 {
+	/* Same reason as Resize: the buffer this journal describes has just been
+	   zeroed wholesale, so there is nothing to put back. */
+	EndWriteJournal();
+
 	ZeroCounts();
 	ZeroOccupancy();
 	ZeroColors();

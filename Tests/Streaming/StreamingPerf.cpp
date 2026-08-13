@@ -136,6 +136,24 @@ VOXAGINE_BENCHMARK(Streaming, WindowSlideAndReturn)
 	   reintroduces the re-stamp should have to change a checked-in number. */
 	result.AddWork("chunk-instance-restamps", static_cast<double>(counters.ChunkInstanceRestamps.load()));
 
+	/* Phase 12. The benchmark writes no voxels of its own, so both are zero
+	   here - and that is the statement worth checking in: a slide over a world
+	   nobody wrote to must republish nothing, or the repair has turned into a
+	   second full window write on every transition. The check that exercises
+	   the non-zero case is
+	   Streaming/AVoxelWrittenWhileTheWindowIsBuildingSurvivesTheSwap. */
+	result.AddWork("window-commit-writes-replayed",
+		static_cast<double>(counters.WindowCommitWritesReplayed.load()));
+	result.AddWork("window-commit-writes-lost",
+		static_cast<double>(counters.WindowCommitWritesLost.load()));
+
+	/* A mapping voxel erased while the CPU kept its colour, which is the same
+	   invisible-but-solid disagreement seen from the stamp side. Zero by
+	   construction in a world with no RenderSystem; in the baseline for the
+	   reason chunk-instance-restamps is - the game reports the same counter. */
+	result.AddWork("voxel-stamp-diverging-erases",
+		static_cast<double>(counters.VoxelStampDivergingErases.load()));
+
 	/* The terminal state, so a benchmark that stopped streaming for the wrong
 	   reason cannot report cheap numbers. */
 	result.AddWork("resident-chunks", static_cast<double>(harness.ResidentChunkCount()));

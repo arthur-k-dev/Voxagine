@@ -181,6 +181,44 @@ struct StreamingCounters
 	   stamp would then never complete. */
 	std::atomic<uint64_t> VoxelStampRestarts{ 0 };
 
+	/* Back-buffer builds whose render job has finished and whose window has not
+	   been published yet. The state between the two is the one phase 12 is
+	   about - the incoming window is complete and invisible, and a write now
+	   goes into the buffer the swap is about to retire - and a check has no
+	   other way to be *in* it: group state is private and job timing is not a
+	   test input (T2). */
+	std::atomic<uint64_t> WindowBuildsCompleted{ 0 };
+
+	/* Voxel writes republished into the newly visible buffer at a window commit
+	   - phase 12, and see ChunkSystem::RepublishJournalledWrites. Ordinary and
+	   expected: it is every voxel the main thread wrote while the worker was
+	   building the incoming window, and on a settled walk with no destruction
+	   it is zero because nothing writes voxels.
+
+	   The second is the part that was a defect: the writes whose *occupancy*
+	   the swap would have changed - a solid voxel the image would have lost, or
+	   a destroyed one it would have brought back. That is the CPU/GPU
+	   disagreement Joey saw in play, and this is the number that names it. */
+	std::atomic<uint64_t> WindowCommitWritesReplayed{ 0 };
+	std::atomic<uint64_t> WindowCommitWritesLost{ 0 };
+
+	/* A stamp's Clear erased a mapping voxel whose CPU cell is still occupied -
+	   phase 12, and the exact shape of what VOXAGINE_SYNC_AUDIT reports as
+	   "occupied only on the CPU": geometry physics can see and the image
+	   cannot. Must stay zero.
+
+	   A dynamic renderer's stamp lives in the mapping and nowhere else, so a
+	   recorded position whose CPU cell has since become occupied - debris a
+	   particle baked on impact is the case that happens in play - names
+	   somebody else's voxel, and erasing it removes the only copy the image
+	   has. Nothing re-stamps an ownerless CPU voxel, so the hole is permanent
+	   until the window next slides over it.
+
+	   Counted at the erase rather than at the decision, so it stays meaningful
+	   for any future path that clears the mapping: whatever the reason, a zeroed
+	   word over a live CPU voxel is a divergence. */
+	std::atomic<uint64_t> VoxelStampDivergingErases{ 0 };
+
 	/* --- phase 11: did this run destroy anything? ---------------------------
 	   Not streaming, and here anyway because this is the tree's one place for
 	   exact machine-independent counts and because the question these answer is
@@ -232,6 +270,10 @@ struct StreamingCounters
 		c.ChunkInstanceRestamps.store(0, std::memory_order_relaxed);
 		c.VoxelStampSlices.store(0, std::memory_order_relaxed);
 		c.VoxelStampRestarts.store(0, std::memory_order_relaxed);
+		c.WindowBuildsCompleted.store(0, std::memory_order_relaxed);
+		c.WindowCommitWritesReplayed.store(0, std::memory_order_relaxed);
+		c.WindowCommitWritesLost.store(0, std::memory_order_relaxed);
+		c.VoxelStampDivergingErases.store(0, std::memory_order_relaxed);
 		c.DestructionBursts.store(0, std::memory_order_relaxed);
 		c.VoxelsDestroyed.store(0, std::memory_order_relaxed);
 		c.VoxelsProtected.store(0, std::memory_order_relaxed);

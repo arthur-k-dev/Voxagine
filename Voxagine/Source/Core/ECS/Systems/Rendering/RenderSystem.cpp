@@ -1191,6 +1191,45 @@ void RenderSystem::AuditRepresentationSync()
 	uint64_t uiMissingFromCPU = 0;
 	uint32_t uiFirstBad = UINT32_MAX;
 
+	/* Classification of the CPU-only population, which is what turns the count
+	   into a diagnosis. Owned means a static VoxelBaker stamp put it there;
+	   unowned and occupied means VoxelEditBatch did, which for an occupied
+	   voxel is debris a particle baked on impact. */
+	uint64_t uiCPUOnlyOwned = 0;
+	uint64_t uiCPUOnlyLoose = 0;
+	uint32_t uiCPUOnlySamples = 0;
+
+	/* The registry is keyed in level space and stores cell-local offsets - the
+	   same arithmetic as AddLooseVoxel, asked in reverse. */
+	const Vector3 v3LooseOffset = grid.GetWorldOffset();
+
+	auto isLoose = [this, &v3LooseOffset](uint32_t x, uint32_t y, uint32_t z)
+	{
+		const Vector3 v3Level = Vector3((float)x, (float)y, (float)z) + v3LooseOffset;
+
+		if (v3Level.x < 0.f || v3Level.y < 0.f || v3Level.z < 0.f)
+			return false;
+
+		const UVector3 v3Voxel((uint32_t)v3Level.x, (uint32_t)v3Level.y, (uint32_t)v3Level.z);
+
+		const uint32_t uiKey =
+			(v3Voxel.x >> k_uiLooseCellShift) |
+			((v3Voxel.y >> k_uiLooseCellShift) << 10) |
+			((v3Voxel.z >> k_uiLooseCellShift) << 20);
+
+		std::unordered_map<uint32_t, LooseVoxelCell>::const_iterator it = m_LooseVoxelCells.find(uiKey);
+
+		if (it == m_LooseVoxelCells.end())
+			return false;
+
+		const uint16_t uiOffset = static_cast<uint16_t>(
+			(v3Voxel.x & (k_uiLooseCellSize - 1)) |
+			((v3Voxel.y & (k_uiLooseCellSize - 1)) << 5) |
+			((v3Voxel.z & (k_uiLooseCellSize - 1)) << 10));
+
+		return std::binary_search(it->second.Offsets.begin(), it->second.Offsets.end(), uiOffset);
+	};
+
 	for (uint32_t z = 0; z < dims.z; ++z)
 	for (uint32_t y = 0; y < dims.y; ++y)
 	for (uint32_t x = 0; x < dims.x; ++x)
@@ -1228,7 +1267,33 @@ void RenderSystem::AuditRepresentationSync()
 		   zero: it should track roughly the voxel count of the dynamic
 		   renderers on screen, and it should come back down when they leave. */
 		if ((uiCPU >> 24) != 0 && (uiGPU >> 24) == 0)
+		{
 			++uiMissingFromGPU;
+
+			/* The count alone says a defect exists; this says which one.
+			   Ownership splits the population in two, and the two have
+			   different causes: an owned voxel was written by a static
+			   VoxelBaker stamp, an unowned one by VoxelEditBatch - which for
+			   an occupied voxel means debris a particle baked on impact. The
+			   first few coordinates are what make it findable in the level. */
+			const bool bLoose = isLoose(x, y, z);
+
+			/* Disjoint, so the three buckets sum to the total: ownership is
+			   asked first because a static stamp over a previously loose cell
+			   makes the voxel that stamp's, whatever the registry still says. */
+			if (cell.GetSlot() != VoxelOwnerVolume::k_uiNoOwnerSlot)
+				++uiCPUOnlyOwned;
+			else if (bLoose)
+				++uiCPUOnlyLoose;
+
+			if (uiCPUOnlySamples < 8)
+			{
+				++uiCPUOnlySamples;
+
+				fprintf(stderr, "[sync-audit]   CPU-only at grid (%u %u %u) colour %08x slot %u loose %d\n",
+				        x, y, z, uiCPU, cell.GetSlot(), bLoose ? 1 : 0);
+			}
+		}
 		else if ((uiCPU >> 24) == 0 && (uiGPU >> 24) != 0)
 			++uiMissingFromCPU;
 
@@ -1243,6 +1308,11 @@ void RenderSystem::AuditRepresentationSync()
 	        (unsigned long long)uiColourDisagreements, dims.x * dims.y * dims.z,
 	        (unsigned long long)uiMissingFromGPU, (unsigned long long)uiMissingFromCPU,
 	        uiFirstBad, uiBrickDisagreements, uiWordCount, stageSpan.count());
+
+	if (uiMissingFromGPU > 0)
+		fprintf(stderr, "[sync-audit] of the CPU-only voxels: %llu carry a static owner slot, %llu are registered loose debris, %llu are neither\n",
+		        (unsigned long long)uiCPUOnlyOwned, (unsigned long long)uiCPUOnlyLoose,
+		        (unsigned long long)(uiMissingFromGPU - uiCPUOnlyOwned - uiCPUOnlyLoose));
 
 	if (m_pPhysicsSystem)
 		m_pPhysicsSystem->AuditParticlePool();

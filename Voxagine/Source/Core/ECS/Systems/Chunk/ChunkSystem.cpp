@@ -65,6 +65,14 @@ ChunkSystem::ChunkSystem(World* pWorld, std::unordered_map<uint32_t, Chunk*> chu
 
 ChunkSystem::~ChunkSystem()
 {
+	/* The voxel window outlives this system - it belongs to the render context,
+	   and phase 8 keeps two worlds alive across a switch - so a build that was
+	   in flight when the world went away would leave the journal armed against
+	   the next world's writes, recording ids into a window that has since been
+	   resized. */
+	if (m_pVoxelWindow != nullptr)
+		m_pVoxelWindow->GetBrickGrid().EndWriteJournal();
+
 	for (auto& iter : m_Chunks)
 	{
 		delete iter.second;
@@ -626,6 +634,15 @@ void ChunkSystem::UpdateGroup(ChunkUpdateGroup& group)
 		JobQueue* pJobQueue = m_pWorld->GetJobQueue();
 		if (pJobQueue)
 		{
+			/* Phase 12. From here until the swap, everything the main thread
+			   writes into the front buffer goes into a buffer this build is
+			   about to retire - see VoxelBrickGrid::BeginWriteJournal. Armed
+			   before the job is enqueued, so no write can slip between the two,
+			   and only on the path that actually reaches a commit: a journal
+			   nothing consumes would grow for the rest of the level. */
+			if (m_pVoxelWindow != nullptr)
+				m_pVoxelWindow->GetBrickGrid().BeginWriteJournal();
+
 			pJobQueue->Enqueue<bool>([this, &group, viewPortData]()
 			{
 				/* The whole incoming window is built here, on a worker, into a
@@ -657,6 +674,10 @@ void ChunkSystem::UpdateGroup(ChunkUpdateGroup& group)
 				return true;
 			}, [&group](bool bFinished)
 			{
+				/* The incoming window is complete and not yet visible from
+				   here until the commit below - see WindowBuildsCompleted. */
+				StreamingCounters::Get().WindowBuildsCompleted.fetch_add(1, std::memory_order_relaxed);
+
 				/* Completion callbacks run on the *main thread*. Master did the
 				   entire rest of the transition in here - physics pointers,
 				   every incoming chunk's entities, the offset, the swap, and
@@ -967,6 +988,14 @@ std::vector<ChunkUpdateGroup>::iterator ChunkSystem::RemoveUpdateGroup(const std
 	if (bCancelled)
 		StreamingCounters::Get().CancelledGroups.fetch_add(1, std::memory_order_relaxed);
 
+	/* A group cancelled while its back buffer was being built never reaches the
+	   commit that would consume its journal, and nothing swapped - so the
+	   writes are already in the visible buffer and the journal is simply
+	   dropped. Left armed it would grow for the rest of the level. */
+	if (bCancelled && m_pVoxelWindow != nullptr &&
+		iter->GetState() == ChunkUpdateGroup::UpdateState::US_RENDERING)
+		m_pVoxelWindow->GetBrickGrid().EndWriteJournal();
+
 	/* Which chunk state this group is entitled to reset (R5), and it is *its
 	   own* only. A chunk can be an item of several groups at once - the front
 	   one unloading it, a queued one scheduled to load it back - so "reset every
@@ -1098,6 +1127,11 @@ void ChunkSystem::CommitWindow(ChunkUpdateGroup& group)
 	const std::chrono::steady_clock::time_point start =
 		bProfiling ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
 
+	/* The window the journalled writes below were addressed in. Read before the
+	   offset moves, because a voxel keeps its place in the level and changes
+	   its index. */
+	const Vector3 v3PreviousOffset = m_pVoxelGrid->GetWorldOffset();
+
 	for (ChunkUpdateGroup::Item& item : group.GetItems())
 	{
 		if (item.ItemTarget == ChunkUpdateGroup::Item::Target::T_ASYNC_UNLOAD)
@@ -1119,6 +1153,12 @@ void ChunkSystem::CommitWindow(ChunkUpdateGroup& group)
 		   the shape this is deliberately not. */
 		m_pVoxelWindow->WaitForReaders();
 		m_pVoxelWindow->Swap();
+
+		/* And immediately put back what the swap just discarded, inside the
+		   same transaction: the buffer that has become visible was built from
+		   the chunks' CPU voxels *before* this frame, so every write made since
+		   is missing from it. Phase 12. */
+		RepublishJournalledWrites(v3PreviousOffset);
 	}
 
 	if (Camera* pMainCamera = m_pWorld->GetMainCamera())
@@ -1169,6 +1209,99 @@ void ChunkSystem::CommitWindow(ChunkUpdateGroup& group)
 			std::chrono::duration<double, std::milli>(
 				std::chrono::steady_clock::now() - start).count());
 	}
+}
+
+void ChunkSystem::RepublishJournalledWrites(const Vector3& v3PreviousOffset)
+{
+	if (m_pVoxelWindow == nullptr)
+		return;
+
+	VoxelBrickGrid& bricks = m_pVoxelWindow->GetBrickGrid();
+
+	if (!bricks.IsJournallingWrites())
+		return;
+
+	/* Taken rather than read: the replay below writes voxels, and a write
+	   journals. */
+	std::vector<uint32_t> journal;
+	bricks.TakeWriteJournal(journal);
+
+	uint32_t* pWords = m_pVoxelWindow->GetFrontData();
+
+	if (pWords == nullptr || journal.empty())
+		return;
+
+	/* A burst writes the same voxel more than once - cleared by the sphere,
+	   then written again by debris landing in it - and the replay only ever
+	   needs the CPU voxel's final state. */
+	std::sort(journal.begin(), journal.end());
+	journal.erase(std::unique(journal.begin(), journal.end()), journal.end());
+
+	const UVector3 dims = m_pVoxelGrid->GetDimensions();
+	const uint32_t uiWordCount = m_pVoxelWindow->GetWordCount();
+	const float fVoxelSize = static_cast<float>(m_pVoxelGrid->GetVoxelSize());
+
+	/* In voxels, and a whole number of them: a window slides by whole chunks.
+	   The same arithmetic VoxelBaker::Clear does to a recorded position. */
+	const Vector3 v3Delta = (v3PreviousOffset - m_pVoxelGrid->GetWorldOffset()) / fVoxelSize;
+
+	const int32_t iDeltaX = static_cast<int32_t>(std::lround(v3Delta.x));
+	const int32_t iDeltaY = static_cast<int32_t>(std::lround(v3Delta.y));
+	const int32_t iDeltaZ = static_cast<int32_t>(std::lround(v3Delta.z));
+
+	const uint32_t uiSlice = dims.x * dims.y;
+
+	uint64_t uiReplayed = 0;
+	uint64_t uiLost = 0;
+
+	for (uint32_t uiOldID : journal)
+	{
+		const int32_t iX = static_cast<int32_t>(uiOldID % dims.x) + iDeltaX;
+		const int32_t iY = static_cast<int32_t>((uiOldID / dims.x) % dims.y) + iDeltaY;
+		const int32_t iZ = static_cast<int32_t>(uiOldID / uiSlice) + iDeltaZ;
+
+		/* The voxel walked out of the window with the slide. Nothing to
+		   republish: its chunk carries the write, and will render it back in
+		   when it returns. */
+		if (iX < 0 || iY < 0 || iZ < 0 ||
+			iX >= static_cast<int32_t>(dims.x) ||
+			iY >= static_cast<int32_t>(dims.y) ||
+			iZ >= static_cast<int32_t>(dims.z))
+			continue;
+
+		const VoxelCell cell = m_pVoxelGrid->GetCell(
+			static_cast<uint32_t>(iX), static_cast<uint32_t>(iY), static_cast<uint32_t>(iZ));
+
+		if (!cell)
+			continue;
+
+		const uint32_t uiNewID =
+			static_cast<uint32_t>(iX) +
+			static_cast<uint32_t>(iY) * dims.x +
+			static_cast<uint32_t>(iZ) * uiSlice;
+
+		if (uiNewID >= uiWordCount)
+			continue;
+
+		const uint32_t uiColor = cell.GetColor();
+
+		/* What would have been lost, asked of the occupancy bitmap rather than
+		   of the mapping: the bitmap is ordinary cached memory and the mapping
+		   is a PCIe read of VRAM, and the bit is the half of the disagreement
+		   that shows on screen. Not a gate - it is the measurement that names
+		   this defect - but it should be small, and it is zero on a commit that
+		   nothing wrote through. */
+		if (bricks.IsOccupied(uiNewID) != ((uiColor >> 24) != 0))
+			++uiLost;
+
+		pWords[uiNewID] = uiColor;
+		bricks.SetVoxel(uiNewID, uiColor);
+
+		++uiReplayed;
+	}
+
+	StreamingCounters::Get().WindowCommitWritesReplayed.fetch_add(uiReplayed, std::memory_order_relaxed);
+	StreamingCounters::Get().WindowCommitWritesLost.fetch_add(uiLost, std::memory_order_relaxed);
 }
 
 void ChunkSystem::RenderChunk(ChunkUpdateGroup::Item& updateItem, uint32_t* viewPortData, bool bBackBuffer)

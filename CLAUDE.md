@@ -57,14 +57,10 @@ for UI regression checks - `LaunchOptions.h`. See `Docs/MOBILE_PORT_LOG.md`'s
 last section for the device measurements and what is still owed.
 
 **Chunk streaming has its own plan: `Docs/CHUNK_STREAMING_PLAN.md`; phases 0-5,
-8, 9 and 11 are done and phase 6 is closed as *not taken*.** A window transition's
+8, 9, 11 and 12 are done and phase 6 is closed as *not taken*.** A window transition's
 worst frame is **150.2 -> 10.3 ms** across them - the hitch gate passes and its
 `WILL_FAIL` is off - and `[world-switch] initialize` is **876 -> 317 ms**.
-**Three things remain, in the order to fix them**: 12, the
-CPU/GPU voxel disagreement Joey saw in play (540 voxels CPU-only, 4,426 GPU-only
-- a destroyed pillar coming back visually while collision stays correct), which
-**phase 11 reproduced headlessly**: 228 CPU-only voxels on a four-minute Beat1
-run with destruction, against 0 on the identical run without it; 13, a lifetime handle (id
+**Two things remain, in the order to fix them**: 13, a lifetime handle (id
 + generation, resolved on use) for the raw pointers game code holds into
 streamed content, which is four of the phase 9 play session's ten defects and
 ledger M8; then 10, the editor session, which needs Joey at the machine, deletes
@@ -73,6 +69,33 @@ ledger M8; then 10, the editor session, which needs Joey at the machine, deletes
 broken *on master* (its `--frames` budget expires before R1 releases gameplay,
 so it has measured nothing since phase 4). The table in that plan is in
 execution order, not numeric order.
+
+**A window commit used to throw away every voxel written while it was
+building**, and that is the whole of the CPU/GPU disagreement Joey saw in play
+(phase 12). The render job builds the *entire* incoming window into the back
+buffer from the chunks' CPU voxels and `CommitWindow` swaps it in, so a write
+made in between lands in the buffer the swap retires: a debris bake is then
+**invisible but solid** and a destruction clear is **visible and not there** -
+a destroyed pillar coming back while collision stays correct. Destruction is
+the only thing that writes voxels during play, which is why this needed phase
+11's scripted combat before it could be seen headlessly at all.
+`VoxelBrickGrid::SetVoxel` journals the ids while a build is in flight - it is
+the one place `VoxelEditBatch::Write`, `ModifyVoxel` and `ModifyVoxelFast` all
+pass through - and `ChunkSystem::RepublishJournalledWrites` replays them
+straight after the swap, **out of the CPU voxel rather than the recorded
+colour**, shifted by the offset delta. `VOXAGINE_SYNC_AUDIT` goes **106-188 ->
+0 of 75,497,472** over a run that destroys 48 k voxels, slides the window and
+switches world. Three things not to undo: the journal is armed only on the path
+that reaches a commit and is disarmed by cancellation, `~ChunkSystem`, `Resize`
+and `ClearAll` (an id into a resized window names an unrelated place); a quiet
+slide must republish **nothing**, which is gated as
+`window-commit-writes-replayed` in `perf.txt`; and
+`StreamingCounters::WindowCommitWritesLost` is the number that names the
+defect - it is what the swap *would* have lost. **The first hypothesis was
+`VoxelBaker::Clear` erasing an unowned voxel and it was wrong**;
+`VoxelStampDivergingErases` measured zero on the run that had 124
+disagreements, and that counter stayed because counting at the write is what
+killed the theory in one run rather than in an argument.
 
 **A world switch with a loading screen brings the new world up *behind* it.**
 `WorldManager::LoadWorldAfterStreaming`/`UpdateStreamingWorld` (phase 8): the

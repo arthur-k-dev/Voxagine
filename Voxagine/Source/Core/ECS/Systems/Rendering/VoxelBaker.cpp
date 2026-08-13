@@ -986,6 +986,16 @@ void VoxelBaker::Clear(VoxRenderer* pRenderer, VoxRenderer::BakeData* pBakeData,
 				continue;
 			}
 
+			/* Phase 12's invariant, counted at the write rather than at the
+			   rule above it: a mapping word zeroed while the CPU cell keeps a
+			   colour is exactly the "occupied only on the CPU" the sync audit
+			   reports, whatever reasoning led here. Must stay zero. */
+			if (!bStatic && cell && cell.IsActive())
+			{
+				StreamingCounters::Get().VoxelStampDivergingErases.fetch_add(
+					1, std::memory_order_relaxed);
+			}
+
 			m_pRenderSystem->m_pRenderContext->ModifyVoxelFast(chunkOffsetPosition, 0);
 
 			clearedMin = glm::min(clearedMin, voxelPos);

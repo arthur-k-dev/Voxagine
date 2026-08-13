@@ -83,6 +83,26 @@ protected:
 	   assert about, and one place a future phase can add to. */
 	void CommitWindow(ChunkUpdateGroup& group);
 
+	/* The second half of that transaction, and phase 12's fix.
+	 *
+	 * The worker builds the whole incoming window into the back buffer from the
+	 * chunks' CPU voxels, and the main thread goes on writing voxels into the
+	 * front buffer the entire time - destruction clearing them and debris
+	 * baking itself in are the two paths that do it during play. The swap then
+	 * publishes a buffer that predates every one of those writes: the CPU keeps
+	 * them and the image loses them, which is a voxel that is solid and
+	 * invisible (or, the other way round, destroyed terrain that comes back
+	 * visually while collision stays correct).
+	 *
+	 * Every such write is journalled by VoxelBrickGrid (see BeginWriteJournal)
+	 * and replayed here, out of the CPU voxel rather than out of the recorded
+	 * colour: the CPU grid is authoritative for everything the mapping holds,
+	 * so replaying it also heals a write the worker read half of.
+	 *
+	 * Takes the offset the journalled ids were addressed in - the window has
+	 * already moved by the time this runs. */
+	void RepublishJournalledWrites(const Vector3& v3PreviousOffset);
+
 	/* Construct the incoming chunks' entity trees, detached from the world,
 	   under StreamingBudgets::EntityStaging. Called opportunistically from
 	   US_RENDERING while the worker builds the back buffer, and again from

@@ -461,6 +461,30 @@ void Application::Run()
 			static_cast<unsigned long long>(counters.VoxelsDestroyed.load(std::memory_order_relaxed)),
 			static_cast<unsigned long long>(counters.VoxelsProtected.load(std::memory_order_relaxed)),
 			static_cast<unsigned long long>(counters.DestructionBursts.load(std::memory_order_relaxed)));
+
+		/* Phase 12. Both zero on a run that neither destroyed anything nor slid
+		   the window over a write, so they say nothing then rather than adding
+		   two lines every run has to be read past. */
+		const uint64_t uiReplayed =
+			counters.WindowCommitWritesReplayed.load(std::memory_order_relaxed);
+		const uint64_t uiLost =
+			counters.WindowCommitWritesLost.load(std::memory_order_relaxed);
+
+		if (uiReplayed > 0)
+		{
+			fprintf(stderr, "[streaming] %llu voxel writes republished at a window commit, %llu of which the swap would have lost\n",
+				static_cast<unsigned long long>(uiReplayed),
+				static_cast<unsigned long long>(uiLost));
+		}
+
+		const uint64_t uiDiverging =
+			counters.VoxelStampDivergingErases.load(std::memory_order_relaxed);
+
+		if (uiDiverging > 0)
+		{
+			fprintf(stderr, "[destruction] %llu mapping voxels erased over a live CPU voxel - invisible but solid geometry\n",
+				static_cast<unsigned long long>(uiDiverging));
+		}
 	}
 
 	// Stop application-level producers while all of their dependencies are alive.

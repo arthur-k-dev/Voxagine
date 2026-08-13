@@ -55,7 +55,7 @@ world switch, and the loading screen.
 | 8 — World switch behind the loading screen | DONE except three named items | `chunk-streaming-phase-8` | K5's world-manager half. A level is initialized hidden, streamed over frames the loading screen keeps drawing, and swapped in whole: the same **~300 ms** `initialize` is paid behind the loading screen instead of in the one frame the player waits through, plus **1666–1717 ms** of streaming over **2518–3716 drawn frames**, plus a **16.8–19.0 ms** activation. Readiness folds in the far field and that is free, which closes phase 4's horizon judgement call. `join` and the auto-joined player one landed first, so menu → level is scriptable headlessly at all. **Not done and not attempted: `RenderSystem::Start`'s 258 ms, the far-field harness scenarios, E9's sprite-only *flag* (the sprite discard itself landed).** Confirmed on screen by Joey after the black-frame fix. |
 | 9 — Splitting one renderer's stamp | DONE | `chunk-streaming-phase-9` | **The hitch gate flips: peak 27.9 → 9.82 / 10.15 / 10.31 ms against 16.67, and the `WILL_FAIL` is off.** The walk turned out not to be what lost the 580 k voxels — it is resume-identical at every budget from 1 up, checked against two real models — so the fixes are the two *interactions*: `Bake` no longer clears a half-written renderer, and the bake bookkeeping is written at the start of a stamp rather than the end. Occupancy identical at four slice sizes over eight runs; coverage, sync and pyramid audits clean during streaming — **not** with combat, whatever this row said before: the `fire` token does not work and phase 11 owns it. Costs **728–779 → 910–1,071 held ticks** before gameplay starts. Left open: **Joey has not judged pop-in on screen**, and `gpu_destruction_sync_stress` is broken *on master* — see the notes. |
 | 11 — `--ui-script fire`, and the first headless run that destroys a voxel | DONE | `chunk-streaming-phase-11` | **The token was never broken; the script's clock was.** It counted display frames from process start, so a level whose hold ran long spent every token before `Player::Start` had bound anything — 621 held ticks in one Release run and **2,930** in the next, same binary, same command line, which is the whole of why it read as intermittent. The clock now stops while `World::IsGameplayHeld()`. A scripted run destroys **25,062 voxels over 32 bursts** where it destroyed 0, ever; `[destruction]` is printed by every run. **Both prior diagnoses were wrong** — see the notes. The acceptance run reproduces phase 12 headlessly (228 CPU-only voxels), which is the point of doing 11 first. |
-| 12 — The CPU/GPU voxel disagreement during play | OPEN — **has a headless repro now** | | 540 voxels present only on the CPU (invisible but solid) and 4,426 only on the GPU (visible and not there), seen by Joey in play after phase 9. Phase 11's acceptance run reproduces the CPU-only half in four minutes: **228 of 75.5 M**, against **0** for the identical run with the `fire` tokens replaced by `wait`. Caused by destruction, and *not* an audit race — see the phase 11 notes for both, and do not re-derive either. |
+| 12 — The CPU/GPU voxel disagreement during play | DONE | `chunk-streaming-phase-12` | **The window commit was throwing writes away.** A slide rebuilds the whole incoming window into the back buffer from the chunks' CPU voxels and then swaps, so every voxel the main thread writes while that build is in flight lands in the buffer the swap retires — the CPU keeps it, the image loses it. Destruction is what writes voxels during play, which is why it needed phase 11 to be reproducible at all. Those writes are journalled and republished inside the same commit transaction: `VOXAGINE_SYNC_AUDIT` **106–188 → 0 of 75,497,472**, on a run that destroys 23–38 k voxels, slides the window and switches world. **The first hypothesis — `VoxelBaker::Clear` erasing an unowned voxel — was wrong and its counter says so**, which is why that counter stayed. |
 | 13 — A lifetime handle for streamed content | OPEN | | Four of the ten defects the phase 9 play session found are one shape, and so is ledger M8: a raw pointer to streamed content, held across a frame, with nothing to say the target died. More guards is not the answer — two of them crashed *inside* the guard. `PlayerSlot` generalised into a handle (id + generation, resolved on use). |
 | 10 — Editor session and closing the plan | OPEN — **last** | | Needs Joey at the machine. Runs after 11–13: it deletes `progressive-chunk-experiment` and its acceptance is the whole suite green, so it cannot honestly precede work that is still landing. Also owns `gpu_destruction_sync_stress` (broken on master, see the phase 9 notes) and the pop-in judgement. |
 
@@ -2389,6 +2389,125 @@ would have caught it earlier added to `StreamingCounters` and gated in
 `Tests/Baselines/perf.txt`. A fix with no counter behind it leaves the next
 instance to be found by crashing, which is how this one was found.
 
+#### Phase 12 notes — the commit was throwing writes away
+
+**The mechanism, in one sentence.** `ChunkSystem`'s render job builds the
+*entire* incoming window into the mapper's back buffer from the chunks' CPU
+voxels, and `CommitWindow` then publishes it with a swap — so every voxel the
+main thread writes between the start of that build and the swap is written into
+the buffer the swap retires. The CPU voxel keeps the write and the image loses
+it. Destruction and debris landing are the only two paths that write voxels
+during play, which is exactly why the disagreement needs destruction to appear
+and why phase 11 had to come first.
+
+Both directions of Joey's play session fall out of the same race, and which one
+you get is only a matter of which write was in flight:
+
+- a **debris bake** during the build → the CPU has a colour the window does not:
+  *invisible but solid*, the 540 (and the 228 here);
+- a **destruction clear** during the build → the window has a colour the CPU
+  cleared: *visible and not there*, the 4,426 — a destroyed pillar coming back
+  while collision stays correct.
+
+**The fix is a journal and a replay, inside the same transaction.**
+`VoxelBrickGrid::SetVoxel` is the one place every main-thread front-buffer write
+already passes through — `VoxelEditBatch::Write`, `ModifyVoxel` and
+`ModifyVoxelFast` all call it, and all of them write the word beside it — so it
+records the ids while a build is in flight and `ChunkSystem::
+RepublishJournalledWrites` puts them back immediately after the swap. Four
+things about it that are not incidental:
+
+- **It replays the CPU voxel's current colour, not the colour that was
+  written.** The CPU grid is authoritative for everything the mapping holds, so
+  a write the worker read half of heals to the same answer either way.
+- **The ids are shifted by the offset delta**, the same arithmetic
+  `VoxelBaker::Clear` does to a recorded position: a voxel keeps its place in
+  the level and changes its index. One that left the window is skipped — its
+  chunk carries the write and renders it back in when it returns.
+- **The journal is armed only on the path that reaches a commit** and is
+  disarmed by cancellation, by `~ChunkSystem`, by `VoxelBrickGrid::Resize` and
+  by `ClearAll`. A journal nothing consumes grows for the rest of the level, and
+  an id into a window that has been resized names an unrelated place.
+- **Off unless a build is in flight**, which is what keeps a branch on a path
+  that runs three million times a world load free.
+
+**Measured, `Fishing_Village_Beat1`, Release, headless, phase 11's script:**
+
+| | before | after |
+|---|---|---|
+| `VOXAGINE_SYNC_AUDIT`, occupied only on the CPU | 106 / 188 / 152 / 124 / 64 | **0 of 75,497,472**, twice a run |
+| only on the GPU | 0 | 0 |
+| voxels destroyed in the same run | 29–38 k over 35–49 bursts | 23 k over 41 bursts |
+| writes republished at a commit | — | 403, **374 of which the swap would have lost** |
+
+And through the *menus*, which is the acceptance as written — `--map Main_Menu`,
+two `confirm`s, then the same combat script: the level comes up behind the
+loading screen (306.5 ms `initialize`, 3,097 frames, 10.29 ms activation), the
+window slides into chunk row Y = 3, the run destroys **48,205 voxels over 46
+bursts**, and both audits report **0 of 75,497,472** — with 90 writes
+republished, 86 of which the swap would have lost.
+
+##### The first hypothesis was wrong, and its counter stayed
+
+The obvious suspect was `VoxelBaker::Clear`: it erases a recorded position from
+the mapping and only clears the CPU voxel when the stamp was static, so an
+erase over somebody else's unowned voxel — baked debris — produces exactly this
+signature. It is a real hazard and it is worth a counter, so
+`StreamingCounters::VoxelStampDivergingErases` counts an erase that leaves the
+CPU cell occupied, at the write rather than at the rule above it.
+
+**It measured zero on the run that had 124 disagreements**, which killed the
+theory in one run and is the whole reason for counting at the write: a rule can
+be argued about, a count cannot. (It also cannot fire today for a second
+reason — `DYNAMIC_MODELS_PLAN.md` phase 3 stopped stamping dynamic renderers
+into the voxel buffer at all — but that was not what the number said, and the
+number is what stopped the session going down a blind alley.)
+
+**Two other things the audit's own output decided**, both cheap and both added
+to it: the CPU-only voxels are split by ownership and by loose-debris
+registration, and the first eight are printed with coordinates. **0 of them
+carried a static owner slot** — so nothing a `VoxelBaker` stamp had written was
+involved — and the brick/bitmap disagreement count was **0**, so the occupancy
+bitmap agreed with the *mapping* and disagreed with the CPU. That pair is what
+points at a whole-buffer publish rather than at any single write path: only a
+swap moves the words and the bits together and leaves the CPU behind.
+
+##### What is checked, and what it is checked against
+
+- **`Streaming/AVoxelWrittenWhileTheWindowIsBuildingSurvivesTheSwap`** writes a
+  voxel through a real `VoxelEditBatch` at the one moment the defect lives in —
+  the back buffer built, the window not yet published — and asserts the word,
+  the occupancy bit and `WindowCommitWritesLost`. **Verified by disabling the
+  republish: it fails on all three**, with the word reading 0.
+- Getting *into* that state needed two seams, both small and both honest.
+  `StreamingCounters::WindowBuildsCompleted` is incremented by the render job's
+  completion callback, because group state is private and job timing is not a
+  test input (T2); and `StreamingHarness::Frame` takes an optional callback that
+  runs between the completion callbacks and the ticks, because the build
+  completing and the commit happen inside the same `Frame()` and frame
+  granularity cannot express the gap between them.
+- **`Streaming/AQuietSlideRepublishesNothing`** is the other half: a slide over
+  a world nobody wrote to must republish nothing, or the repair has quietly
+  become a second full window write per transition. Gated as
+  `window-commit-writes-replayed` = 0 in `Tests/Baselines/perf.txt`, beside
+  `window-commit-writes-lost` and `voxel-stamp-diverging-erases`.
+- Whole suite green in Debug and Release (checks 125, scenarios 31, perf 0
+  regressions).
+
+##### What phase 12 did not do
+
+- **The CPU voxels themselves are still read by the worker while the main
+  thread writes them.** The replay makes the *result* correct — it re-reads the
+  CPU voxel after the build — but `RenderChunk` is still an unsynchronised read
+  of storage gameplay is writing. It has been that way since master; it is worth
+  a phase, and it is not this one's.
+- **Nothing was done about how long a build takes.** The window it opens is what
+  makes the loss likely; shortening it is phase 5/9 territory and the repair is
+  exact regardless of its length.
+- **The play session's 4,426 GPU-only voxels were never reproduced headlessly**,
+  only explained. The mechanism produces them and the repair covers them, but no
+  run in this session saw a non-zero GPU-only count.
+
 ### Phase 13 — A lifetime handle for streamed content
 
 *Third: the largest of the four, the least urgent — every crash it prevents has
@@ -2510,8 +2629,15 @@ cd Game && VOXAGINE_AUDIO_NULL_DEVICE=1 VOXAGINE_SYNC_AUDIT=10 VOXAGINE_COVERAGE
   --ui-script "wait,forward-on,fire,wait,fire,wait,fire,wait,wait,fire,wait,fire,wait,forward-off,fire,wait,fire,wait" \
   --ui-script-interval 60
 # Add VOXAGINE_GAMEPLAY_DEBUG=1 to see the Fire callback's branch per press.
-# The sync audit reports 228 CPU-only voxels on this run: that is phase 12's
-# open defect, not a regression in whatever you are checking.
+# The sync audit reports 0 of 75,497,472 on this run as of phase 12. Anything
+# else is a regression: "occupied only on the CPU" is invisible-but-solid
+# geometry and "only on the GPU" is geometry that is drawn and not there.
+#
+# For the world-switch half of the same acceptance, come through the menus -
+# --map Content/Worlds/Menus/Main_Menu.wld with "confirm,confirm" in front of
+# the combat script at --ui-script-interval 120. Two confirms, not three, and
+# no `join` token: player one is auto-joined, and a `join` in front of the
+# confirms leaves the menu on a different item and the level never loads.
 ```
 
 Headless always (`--hidden`, never a window on Joey's display), quiet machine

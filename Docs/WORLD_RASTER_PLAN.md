@@ -326,7 +326,15 @@ path, the batch records bricks, the cells re-mesh. R1 readiness folds in
 ### 5. What is deliberately NOT built
 
 - **No LOD, no impostors, no occlusion culling.** Frustum + face-direction
-  culling only, until a measurement says otherwise.
+  culling only, until a measurement says otherwise. But the LOD path is
+  designed so it never has to be re-derived: the user intends wider
+  viewports later (smaller voxels on screen), and if visible quad counts
+  ever exceed the vertex budget — or merged quads approach pixel size —
+  distant cells mesh from a **coarser level of the coverage pyramid**,
+  which already stores the same world as occupied fractions at 8³/16³/32³.
+  Same store, same pass, same shading; a cell just carries which level it
+  was meshed from. That is a future phase gated on a measurement, not part
+  of this plan.
 - **No second code path per platform.** The raster path replaces the march
   everywhere — desktop, editor, mobile — behind one transition (phase 5), with
   the march kept only as long as verification needs it. Graphics quality
@@ -351,10 +359,16 @@ per-cell mesh time on this machine, all at 16³/32³/64³ cell sizes, ground
 layer excluded. Sweep all shipped levels; `Fishing_Village_Beat1`/`Beat2`
 and the castle valley are the decision cases.
 
-Then the arithmetic, written into this file: worst-case visible quads from a
-real camera pose (frustum + face buckets), × 6 vertices, × 60 fps, against
-the HD 630 (the weak vertex machine) and the A12Z. And the memory: quad
-store bytes against the 302 MB the window buffer costs today.
+Then the arithmetic, written into this file: worst-case visible quads, × 6
+vertices, × 60 fps, against the HD 630 (the weak vertex machine) and the
+A12Z. **The sizing case is the entire resident window in frustum (minus
+face buckets), not today's camera pose** — the user intends wider viewports
+in the future (smaller voxels on screen), and a wider view grows exactly
+this number while leaving fragment cost untouched; the window is the hard
+upper bound on it, because everything beyond the 3×3 chunks is far field,
+which is per-pixel in post and does not care how much of it is visible.
+Report today's pose too, as the typical case. And the memory: quad store
+bytes against the 302 MB the window buffer costs today.
 
 Also the **on-device fragment-cost probe** the estimate table leans on: one
 iPad run at ResolutionScale 1.0 (add a `--resolution-scale` launch option

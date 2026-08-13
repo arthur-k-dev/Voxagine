@@ -47,6 +47,18 @@ public:
 	/* Frames to run before exiting. 0 runs until the window is closed. */
 	uint32_t GetFrameLimit() const { return m_uiFrames; }
 
+	/* Editor only: enter play mode after this many frames, as if Play had been
+	   clicked. 0 leaves the editor in edit mode.
+
+	   This exists because a defect in the editor's *play* path cost four rounds
+	   of guessing: the camera stopped following the player, it reproduced
+	   nowhere else, and there was no way to reach play mode without a human at
+	   the machine - so every hypothesis had to be shipped to be tested. Being
+	   able to observe beats being able to reason. Same argument as `--map` and
+	   the `--ui-script` tokens. */
+	uint32_t GetEditorPlayFrame() const { return m_uiEditorPlayFrame; }
+	bool HasEditorPlay() const { return m_uiEditorPlayFrame > 0; }
+
 	/* Create the window unmapped. Vulkan still renders; nothing is displayed. */
 	bool IsHidden() const { return m_bHidden; }
 
@@ -134,6 +146,7 @@ private:
 	std::string m_ScreenshotPass = "Post Processing";
 
 	uint32_t m_uiFrames = 0;
+	uint32_t m_uiEditorPlayFrame = 0;
 	uint32_t m_uiWidth = 0;
 	uint32_t m_uiHeight = 0;
 

@@ -283,6 +283,10 @@ private:
 	std::vector<Entity*> m_RemovedEntities;
 	Camera* m_pCameraEntity;
 
+	/* Latched once per frame in PreTick - see IsGameplayHeld. Starts true so a
+	   world cannot tick gameplay before its first PreTick has decided. */
+	bool m_bGameplayHeldThisFrame = true;
+
 	std::string m_WorldName;
 	bool m_bPreLoaded;
 

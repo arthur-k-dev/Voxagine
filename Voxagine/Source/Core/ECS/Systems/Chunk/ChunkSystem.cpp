@@ -7,6 +7,7 @@
 #include "Core/ECS/Entities/Camera.h"
 #include "Core/ECS/Systems/Physics/PhysicsSystem.h"
 #include "Core/ECS/Systems/Rendering/DebugRenderer.h"
+#include "Core/ECS/Systems/Rendering/RenderSystem.h"
 
 #include "Core/Platform/Platform.h"
 #include "Core/Platform/Rendering/FrameProfiler.h"
@@ -91,6 +92,7 @@ void ChunkSystem::Start()
 		/* Nothing decides where a window goes, so there is no window to wait
 		   for. Holding gameplay on a world that can never become ready would
 		   turn a missing camera into a hang (R1). */
+		m_bInitialRootsAdmitted = true;
 		m_bInitialWindowReady = true;
 		return;
 	}
@@ -109,49 +111,116 @@ void ChunkSystem::Start()
 	m_ClampedCameraPosition = UVector2(chunkXPos, chunkYPos);
 
 	IVector2 gridOffset(worldOffset.x / (float)m_ChunkSize.x, worldOffset.z / (float)m_ChunkSize.y);
-	ChunkUpdateGroup group(gridOffset.x + gridOffset.y * m_uiNumChunkX, worldOffset);
-	UpdateChunks(gridOffset, group, false);
 
-	//Custom code for start only, it needs to load the chunks synchronously the first time
-	for (ChunkUpdateGroup::Item& item : group.GetItems())
-	{
-		switch (item.ItemTarget)
-		{
-		case ChunkUpdateGroup::Item::Target::T_LOAD:
-		{
-			item.pChunk->Load(item.GridTargetIndex);
-			m_pVoxelGrid->SetChunkVolumeAt(item.GridTargetIndex, item.pChunk->GetVoxelData(), item.pChunk->GetOwnerVolume());
-			break;
-		}
-		case ChunkUpdateGroup::Item::Target::T_MOVE:
-		{
-			m_pVoxelGrid->SetChunkVolumeAt(item.GridTargetIndex, item.pChunk->GetVoxelData(), item.pChunk->GetOwnerVolume());
-			if (!item.pChunk->IsFirstLoad() && m_pVoxelWindow != nullptr)
-			{
-				RenderChunk(item, m_pVoxelWindow->GetFrontData(), false);
-			}
-			item.pChunk->SetGridTarget(item.GridTargetIndex);
-			break;
-		}
-		default:
-			break;
-		}
-	}
-
+	/* The ground texture has to be on every chunk *before* anything decodes or
+	   renders one - a streamed first window builds its voxels on a worker, and
+	   UpdateGroundPlane is what puts the y = 0 row in them. */
+	const auto groundStart = std::chrono::steady_clock::now();
 	SetGroundPlane(m_pWorld->GetGroundTexturePath());
+	if (ChunkIoTimingsEnabled())
+		fprintf(stderr, "[world-switch]     SetGroundPlane %.1f ms\n", MillisecondsSince(groundStart));
+
+	/* **The initial window is not special any more, and that is phase 4's
+	   keystone.** It used to be built here, synchronously, inside
+	   World::Initialize: nine chunks decoded, their roots deserialized and every
+	   static renderer stamped, with the whole thing off the frame loop where the
+	   frame profiler cannot see it. Measured as `[world-switch] initialize`,
+	   that was **876 ms** for Beat2 - the single largest stall the game has, and
+	   the whole of ledger M4.
+
+	   It goes through the same update group as every other window now, which
+	   costs nothing new to maintain and buys three things: the work is budgeted
+	   by StreamingBudgets like any slide, gameplay is *held* until it lands
+	   (R1 - and the hold stops being inert, which is what phase 3 promised this
+	   phase would do), and a loading screen can be drawn over the wait because
+	   frames keep being presented throughout.
+
+	   The chunk the camera starts in is already resident regardless:
+	   JsonSerializer::DeserializeWorld loads `CameraChunkIndex` while it is
+	   still building the world, so the group sees it as a move rather than a
+	   load and the player never stands on nothing. */
+	JobQueue* pJobQueue = m_pWorld->GetJobQueue();
+
+	ChunkUpdateGroup group(gridOffset.x + gridOffset.y * m_uiNumChunkX, worldOffset);
+	UpdateChunks(gridOffset, group, pJobQueue != nullptr);
+	group.MarkInitial();
+
+	if (pJobQueue != nullptr)
+	{
+		m_UpdateGroups.push_back(group);
+	}
+	else
+	{
+		/* No job queue means nothing will ever advance the group and gameplay
+		   would be held forever, so the old synchronous path stays as the
+		   fallback rather than as the default. A world with no queue is a
+		   world nobody is streaming. */
+		for (ChunkUpdateGroup::Item& item : group.GetItems())
+		{
+			switch (item.ItemTarget)
+			{
+			case ChunkUpdateGroup::Item::Target::T_LOAD:
+			{
+				item.pChunk->Load(item.GridTargetIndex);
+				m_pVoxelGrid->SetChunkVolumeAt(item.GridTargetIndex, item.pChunk->GetVoxelData(), item.pChunk->GetOwnerVolume());
+				break;
+			}
+			case ChunkUpdateGroup::Item::Target::T_MOVE:
+			{
+				m_pVoxelGrid->SetChunkVolumeAt(item.GridTargetIndex, item.pChunk->GetVoxelData(), item.pChunk->GetOwnerVolume());
+				if (!item.pChunk->IsFirstLoad() && m_pVoxelWindow != nullptr)
+				{
+					RenderChunk(item, m_pVoxelWindow->GetFrontData(), false);
+				}
+				item.pChunk->SetGridTarget(item.GridTargetIndex);
+				break;
+			}
+			default:
+				break;
+			}
+		}
+
+		m_bInitialWindowReady = true;
+	}
 
 	/* Far-field LOD volume (RENDERING_PLAN.md phase 4). Here rather than in
 	   JsonSerializer::DeserializeWorld because it needs every chunk registered
 	   with this system and the voxel grid sized, both of which are only true
 	   once the system exists - and it is the chunk window's own limit that the
 	   far field exists to work around, so this is where it belongs. */
+	/* Begun here and continued from Tick, so `World::Initialize` no longer
+	   carries the 447 ms it used to (CHUNK_STREAMING_PLAN.md phase 4). The
+	   volume reports itself unbuilt until it finishes, and every shader reads
+	   that as "no far field" - so the horizon arrives a fraction of a second
+	   after the level does rather than the level arriving half a second after
+	   the loading screen stops animating. */
 	if (RenderContext* pRenderContext = m_pWorld->GetRenderContext())
-		pRenderContext->BuildFarField(m_pWorld);
+		pRenderContext->BeginFarFieldBuild(m_pWorld);
+}
 
-	/* R1. Everything above is synchronous, so the window and its roots are both
-	   there by the time this line runs - see IsInitialWindowReady for why the
-	   gate exists anyway. */
-	m_bInitialWindowReady = true;
+bool ChunkSystem::IsStreaming() const
+{
+	if (!m_UpdateGroups.empty())
+		return true;
+
+	/* A far-field build in progress and renderers admitted but not yet stamped
+	   are both "the window is still arriving" as far as any caller is
+	   concerned - and both became possible in phases 4 and 5, which is what the
+	   header comment anticipated. Without them a test settles on a world whose
+	   geometry is still being written. */
+	if (RenderContext* pRenderContext = m_pWorld->GetRenderContext())
+	{
+		if (pRenderContext->IsFarFieldBuilding())
+			return true;
+	}
+
+	if (RenderSystem* pRenderSystem = m_pWorld->GetRenderSystem())
+	{
+		if (pRenderSystem->HasPendingVoxelBakes())
+			return true;
+	}
+
+	return false;
 }
 
 bool ChunkSystem::CanProcessComponent(Component* pComponent)
@@ -183,6 +252,42 @@ void ChunkSystem::Tick(float fDeltaTime)
 	   the next such host will not read EditorWorld.cpp. */
 	if (!m_UpdateGroups.empty())
 		UpdateGroup(m_UpdateGroups.front());
+
+	/* R1's second half, and phase 5 is what made it necessary. The initial
+	   group admitting its roots puts the level's *entities* in the world; the
+	   VoxelBaker writing their models into the voxel window is budgeted now, so
+	   the geometry arrives over the frames after that. Gameplay must wait for
+	   both, and the first run of phase 5 is the argument: the player started
+	   walking while the river bed was still being stamped, fell through the
+	   hole where it was going to be, and the level ended on the game-over
+	   screen. */
+	if (!m_bInitialWindowReady && m_bInitialRootsAdmitted)
+	{
+		RenderSystem* pRenderSystem = m_pWorld->GetRenderSystem();
+
+		if (pRenderSystem == nullptr || !pRenderSystem->HasPendingVoxelBakes())
+			m_bInitialWindowReady = true;
+	}
+
+	/* One slice of the level's far field, if one is outstanding. Deliberately
+	   after the group: a window that has not arrived is worth more than a
+	   horizon that has not, and the two never share a frame's budget because
+	   each carries its own. */
+	if (RenderContext* pRenderContext = m_pWorld->GetRenderContext())
+	{
+		if (pRenderContext->IsFarFieldBuilding())
+		{
+			const bool bProfiling = FrameProfiler::Get().IsEnabled();
+			const std::chrono::steady_clock::time_point start =
+				bProfiling ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
+
+			StreamingBudget::Scope budget(StreamingBudgets::Get().FarFieldBuild);
+			pRenderContext->ContinueFarFieldBuild(budget);
+
+			if (bProfiling)
+				FrameProfiler::Get().Report("CPU FarField Build", MillisecondsSince(start));
+		}
+	}
 }
 
 void ChunkSystem::FixedTick(const GameTimer& fixedTimer)
@@ -666,6 +771,13 @@ void ChunkSystem::UpdateGroup(ChunkUpdateGroup& group)
 		if (group.GetItemCursor() < items.size())
 			break;
 
+		/* R1 ends here, not at the commit: the window is published two states
+		   earlier but its gameplay roots are only *in the world* now, and
+		   holding until they are is the whole point of the rule. Static art may
+		   still be arriving behind this - it is art. */
+		if (group.IsInitial())
+			m_bInitialRootsAdmitted = true;
+
 		group.ResetItemCursor();
 		group.SetState(ChunkUpdateGroup::UpdateState::US_START_UNLOADING);
 		break;
@@ -1005,6 +1117,35 @@ void ChunkSystem::CommitWindow(ChunkUpdateGroup& group)
 		pMainCamera->ForceUpdate();
 	}
 
+	/* **The initial window republishes a world that already had entities in
+	   it, and they must be re-examined or their geometry is lost.**
+
+	   JsonSerializer::DeserializeWorld loads the CameraChunkIndex chunk
+	   synchronously, before this system exists, so its entities are in the
+	   world for the very first PreTick - which registers their components and
+	   bakes them. That bake runs *before* this commit has called
+	   SetChunkVolumeAt, so VoxelGrid::GetCell finds no resident volume and
+	   Occupy drops every voxel ("if (!cell) return;"). Worse, the bake clears
+	   the renderer's Updated/UpdateRequested flags and m_bForcedUpdate along
+	   with them, so nothing ever asks again and the models are simply absent
+	   for the life of the level.
+
+	   Master could not hit this: ChunkSystem::Start set every chunk volume
+	   synchronously inside World::Initialize, before any PreTick existed to
+	   stamp anything. Measured on Fishing_Village_Beat2, chunk (0,0): 367,115
+	   occupied voxels on master against 201,038 without this.
+
+	   Deliberately only for the *initial* group. A force is a re-examination
+	   rather than a re-stamp (RENDERING_PLAN.md 4c), but on an ordinary slide
+	   the offset change already makes bBakeCurrent false, so forcing there
+	   would turn every transition into a full re-stamp of the window - which is
+	   the 400 ms cost phase 4c removed. */
+	if (group.IsInitial())
+	{
+		if (RenderSystem* pRenderSystem = m_pWorld->GetRenderSystem())
+			pRenderSystem->ForceUpdate();
+	}
+
 	group.MarkCommitted();
 
 	StreamingCounters::Get().Commits.fetch_add(1, std::memory_order_relaxed);
@@ -1205,7 +1346,7 @@ void ChunkSystem::OnWorldResumed(World* pWorld)
 	   session. It is a full rebuild (~215 ms); streaming it is phase 4 of
 	   Docs/CHUNK_STREAMING_PLAN.md. */
 	if (RenderContext* pRenderContext = m_pWorld->GetRenderContext())
-		pRenderContext->BuildFarField(m_pWorld);
+		pRenderContext->BeginFarFieldBuild(m_pWorld);
 
 	uint32_t* viewPortData = m_pVoxelWindow != nullptr ? m_pVoxelWindow->GetFrontData() : nullptr;
 	for (auto& iter : m_Chunks)

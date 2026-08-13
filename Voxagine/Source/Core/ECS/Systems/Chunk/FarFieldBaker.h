@@ -37,8 +37,69 @@ class FarFieldVolume;
  * bottom brick layer occupied, so every downward ray descended to the fine
  * walk. Both costs, for a surface that was already being drawn.
  */
+#include <chrono>
+#include <vector>
+
+#include "Core/ECS/Systems/Chunk/StreamingBudgets.h"
+
+class Chunk;
+class VoxModel;
+
 namespace FarFieldBaker
 {
+	/* One far-field build, resumable. CHUNK_STREAMING_PLAN.md phase 4 (K5).
+	 *
+	 * `Build` below is 447 ms for Fishing_Village_Beat2 and it ran inside
+	 * `World::Initialize` - which is off the frame loop, so it was 447 ms of a
+	 * loading screen not animating and of the game not answering the
+	 * compositor. It is the same walk in budgeted slices now, charged per
+	 * *static root stamped*, driven from `ChunkSystem::Tick`.
+	 *
+	 * **The volume reports itself unbuilt for the whole of it**, which is what
+	 * makes a partial build safe rather than merely bounded:
+	 * `RenderContext::GetFarFieldGridSize` returns zero while `IsBuilt()` is
+	 * false and every shader reads that as "no far field", so a half-filled
+	 * volume is never sampled - not even the *previous level's*, which is the
+	 * failure this ordering exists to prevent.
+	 *
+	 * The model pins are the piece with an ownership story: every model the
+	 * level names is loaded once up front so a model shared by fifty entities
+	 * is not read off disk fifty times, and they are released on completion
+	 * *and* on cancellation. A build that is abandoned half-way must not leave
+	 * the level's whole model set pinned for the rest of the session. */
+	struct Progress
+	{
+		World* pWorld = nullptr;
+		FarFieldVolume* pVolume = nullptr;
+
+		/* Flattened once at Begin, so the walk has a stable order across
+		   frames and does not depend on an unordered_map's iteration order
+		   staying put while entities are being created. */
+		std::vector<Chunk*> Chunks;
+		std::vector<VoxModel*> Pinned;
+
+		size_t uiChunk = 0;
+		size_t uiRoot = 0;
+		uint32_t uiRenderers = 0;
+		uint32_t uiEntities = 0;
+
+		std::chrono::steady_clock::time_point Start;
+		bool bActive = false;
+	};
+
+	/* Resize, clear and pin. The volume is unbuilt from here until Continue
+	   returns true. */
+	void Begin(World* pWorld, FarFieldVolume& volume, Progress& progress);
+
+	/* One budgeted slice, charged per static root. True when the whole level
+	   has been stamped - at which point the pins are released and the volume
+	   is marked built. */
+	bool Continue(Progress& progress, StreamingBudget::Scope& budget);
+
+	/* Abandon a build in progress: releases the pins and leaves the volume
+	   unbuilt, i.e. not sampled. */
+	void Cancel(Progress& progress);
+
 	/* Rebuilds pVolume from every chunk in pWorld's ChunkSystem. Safe to call
 	   with no chunk system or an empty level; both leave the volume unbuilt,
 	   which the shader reads as "no far field". Main thread only - it

@@ -4,12 +4,16 @@
 #include "Core/Application.h"
 #include "Core/ECS/Systems/Physics/PhysicsSystem.h"
 #include "Core/ECS/Systems/Rendering/RenderSystem.h"
+#include "Core/Platform/Rendering/RenderContext.h"
 #include "Core/ECS/Systems/Chunk/ChunkSystem.h"
 #include "Core/ECS/Systems/Chunk/StreamingCounters.h"
 #include "Core/ECS/Systems/ScriptSystem.h"
 #include "Core/ECS/Entities/Camera.h"
 #include "Core/ECS/Components/VoxRenderer.h"
 
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <typeinfo>
 #include <typeindex>
 #include "Core/ECS/Components/Transform.h"
@@ -73,16 +77,46 @@ void World::Initialize()
 	{
 		Camera* MainCamera = new Camera(this);
 		MainCamera->SetName("Main Camera");
+
 		AddEntity(MainCamera);
 
 		SetMainCamera(MainCamera);
 	}
 
+	/* Split by system, because `[world-switch] initialize` is the single largest
+	   stall the game has and it happens off the frame loop where the frame
+	   profiler cannot see it - so "which Start" was a guess until this line
+	   existed. Off unless asked for; it is one clock read per system. */
+	const bool bReportStarts = std::getenv("VOXAGINE_CHUNK_IO_TIMINGS") != nullptr;
+
 	for (ComponentSystem* pSystem : m_Systems)
+	{
+		const auto begin = std::chrono::steady_clock::now();
+
 		pSystem->Start();
 
+		if (bReportStarts)
+		{
+			fprintf(stderr, "[world-switch]   %s::Start %.1f ms\n",
+				typeid(*pSystem).name(),
+				std::chrono::duration<double, std::milli>(
+					std::chrono::steady_clock::now() - begin).count());
+		}
+	}
+
 	if (m_pRenderSystem != nullptr)
+	{
+		const auto begin = std::chrono::steady_clock::now();
+
 		m_pRenderSystem->Start();
+
+		if (bReportStarts)
+		{
+			fprintf(stderr, "[world-switch]   RenderSystem::Start %.1f ms\n",
+				std::chrono::duration<double, std::milli>(
+					std::chrono::steady_clock::now() - begin).count());
+		}
+	}
 
 	if (!m_GroundTexturePath.empty())
 		SetGroundTexturePath(m_GroundTexturePath);
@@ -130,6 +164,13 @@ void World::Unload()
 {
 	OPTICK_EVENT();
 	m_pApplication->GetJobManager().DiscardJobQueue(m_JobQueueHandle);
+
+	/* An outstanding far-field build holds this world's chunks and a pin on
+	   every model the level names, so it has to be abandoned before either goes
+	   away. Releasing the pins is the half that would otherwise be silent: they
+	   would keep the whole level's models loaded for the rest of the session. */
+	if (RenderContext* pRenderContext = GetRenderContext())
+		pRenderContext->CancelFarFieldBuild();
 
 	for (Entity* pEntity : m_Entities)
 	{
@@ -200,6 +241,11 @@ void World::PreTick()
 	}
 	m_AddedEntities.clear();
 
+	/* The frame's answer to "is gameplay held", decided once, here, before
+	   anything in this frame asks. See IsGameplayHeld. */
+	m_bGameplayHeldThisFrame =
+		m_pChunkSystem != nullptr && !m_pChunkSystem->IsInitialWindowReady();
+
 	/* Update already existing entities if any new components have been added on runtime */
 	for (Entity* pEntity : m_Entities)
 		pEntity->PreTick();
@@ -210,7 +256,18 @@ void World::PreTick()
 
 bool World::IsGameplayHeld() const
 {
-	return m_pChunkSystem != nullptr && !m_pChunkSystem->IsInitialWindowReady();
+	/* **Latched at PreTick, not evaluated per callback, and that is the whole
+	   point.** The condition changes *inside* World::Tick - ChunkSystem::Tick is
+	   what advances the initial window to residency - so asking again in
+	   PostFixedTick later in the same frame can give a different answer. When it
+	   does, an entity's PostFixedTick runs before its first Tick, which is where
+	   Entity::Start is called from: CameraMultiplayer::PostFixedTick then runs
+	   with m_pMainCamera still null, gives up, and never follows anything again.
+
+	   Intermittent, because it depends on which frame the window happens to
+	   become resident in. Holding the answer steady for a whole frame is what
+	   makes the lifecycle order (Tick before PostFixedTick) mean anything. */
+	return m_bGameplayHeldThisFrame;
 }
 
 void World::Tick(float fDeltaTime)

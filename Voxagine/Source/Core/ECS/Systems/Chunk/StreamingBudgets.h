@@ -152,6 +152,41 @@ struct StreamingBudgets
 	   One FindEntitiesInChunk pass each, 0.06 ms. */
 	StreamingBudget EntityRefresh = StreamingBudget::Units(1);
 
+	/* Stamping newly admitted static renderers into the resident window, in
+	   milliseconds. Phase 5.
+
+	   This is the last unbounded main-thread cost a window transition had, and
+	   it was two of them: `RenderSystem::OnComponentAdded` stamped every
+	   renderer inline as its component registered (34.3 ms of a `PreTick`), and
+	   `VoxelBaker::Bake` re-stamped every renderer that asked for it in one
+	   pass (54.7 ms of a `Render`). They are one budgeted loop now.
+
+	   **Wall clock, unlike EntityAdmission, and for the opposite reason.** A
+	   stamp pays for itself as it writes - a voxel written is a voxel of cost -
+	   so a millisecond allowance measures exactly the thing being bounded.
+	   Admission pays nothing until the next PreTick, which is why that one has
+	   to count roots instead.
+
+	   **Resumption needs no cursor and holds no pointer**, which is the whole
+	   reason this shape was chosen: a renderer that did not get baked still has
+	   its Updated/UpdateRequested flags set, so the next frame's scan finds it
+	   again. The scan itself is a handful of comparisons per renderer and was
+	   already happening every frame. Nothing survives a frame boundary, so
+	   there is no ledger-E1 shape here to defend. */
+	StreamingBudget VoxelBaking = StreamingBudget::Milliseconds(2.0);
+
+
+	/* Stamping the level's static geometry into the far-field volume, in units
+	   of *static roots*. Phase 4.
+
+	   447 ms for Fishing_Village_Beat2, and it used to run inside
+	   World::Initialize - off the frame loop, so it was 447 ms of a loading
+	   screen not animating. 4 ms rather than 2: the volume is not sampled at all
+	   until the build finishes (it reports itself unbuilt), so the cost of
+	   taking longer is a horizon that arrives later, and a level with no
+	   horizon reads worse than one frame at 20 ms. */
+	StreamingBudget FarFieldBuild = StreamingBudget::Milliseconds(4.0);
+
 	/* Serializing an outgoing chunk's roots out to JSON, in units of *roots*.
 	   Phase 2.
 

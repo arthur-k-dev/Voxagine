@@ -7,6 +7,8 @@
 #include "Core/ECS/Systems/Chunk/ChunkSystem.h"
 #include "Core/ECS/Systems/Chunk/StreamingCounters.h"
 #include "Core/ECS/World.h"
+#include "Core/Application.h"
+#include "Core/JsonSerializer.h"
 
 /* Phase 3 of CHUNK_STREAMING_PLAN.md: loading a chunk's entities is bounded
  * work, and what gameplay is promised about it.
@@ -446,24 +448,39 @@ VOXAGINE_CHECK(Streaming, AnUnknownEntityTypeIsSkippedAndCounted)
 	harness.PlaceCamera(k_v3AtOffsetZero);
 	REQUIRE_TRUE(harness.Settle());
 
+	CHECK_EQ(harness.CountEntitiesNamed("Hostile_Unknown_"), 0u)
+		<< "a root of an unregistered type reached the world";
+
+	/* The good roots of the same chunks are unaffected - a hostile root must
+	   cost its own line and nothing else. Asserted here rather than after the
+	   slide below, because Hostile_Bare and Hostile_NoChildren carry no
+	   Transform at all: they sit at the origin, so chunk (0,0) owns every one
+	   of them and takes them away when it leaves. That is correct and is not
+	   what this check is about. */
+	CHECK_EQ(harness.CountEntitiesNamed("Marker_"), 9u);
+	CHECK_EQ(harness.CountEntitiesNamed("Hostile_NoChildren_"), 9u);
+	CHECK_EQ(harness.CountEntitiesNamed("Hostile_Bare_"), 9u);
+
+	/* And through the streaming path rather than the initial window: the
+	   harness settles that in its constructor and resets the counters, so the
+	   rejections below are this check's own - which is the honest thing to
+	   assert anyway, since streaming is what has to survive hostile data. */
+	harness.PlaceCamera(k_v3AtOffset32);
+	REQUIRE_TRUE(harness.Settle());
+
 	CHECK_TRUE(StreamingCounters::Get().StagedRootsRejected.load() > 0ull)
 		<< "the fixture's unknown-type roots were not rejected, so this check is "
 		   "not exercising the path it names";
 
 	CHECK_EQ(harness.CountEntitiesNamed("Hostile_Unknown_"), 0u)
-		<< "a root of an unregistered type reached the world";
-
-	/* The good roots of the same chunks are unaffected - a hostile root must
-	   cost its own line and nothing else. */
-	CHECK_EQ(harness.CountEntitiesNamed("Marker_"), 9u);
-	CHECK_EQ(harness.CountEntitiesNamed("Hostile_NoChildren_"), 9u);
-	CHECK_EQ(harness.CountEntitiesNamed("Hostile_Bare_"), 9u);
+		<< "a root of an unregistered type reached the world through a slide";
 }
 
-/* R1. The one state in which the hold is live today: ChunkSystem::Start builds
-   the initial window synchronously, so a world becomes ready during
-   World::Initialize - and the frames before that are the frames phase 4 will
-   put a loading screen over. */
+/* R1, and as of phase 4 this is a live property rather than a gate that is
+   true by construction: ChunkSystem::Start pushes an update group instead of
+   building the first window synchronously, so a world spends real frames with
+   no resident window - and gameplay must not advance through any of them.
+   Those frames are what phase 4's loading screen is drawn over. */
 VOXAGINE_CHECK(Streaming, GameplayIsHeldUntilTheInitialWindowIsResident)
 {
 	StreamingCounters::Reset();
@@ -487,20 +504,115 @@ VOXAGINE_CHECK(Streaming, GameplayIsHeldUntilTheInitialWindowIsResident)
 		harness.Frame();
 
 	CHECK_EQ(StreamingProbeEntity::TicksTaken(), 0ull)
-		<< "an entity ticked while the initial window was still missing (R1)";
-	CHECK_EQ(StreamingProbeEntity::FixedTicksTaken(), 0ull)
-		<< "an entity fixed-ticked while the initial window was still missing (R1)";
+		<< "an entity ticked before the chunk system had even started (R1)";
+
+	harness.Initialize(false);
+
+	/* Still held: Initialize only *queues* the initial window now. */
+	CHECK_TRUE(world.IsGameplayHeld())
+		<< "the initial window is streamed, so it cannot be resident the instant "
+		   "Initialize returns - if this passes, Start went back to loading "
+		   "synchronously and R1 is inert again";
+
+	uint32_t uiHeldFrames = 0;
+
+	for (uint32_t uiFrame = 0; uiFrame < 20000 && world.IsGameplayHeld(); ++uiFrame)
+	{
+		/* **Asked before the frame, not after.** `IsGameplayHeld` is latched
+		   once per PreTick rather than evaluated per call, so this loop enters
+		   its last iteration on the *previous* frame's answer: the frame that
+		   lifts the hold re-latches to "not held" inside its own PreTick and
+		   then ticks, correctly. Checking after `Frame()` therefore fails on
+		   exactly the transition frame and on no other, which is what it did.
+
+		   Checking first still catches a real R1 regression - an entity that
+		   ticks on a genuinely held frame is caught at the top of the next
+		   iteration - without encoding the assumption that the hold is
+		   re-evaluated on demand. */
+		CHECK_EQ(StreamingProbeEntity::TicksTaken(), 0ull)
+			<< "an entity ticked while the initial window was still arriving (R1), "
+			   "before held frame " << (uiHeldFrames + 1);
+
+		harness.Frame();
+		++uiHeldFrames;
+	}
+
+	REQUIRE_FALSE(world.IsGameplayHeld())
+		<< "the initial window never became resident";
+
+	CHECK_TRUE(uiHeldFrames > 0)
+		<< "the hold ended in zero frames, so nothing was actually held";
 
 	CHECK_TRUE(StreamingCounters::Get().GameplayTicksHeld.load() > 0ull)
 		<< "the hold is not being counted, so nothing in the game can report it";
 
-	harness.Initialize();
-
-	CHECK_FALSE(world.IsGameplayHeld())
-		<< "the initial window is resident and gameplay is still held";
+	/* The world it was waiting for is genuinely there. */
+	CHECK_EQ(harness.ResidentChunkCount(), 9u);
+	CHECK_EQ(harness.CountEntitiesNamed("Marker_"), 9u);
 
 	harness.Frame();
 
 	CHECK_TRUE(StreamingProbeEntity::TicksTaken() > 0ull)
 		<< "gameplay never resumed after the initial window arrived";
+}
+
+/* Phase 7's data-loss guard. ChunkifyWorld distributes the *live* entities into
+   the chunk grid, so a save taken while chunks are streaming writes whatever
+   happens to be in the world at that instant - which mid-transition is missing
+   an incoming chunk's staged-but-unadmitted roots and may be missing an
+   outgoing chunk's half-destroyed ones. Over the only copy of the level. */
+VOXAGINE_CHECK(Streaming, SavingAWorldMidStreamIsRefusedRatherThanTruncated)
+{
+	StreamingCounters::Reset();
+
+	const StreamingBudgetOverride override(SingleStepBudgets());
+
+	StreamingHarness harness("StreamingGrid5x5");
+	harness.PlaceCamera(k_v3AtOffsetZero);
+	REQUIRE_TRUE(harness.Settle());
+
+	JsonSerializer& serializer = harness.GetWorld().GetApplication()->GetSerializer();
+
+	harness.PlaceCamera(k_v3AtOffset32);
+
+	/* Only the *refusal* is asserted, and only once. A settled world genuinely
+	   serializing needs EditorWorld::PrepareSerialization, which is editor
+	   state the harness has no business building - so "it saves fine when
+	   settled" is the editor's own coverage, not this one's. What is checkable
+	   here is the guard, and the guard is what stops a level being written with
+	   a hole in it. */
+	bool bRefusedWhileStreaming = false;
+	bool bCheckedWhileStreaming = false;
+
+	for (uint32_t uiFrame = 0; uiFrame < 20000; ++uiFrame)
+	{
+		harness.Frame();
+
+		if (!harness.Chunks().IsStreaming())
+			break;
+
+		if (bCheckedWhileStreaming)
+			continue;
+
+		bCheckedWhileStreaming = true;
+
+		bRefusedWhileStreaming = !serializer.IsWorldSerializable(&harness.GetWorld());
+	}
+
+	REQUIRE_TRUE(bCheckedWhileStreaming)
+		<< "the transition never presented a streaming frame to save during";
+
+	CHECK_TRUE(bRefusedWhileStreaming)
+		<< "a world reported itself safe to write while its chunks were still "
+		   "streaming - saving then writes a level with a hole in it over the "
+		   "only copy";
+
+	/* And it says yes once settled, which is the half that matters just as
+	   much: the guard is on the *file* path only, because putting it on
+	   SerializeWorld itself also caught Editor::OnPlay's in-memory snapshot and
+	   handed play mode an empty world. */
+	REQUIRE_TRUE(harness.Settle());
+
+	CHECK_TRUE(serializer.IsWorldSerializable(&harness.GetWorld()))
+		<< "a settled world still reports itself unsafe to write";
 }

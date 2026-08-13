@@ -67,6 +67,34 @@ bool JsonSerializer::SerializeWorld(World* pWorld, Document& worldDoc)
 	return true;
 }
 
+bool JsonSerializer::IsWorldSerializable(World* pWorld) const
+{
+	/* **A world that is still streaming must not be written to disk.**
+	   CHUNK_STREAMING_PLAN.md phase 7, and it is a data-loss class rather than
+	   a tidiness rule: ChunkifyWorld distributes the *live* entities into the
+	   chunk grid, and mid-stream the live set is not the world. An incoming
+	   chunk's roots may be constructed but not admitted (so they are in no list
+	   ChunkifyWorld walks), and an outgoing chunk's may be half
+	   serialized-and-destroyed. Saving then writes a level with a hole in it
+	   over the only copy of it.
+
+	   **This gates the file write and nothing else, and that distinction is the
+	   whole bug it caused.** It was on SerializeWorld itself, which also serves
+	   Editor::OnPlay - the editor serializes the world to an in-memory document
+	   when you press Play so it can restore it when you stop. Refusing that
+	   handed play mode an *empty snapshot*: no players, no camera links,
+	   nothing for the camera to follow. It went unnoticed for a session because
+	   phase 5 had just broadened ChunkSystem::IsStreaming to include the
+	   far-field build and pending voxel bakes, which stay true for the first
+	   seconds after a world loads - exactly when somebody presses Play.
+
+	   Making play-mode *wait* for streaming rather than snapshotting mid-stream
+	   is the better answer and is phase 10's; refusing it is not. */
+	return pWorld == nullptr ||
+		pWorld->GetChunkSystem() == nullptr ||
+		!pWorld->GetChunkSystem()->IsStreaming();
+}
+
 void JsonSerializer::SerializeWorldAsync(World* pWorld, std::function<void(bool, Document&)> callback)
 {
 	//TODO: Run SerializeWorld via job and return callback
@@ -75,6 +103,20 @@ void JsonSerializer::SerializeWorldAsync(World* pWorld, std::function<void(bool,
 void JsonSerializer::SerializeWorldToFile(const std::string& filePath, World* pWorld, std::function<void(bool)> callback)
 {
 	//TODO: Run via job
+
+	/* The data-loss guard, on the path that can actually lose data. See
+	   IsWorldSerializable. */
+	if (!IsWorldSerializable(pWorld))
+	{
+		m_Logger.Log(LOGLEVEL_WARNING, "JsonSerializer",
+			"Refused to write '" + filePath +
+			"' while the world's chunks are still streaming - the live entity set "
+			"is not the world yet, and saving it would write a level with a hole "
+			"in it.");
+
+		callback(false);
+		return;
+	}
 
 	// Check if filepath is valid wld file
 	if (filePath.substr(filePath.find_last_of(".") + 1) != m_Settings.GetWorldFileExtension())
@@ -1230,12 +1272,29 @@ void JsonSerializer::ResolveWorldLinks(World& pWorld)
 		if (connection.iEntityId == -1)
 			continue;
 
-		auto number = connection.iEntityId;
-		const auto fIter = m_vOldPrefabIDs.find(number);
+		/* **The prefab remap is folded in once, on the first attempt, and the
+		   map is cleared every pass.** It maps a serialized id to the one a
+		   freshly generated prefab instance actually got, and it is only
+		   meaningful for the deserialization pass that filled it.
 
-		// See if we have the same number or else find a different entity
-		if (fIter != m_vOldPrefabIDs.end())
-			number = (connection.iEntityId != fIter->second) ? fIter->second : connection.iEntityId;
+		   Making links *retryable* (K6) accidentally made this map outlive that
+		   pass: it used to be cleared unconditionally at the end of every
+		   ResolveWorldLinks, and keeping it alive while anything was pending
+		   meant a single unresolvable link kept it for up to
+		   k_uiMaxWorldLinkRetries PreTicks - and JsonSerializer belongs to the
+		   Application, not the world, so a stale entry from an earlier world or
+		   an earlier prefab load could silently redirect a link to a different
+		   entity. Resolving it into the connection keeps retries working without
+		   the map having to survive at all. */
+		if (connection.uiAttempts == 0)
+		{
+			const auto fIter = m_vOldPrefabIDs.find(connection.iEntityId);
+
+			if (fIter != m_vOldPrefabIDs.end())
+				connection.iEntityId = fIter->second;
+		}
+
+		const auto number = connection.iEntityId;
 
 		Entity* pSourceEntity = pWorld.FindEntity(connection.uiSourceEntityId);
 
@@ -1247,8 +1306,35 @@ void JsonSerializer::ResolveWorldLinks(World& pWorld)
 			/* One or both ends are not here yet. Keep it and try again next
 			   PreTick, up to a bound - a level may legitimately reference an
 			   entity that no longer exists, and retrying that forever is a
-			   per-frame cost that never ends. */
-			if (++connection.uiAttempts < World::k_uiMaxWorldLinkRetries)
+			   per-frame cost that never ends.
+
+			   **The bound is counted in frames where gameplay actually runs.**
+			   It used to be counted in PreTicks, and a world's first window is
+			   streamed now (phase 4), so gameplay is held while it builds -
+			   `World::IsGameplayHeld` - and PreTick runs throughout. On this
+			   machine a Debug `Fishing_Village_Beat1` holds for 480+ frames,
+			   which is twice the budget: **every cross-chunk link in the level
+			   was abandoned before a single entity had ticked.** Measured, all
+			   eleven of them, including the two that attach the camera to the
+			   players:
+
+			       Gave up connecting 'Player 1' on entity 13 to entity 12
+			       Gave up connecting 'Player 2' on entity 13 to entity 2955
+
+			   It is intermittent in exactly the way that made it hard to place:
+			   Release lifts the hold in well under 240 frames and works, Debug
+			   does not and does not. Four runs of the same binary and command
+			   line split three to one on nothing but how long the bake took.
+
+			   Not gated on `IsStreaming` instead, which would be the tempting
+			   wider rule: the window slides constantly during normal play, so
+			   that makes the bound never expire and is what it exists to
+			   prevent. The hold is the precise period where nothing can consume
+			   a link anyway, because entities are not ticking. */
+			if (!pWorld.IsGameplayHeld())
+				++connection.uiAttempts;
+
+			if (connection.uiAttempts < World::k_uiMaxWorldLinkRetries)
 			{
 				pending.push_back(std::move(connection));
 				continue;
@@ -1258,6 +1344,16 @@ void JsonSerializer::ResolveWorldLinks(World& pWorld)
 
 			if (pSourceEntity == nullptr)
 				StreamingCounters::Get().WorldLinksSourceLost.fetch_add(1, std::memory_order_relaxed);
+
+			/* Say so. A link that never forms is a gameplay entity that quietly
+			   does not work - a camera that does not follow, a spawner that
+			   spawns nothing - and it produced no output at all until now, which
+			   is how one goes unnoticed until somebody plays the game. */
+			m_Logger.Log(LOGLEVEL_WARNING, "JsonSerializer",
+				"Gave up connecting '" + connection.rProperty.get_name().to_string() +
+				"' on entity " + std::to_string(connection.uiSourceEntityId) +
+				" to entity " + std::to_string(number) + " - " +
+				(pSourceEntity == nullptr ? "the source never arrived" : "the target never arrived"));
 
 			continue;
 		}
@@ -1348,11 +1444,11 @@ void JsonSerializer::ResolveWorldLinks(World& pWorld)
 	StreamingCounters::RaiseMax(StreamingCounters::Get().MaxPendingWorldLinks,
 		pWorld.m_vWorldConnections.size());
 
-	/* The prefab id remap is what a pending link still needs to find its
-	   target, so it outlives the pass that created it and is cleared only when
-	   nothing is waiting. */
-	if (pWorld.m_vWorldConnections.empty())
-		m_vOldPrefabIDs.clear();
+	/* Unconditionally, exactly as it was before links became retryable: the
+	   remap describes the pass that just ran and nothing else. Pending
+	   connections carry an already-remapped target id (see above), so they do
+	   not need it. */
+	m_vOldPrefabIDs.clear();
 }
 
 void JsonSerializer::ClearEntityLinks(World& world, Entity* pEntity)

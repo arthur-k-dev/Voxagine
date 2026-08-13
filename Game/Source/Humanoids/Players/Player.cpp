@@ -46,6 +46,7 @@ RTTR_REGISTRATION
 {
 	rttr::registration::class_<Player>("Player")
 	.constructor<World*>()(rttr::policy::ctor::as_raw_ptr)
+	.property("Player Index", &Player::GetPlayerIndex, &Player::SetPlayerIndex)(RTTR_PUBLIC)
 	.property("Movement Speed", &Player::GetMovementSpeed, &Player::SetMovementSpeed)(RTTR_PUBLIC)
 	.property("Jump Force", &Player::m_fJumpForce)(RTTR_PUBLIC)
 	.property("Dash Speed", &Player::m_fDashSpeed)(RTTR_PUBLIC)
@@ -99,6 +100,25 @@ void Player::Awake()
 	if (std::find(tags.begin(), tags.end(), "Player") == tags.end())
 		tags.push_back("Player");
 
+	/* **Back-compatibility for levels authored before "Player Index" existed.**
+	   Every shipped level names its two players "Player" and "Player1", and
+	   that naming was already load-bearing further down this function - Start
+	   picked each one's animation set from it. Deriving the index here means
+	   those levels keep working untouched while nothing downstream has to know
+	   about names.
+
+	   A level that indexes its players explicitly overrides this, because the
+	   deserialized property is applied before Awake. */
+	if (m_iPlayerIndex < 0)
+	{
+		const std::string& sName = GetName();
+
+		if (sName == "Player")
+			m_iPlayerIndex = 0;
+		else if (sName == "Player1")
+			m_iPlayerIndex = 1;
+	}
+
 	/* Aim/Recall child entity */
 	for (Entity* pChild : GetChildren())
 	{
@@ -150,8 +170,11 @@ void Player::Start()
 			m_pInputHandler->VibrateGamePad(0.0f, 0.0f);
 	}, this);
 
-	bool bIsPlayer1 = GetName() == "Player";
-	m_bIsAltPlayer = GetName() == "Player1";
+	/* Index, not name - see GetPlayerIndex. Awake has already derived the index
+	   from the name for levels that predate the property, so this is the same
+	   answer for every shipped level and a stable one for anything new. */
+	const bool bIsPlayer1 = m_iPlayerIndex == 0;
+	m_bIsAltPlayer = m_iPlayerIndex == 1;
 
 	if (bIsPlayer1)
 	{

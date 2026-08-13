@@ -34,7 +34,7 @@ public:
 	   Docs/CHUNK_STREAMING_PLAN.md give it more to answer for - a far-field
 	   build in progress, renderers whose stamps have not been baked yet - so
 	   callers should ask this rather than the group list. */
-	bool IsStreaming() const { return !m_UpdateGroups.empty(); }
+	bool IsStreaming() const;
 
 	/* R1: gameplay never ticks against a missing initial window. True once the
 	   world's first 3x3 resident window is committed and its roots are admitted;
@@ -135,6 +135,13 @@ private:
 	uint32_t m_uiNumChunkY;
 	uint32_t m_uiNumChunkX;
 	bool m_bInitialWindowReady = false;
+
+	/* The initial group has admitted its roots. Not the same as the window
+	   being ready: the roots are in the world but their geometry may still be
+	   arriving, because phase 5 made the stamp budgeted too. Gameplay waits for
+	   both - a player who starts walking before the river bed has been stamped
+	   walks into a hole, which is exactly what the first run of phase 5 did. */
+	bool m_bInitialRootsAdmitted = false;
 
 	UVector2 m_ClampedCameraPosition;
 	Vector3 m_CameraLoadOffset = Vector3(0);

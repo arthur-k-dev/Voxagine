@@ -2,6 +2,8 @@
 #include "Core/ECS/Entity.h"
 #include "Core/Math.h"
 
+#include "General/PlayerSlot.h"
+
 class AudioSource;
 
 class CameraMultiplayer : public Entity
@@ -23,6 +25,14 @@ public:
 	Vector3 m_ChunkLoadOffset;
 
 private:
+	/* The two players this camera frames, by index rather than by serialized
+	   pointer - see PlayerSlot for the measurements that motivated it.
+	   `m_pPlayer1`/`m_pPlayer2` above are the *resolved* pointers, refreshed
+	   from these at the top of every tick, so the rest of this class is
+	   unchanged and simply never sees a permanently null player. */
+	PlayerSlot m_Player1Slot;
+	PlayerSlot m_Player2Slot;
+
 	Camera* m_pMainCamera;
 	bool m_updateCamera;
 	Vector3 m_targetPosition;
@@ -47,6 +57,12 @@ public:
 	void Start() override;
 	void PreTick() override;
 	void PostFixedTick(const GameTimer& timer) override;
+
+	/* Refreshes m_pPlayer1/m_pPlayer2 from the slots. Idempotent, costs two
+	   null tests once both are attached, and safe to call from anywhere that
+	   needs a player - which is why both PreTick and PostFixedTick call it
+	   rather than relying on an ordering between them. */
+	void ResolvePlayers();
 
 	void AddCameraShake(float strength);
 	void SetCameraShake(float strength);

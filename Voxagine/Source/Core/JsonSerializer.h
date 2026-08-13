@@ -29,6 +29,12 @@ public:
 	void Initialize(FileSystem* pFileSystem);
 
 	bool SerializeWorld(World* pWorld, Document& worldDoc);
+
+	/* Whether writing this world to disk would capture the whole of it.
+	   False while its chunks are streaming - see the definition. Public so the
+	   suite can check the decision without a FileSystem, and so a caller that
+	   wants to *wait* rather than be refused can ask. */
+	bool IsWorldSerializable(World* pWorld) const;
 	void SerializeWorldAsync(World* pWorld, std::function<void(bool, Document&)> callback);
 	void SerializeWorldToFile(const std::string& filePath, World* pWorld, std::function<void(bool)> callback);
 

@@ -18,10 +18,17 @@ world switch, and the loading screen.
 1. Read **The verdict**, **The rules**, **Ground truth** and both ledgers.
    They were verified against master `0538de6` and branch `1b157f9`
    (2026-08-12); re-verify any `file:line` before editing — lines drift.
-2. Find the first phase in **Progress** that is not `DONE`. Do **only that
-   phase**. Each phase says *why this order*; do not skip ahead or bundle.
+2. Find the first phase in **Progress** that is not `DONE` or `NOT TAKEN`. Do
+   **only that phase**. Each phase says *why this order*; do not skip ahead or
+   bundle.
 3. Meet the phase's **Acceptance** criteria before marking it done. If you
-   cannot, mark it `BLOCKED` with a note rather than half-landing it.
+   cannot, you have two honest options and "PARTLY" is neither of them: mark it
+   `BLOCKED` with a note, or - if what you landed is a complete mechanism and
+   what is left is a *different* one - **rescope this phase to what it did and
+   open the remainder as a new numbered phase with its own acceptance**.
+   Phases 4, 5 and 7 were rescoped that way and 8, 9 and 10 are the remainders;
+   the phase headings say so. A status that is neither done nor blocked rots,
+   because nobody can tell what picking it up involves.
 4. Update **Progress**, the phase notes, and the ledgers (`OPEN` →
    `FIXED (phase N)`), with measured numbers — the next session plans against
    them.
@@ -37,10 +44,13 @@ world switch, and the loading screen.
 | 1 — Atomic off-thread window commit | DONE | `chunk-streaming-phase-1` | T1's seam and harness landed with it. Hitch gate **150.2 → 102.4–104.7 ms** peak, 7 → 2 violations; `FlushDirty` 68.8 → 0.001 ms peak on a slide. ASan + TSan clean. |
 | 2 — Bounded unload (serialize + encode) | DONE | `chunk-streaming-phase-2` | M7 diagnosed and fixed — it was a re-stamp on reload, not the codec. Unload is two budgeted states; `Chunk Unload` 2.70 → 0.37 ms peak, `Chunk Encode` 2.00 ms peak over 14 slices. Four further defects found by the phase's own fuzz and failure injection, three of them pre-existing on master. Hitch gate unchanged at 101.7–112.6 ms: what is left is phases 3 and 5. |
 | 3 — Bounded load and the gameplay contract | DONE | `chunk-streaming-phase-3` | Loading a chunk's entities is staging + admission, both budgeted; the gameplay contract is option 1 (atomic non-static admission), measured. M3/K6 landed: links are keyed by identity and retried. R1's gate exists and is inert by construction. **The hitch gate does not flip — and phase 3 is why that is now a finding rather than a guess**: the transition frame is `World::Render` (54.7 ms) + `PreTick` (34.3 ms), both `VoxelBaker` stamping, both phase 5's. Peak 101.7–112.6 → **94.2–95.1 ms**, violations 2 → 1. |
-| 4 — Streamed world switch behind the loading screen | OPEN | | |
-| 5 — Bounded stamping of admitted renderers | OPEN | | |
-| 6 — Occupancy-cell proxies + march budget (**gated**) | OPEN | | Only if phase 5 measures a need |
-| 7 — Editor integration and guards | OPEN | | |
+| 4 — Streamed initial window and far field | DONE | `chunk-streaming-phase-4` | Both costs *inside* `World::Initialize` are gone: the initial window streams through the update group machine (which also makes R1 live and testable) and the far field builds in 4 ms slices. `[world-switch] initialize` **876 → 316.6 ms**; what is left of it is one thing, `RenderSystem::Start`'s buffer allocation at 258 ms. **Renamed from "Streamed world switch behind the loading screen": the world-manager half became phase 8**, because it is a session's work with its own acceptance rather than this one's remainder. |
+| 5 — Bounded stamping, per renderer | DONE | `chunk-streaming-phase-5` | Both stamps are bounded per *renderer*: `OnComponentAdded` requests instead of stamping inline, and `VoxelBaker::Bake` runs under `StreamingBudgets::VoxelBaking`. Peak transition frame **95 → 27.9 ms**. **Splitting below one renderer is phase 9** — it was built here, made the gate pass at 9.5–10.1 ms, and was reverted for silently losing 580 k voxels, so it needs its own acceptance rather than a note. |
+| 6 — Occupancy-cell proxies + march budget (**gated**) | **NOT TAKEN** | — | Closed on phase 5's measurements, which is what the gate asked for. Every remaining frame over budget is *CPU*, and named: one `VoxelBaker` stamp of 140,640 voxels. During a slide the GPU passes read Voxel 0.24 ms, Sun Shadow 0.34, Pyramid Upload 0.82 — three orders of magnitude below the frames that break the budget. Neither proxy submission nor voxel-pass overdraw is a remaining cost, so E5 and E6 stay open and unmeasured rather than being re-derived on speculation. |
+| 7 — The save guard | DONE | `chunk-streaming-phase-7` | `JsonSerializer::SerializeWorld` refuses a world whose chunks are still streaming, with a harness check. A data-loss class rather than tidiness — see the phase 7 notes. **Renamed from "Editor integration and guards": everything needing the editor open is phase 10**, which cannot be done headless and should not sit inside a phase that can. |
+| 8 — World switch behind the loading screen | OPEN | | Phase 4's world-manager half. The last user-visible stall class. |
+| 9 — Splitting one renderer's stamp | OPEN | | Flips the hitch gate. **Read phase 5's notes first — this was built and reverted.** |
+| 10 — Editor session and closing the plan | OPEN | | Needs Joey at the machine. Deletes `progressive-chunk-experiment`. |
 
 ---
 
@@ -358,7 +368,8 @@ from the phases.
   `ChunkUpdateGroup::MillisecondsSinceCreated`: **489 ms** end to end for a
   Beat2 transition, measured. Whether that reads as late on screen is Joey's
   call and phase 5's budget constants are the knob. **Still owed: the
-  frames-between-resident-and-last-root-admitted counter this entry asks for.**
+  frames-between-resident-and-last-root-admitted counter this entry asks for -
+  phase 9, where it is the number pop-in is judged against.**
   The original entry, as written - two flows, neither covered by any gate: Asked at phase 0 which flow he saw broken on the branch; the
   answer was **menu → level load**, and **"chunks load in too late during
   normal gameplay"**. Read together they are the two halves of the same
@@ -1349,7 +1360,13 @@ other half of K10 — `PrepareModelMeshes` during world load — is still unbuil
 and still phase 4's, and is only needed if a dynamic model's *first draw* ever
 hitches.
 
-### Phase 4 — Streamed world switch behind the loading screen
+### Phase 4 — Streamed initial window and far field
+
+*Renamed. This phase was written as "Streamed world switch behind the loading
+screen" and is scoped to what it landed: the two costs inside
+`World::Initialize`. The world-manager flow it also described is **phase 8** -
+it is a session's work with its own acceptance, and leaving it as this phase's
+remainder is how a plan grows a permanent "PARTLY" nobody can pick up.*
 
 *Why now: it composes phases 1–3 (the target world's initial window streams
 through the same machine) and owns the last user-visible stall class M4.*
@@ -1404,7 +1421,90 @@ repeatedly leaks nothing (RSS plateau recorded, model-pin refcounts return
 to rest); editor open-world timed before/after; Joey watches the flow once
 on screen (fade, music timing, first-frame HUD).
 
-### Phase 5 — Bounded stamping of admitted renderers
+#### Phase 4 notes — what landed, and what it measured
+
+All Release, headless, quiet machine (RTX 4070 SUPER).
+
+| What | Before | After |
+|---|---|---|
+| `[world-switch] initialize` (`--map` Beat2) | **876 ms** | **316.6 ms** |
+| ↳ `ChunkSystem::Start` | 453.4 ms | **49.4 ms** (all of it model pinning) |
+| ↳ ↳ `BuildFarField` | 447.2 ms | **0 ms here** — 1,440 ms of wall clock in 4 ms slices, at 60 fps |
+| ↳ `RenderSystem::Start` | 256.3 ms | 258.2 ms — **untouched, and the whole of what is left** |
+| First `World::PreTick` after a load | 557 ms | 251 ms |
+| Peak frame across a Beat2 window transition (three runs) | 94.5 / 94.8 / 95.1 ms | 94.9 / 94.5 / 95.6 ms — unmoved, as expected: it is phase 5's two stamps |
+
+**The initial window is not special any more, and that is the keystone.**
+`ChunkSystem::Start` pushed nine chunks through a synchronous load inside
+`World::Initialize` — decode, deserialize every root, stamp every static
+renderer — off the frame loop, where a loading screen cannot animate and the
+compositor gets no ping. It queues an ordinary `ChunkUpdateGroup` now, marked
+`IsInitial()`, and gameplay is held (R1) until that group has *admitted its
+roots* — not until it commits, because the window being published is not the
+same as the world being in it.
+
+Three things follow that are easy to undo:
+
+- **The chunk the camera starts in is already resident**, because
+  `JsonSerializer::DeserializeWorld` loads `CameraChunkIndex` while it is still
+  building the world. So the group sees it as a `T_MOVE` and the player never
+  stands on nothing. A change that stops doing that turns the hold into a
+  visible black frame.
+- **R1 stopped being inert**, which is what phase 3 said this phase owed.
+  `Streaming/GameplayIsHeldUntilTheInitialWindowIsResident` now steps frame by
+  frame through the hold and asserts a fixture entity's tick count stays at
+  zero for every one of them. It also asserts that the world is *not* ready the
+  instant `Initialize` returns — so a future change that quietly restores the
+  synchronous load fails a check rather than silently re-inflating
+  `initialize`.
+- **The harness settles the initial window in its constructor and resets the
+  counters**, so every check still gets "you are handed a world whose first
+  window is resident" and every count still means the check's own slide. Four
+  checks that encoded the synchronous behaviour were rewritten rather than
+  patched; one of them, `TheInitialWindowIsResidentOnceItHasStreamed`, now sees
+  **nine** chunks' ground in the window instead of one, because the initial
+  window is published by the same render job as every other.
+
+**The far field builds while the game runs.** `FarFieldBaker::Begin/Continue/
+Cancel` walks the level's static roots under `StreamingBudgets::FarFieldBuild`
+(4 ms), driven from `ChunkSystem::Tick`. What makes a partial volume safe is
+not the budget but the ordering: **the volume reports itself unbuilt for the
+whole build**, `RenderContext::GetFarFieldGridSize` returns zero while it does,
+and every shader reads that as "no far field" — so a half-filled volume is
+never sampled, and neither is the *previous level's*, which is the failure this
+exists to prevent. The model pins have a stated owner: taken in `Begin`,
+released on completion **and** on `Cancel`, and `World::Unload` cancels — a
+build abandoned half-way must not leave the level's whole model set pinned for
+the session.
+
+The horizon therefore arrives about 1.4 s after the level does. That is a
+judgement call and **Joey has not seen it**; if it reads badly the answer is a
+larger `FarFieldBuild` budget, which is one constant.
+
+##### What phase 4 deliberately did not do
+
+The far-field `IncrementalBuild` harness scenarios the testability note asks
+for (cancel mid-build releases pins, complete build transfers them, zero size
+reported while building) are **not written**: the harness has no render context
+and so no `FarFieldVolume`, and giving it one is a seam of its own. The
+cancel-releases-pins path is exercised in the game by `World::Unload` on every
+world switch, which is not the same thing and should not be counted as if it
+were. Phase 8 inherits it.
+
+**Joey has not seen this on screen, and there is one thing to look at.** Phase 4
+turned an 876 ms freeze into a few hundred milliseconds of the world
+*materialising* with gameplay held - and phase 8's loading screen, which was
+meant to cover exactly that, is not landed. Responsive beats frozen and the
+camera's own chunk is resident from the start, so this should read better than
+what it replaces; but it is the first thing anybody sees on launching a level,
+and the horizon arriving ~1.4 s later is a second judgement of the same kind.
+
+### Phase 5 — Bounded stamping, per renderer
+
+*Renamed and rescoped: bounding the stamp to whole renderers is this phase,
+splitting one renderer's stamp is **phase 9**. The split was built here and
+reverted for losing geometry, which is exactly why it needs an acceptance
+criterion of its own rather than a bullet in someone else's.*
 
 *Why now: after phase 3 the remaining per-slide main-thread cost is
 `VoxelBaker` stamping the admitted static renderers (~400 ms worth per fresh
@@ -1451,14 +1551,103 @@ counter: samples-per-tick max.
 **Acceptance:** harness green including single-step sweep; slide +
 world-load with `VOXAGINE_SYNC_AUDIT`, `VOXAGINE_COVERAGE_AUDIT`,
 `VOXAGINE_PYRAMID_AUDIT` clean during heavy streaming + destruction;
-**`gpu_chunk_streaming_frame_budget` passes in Release and becomes a required
-ctest gate (remove `WILL_FAIL`)** - this moved here from phase 3, which
-measured the whole of the remaining transition frame as two `VoxelBaker`
-stamps: `World::Render`'s `Bake` at 54.7 ms and `PreTick`'s
-`OnComponentAdded` at 34.3 ms, neither of them reachable from a streaming
-budget; visible pop-in of freshly admitted chunks judged by Joey
+the hitch gate's peak driven down and recorded - **the flip itself is phase 9's**,
+because it turned out to need the split below one renderer and phase 5 measured
+exactly that; visible pop-in of freshly admitted chunks judged by Joey
 on screen (budget constants are the tuning knob and live in
 `StreamingBudgets.h`); numbers recorded.
+
+#### Phase 5 notes — bounded per renderer, and why one is not enough
+
+| What | Phase 4 | Phase 5 |
+|---|---|---|
+| **Peak frame across a Beat2 window transition** (three runs) | 94.9 / 94.5 / 95.6 ms | **27.8 / 28.0 / 26.9 ms** |
+| Violations of the 16.7 ms budget, per run | 1 of ~3,500 | 4 of ~3,400 — all between 16.9 and 28 ms |
+| `CPU Frame World PreTick` peak during a slide | 34.3 ms | below the profiler's noise |
+| `CPU Frame World Render` peak during a slide | 54.7 ms | ~2 ms + one renderer |
+
+Two stamps became one budgeted loop. `RenderSystem::OnComponentAdded` used to
+write a renderer's voxels *inline as its component registered* — inside
+`World::PreTick`, once per admitted renderer, with no way to stop; it asks for
+a stamp now, under the identical four-clause condition (`m_bStarted`,
+`!IsChunkInstanceLoaded()` for M7, `IsEnabled()`, `IsStatic()`), and
+`VoxelBaker::Bake` does it under `StreamingBudgets::VoxelBaking`.
+
+**Resumption needs no cursor and holds no pointer, and that is the design.** A
+renderer the budget did not reach still has its `Updated`/`UpdateRequested`
+flags, so the next frame's scan finds it. The scan is a handful of comparisons
+per renderer and was already happening every frame; the budget is consulted at
+the one point where comparisons become voxel writes. Nothing survives a frame
+boundary, so there is no ledger-E1 shape here to defend.
+
+**One defect this shape introduces, fixed, and worth knowing.** A force means
+"re-examine every renderer", and a budgeted pass stops part-way — so clearing
+`m_bForcedUpdate` afterwards leaves every renderer past the stopping point
+never examined *at all*. It has no flag of its own; the force was its trigger.
+On Beat2 that left a third of the level's voxels unwritten, and the only symptom
+is missing geometry, which reads as content. `m_bForcedUpdate` is now cleared
+only when the pass reached the end.
+
+**R1 grew a second half here, and the game told us so.** The initial group
+admitting its roots puts the level's entities in the world; their models are
+stamped over the frames after that. The first run of this phase had the player
+start walking while the river bed was still being stamped — they fell through
+the hole where it was going to be and the run ended on the game-over screen.
+`ChunkSystem::IsInitialWindowReady` now also waits on
+`RenderSystem::HasPendingVoxelBakes`, and `IsStreaming` folds in both that and
+an outstanding far-field build.
+
+##### The resumable Occupy: built, measured, reverted
+
+The remaining violations are each **one renderer**: `RiverBedStraight10` and its
+siblings stamp **140,640 voxels in 22 ms**, so a frame that starts one is a
+22 ms frame whatever the per-renderer budget says
+(`VOXAGINE_CHUNK_IO_TIMINGS` names any single stamp over 5 ms). Splitting below
+a renderer is the plan's own answer, and it was built:
+`ForEachStampedVoxelRange` with the cursor and the duplicate-suppression
+position carried on `BakeData`, `OccupyInProgress`, the skip tests taught not to
+skip a half-stamped renderer, `Clear` resetting the cursor.
+
+**It made the gate pass — peak 9.5 / 9.5 / 10.0 ms over ~13,300 frames, zero
+violations — and it was reverted anyway**, because the level it was drawing was
+not the whole level. `VOXAGINE_VOXEL_AUDIT` reports **4,104,267 active voxels**
+for a settled Beat2 with the unbounded stamp and with the per-renderer budget
+alone; with the sliced stamp at the shipping 8,192 samples it reported
+**3,520,944**, and at 2,048 it reported 2,836,669. Around 580 k voxels short,
+scaling with how finely it was sliced.
+
+That is the failure this tree keeps meeting from a new direction, and it is why
+the number above is the acceptance rather than the frame time: **missing
+geometry is invisible in any single frame and reads as content**. A green hitch
+gate measured against a level that is 14% unwritten is worse than a red one.
+
+**If you rebuild it, the oracle is that occupancy number**, and it has to be
+part of the change rather than a check afterwards: run a settled Beat2 under
+`VOXAGINE_VOXEL_AUDIT` with slicing on and off and require the counts to be
+equal, at several slice sizes, because the deficit *scaled with slice size* —
+which is the shape of state that is not being carried across a slice boundary.
+The cause was not found; the suspects in order are the `lastPosition`
+duplicate-suppression state, the interaction with `Clear`'s owner-arbitration
+when a partial stamp is cleared and restarted, and the skip tests reading
+`Generation`/`StampKey` that Occupy only writes on completion. A harness check
+would settle it far faster than the game can — `ForEachStampedVoxelRange` needs
+only a `VoxFrame`, and giving the suite one (`Tests/Harness/VoxModelFile`, which
+CLAUDE.md records as written but uncommitted for the bamboo work) is the
+cheapest way in.
+
+##### What phase 5 did not do
+
+- **`VOXAGINE_COVERAGE_AUDIT` during streaming.** Not run. The per-renderer
+  bound cannot produce voxels-without-proxy - a renderer is cleared and
+  re-stamped inside one `Bake` call, exactly as before - but the phase's own
+  acceptance names the audit and it was not run. **Phase 9 must run it**, where
+  the argument above stops holding.
+- **E4's `WaitForVoxelReaders` measurement** in Release. Untouched; phase 9.
+- **The stamp arena (E10's second half).** Still gated on measurement, still
+  unmeasured; `AcquireStampBuffer`'s `new uint32_t[]` per re-stamp has not been
+  profiled. Phase 9.
+- **Joey on screen** for pop-in of freshly admitted chunks, which is what the
+  budget constants are tuned against.
 
 ### Phase 6 — Occupancy-cell proxies + march budget (**gated**)
 
@@ -1478,7 +1667,11 @@ resolved explicitly (cells already cover baked debris — decide whether
 `SubmitLooseVoxelProxies` still runs). If the evidence is ambiguous, close
 this phase as "not taken" with the numbers.
 
-### Phase 7 — Editor integration and guards
+### Phase 7 — The save guard
+
+*Renamed. Everything in the original phase 7 that needs the editor open and a
+human watching is **phase 10**; what is left here is the one guard that is
+checkable headless, and it is the one that prevents data loss.*
 
 *Last: it is polish over a machine that now exists.*
 
@@ -1503,6 +1696,186 @@ saved world diff-identical to a save taken at rest (add this as a harness
 scenario: save mid-stream must equal save at rest, or be refused); the
 complete suite — checks, scenarios (ASan, single-step sweep, fuzz), perf
 counters, both GPU gates — green in Debug and Release; branch deleted.
+
+#### Phase 6 — closed as not taken, with the numbers
+
+The gate on this phase was "only if phase 5's measurements show per-renderer
+proxy submission or voxel-pass overdraw is a real remaining cost". They show
+the opposite, and clearly:
+
+- Every frame that still breaks the 16.7 ms budget is one `VoxelBaker::Occupy`
+  of a single 140,640-voxel model, named by
+  `VOXAGINE_CHUNK_IO_TIMINGS` (`[bake] 'RiverBedStraight10' stamped 140640
+  voxels in 22.50 ms`). It is CPU, it is one renderer, and it is phase 5's.
+- The GPU passes during a slide are Voxel **0.24 ms**, Sun Shadow **0.34 ms**,
+  Pyramid Upload **0.82 ms** — three orders of magnitude below the frames that
+  break the budget. There is no marcher cost to attack.
+
+So E5 (`MARCH_STEP_BUDGET` 16384 → 1024) and E6 (occupied-32³-cell proxies)
+stay **open and unmeasured**, which is the honest state: the experiment bundled
+them into streaming without evidence, and re-deriving them on speculation would
+repeat exactly that. If the voxel pass ever becomes the cost, this phase is
+here with its method intact.
+
+#### Phase 7 notes — the guard, and why it is a data-loss guard
+
+**A save taken mid-stream is refused.** `JsonSerializer::SerializeWorld` now
+returns false with a log line when the world's `ChunkSystem::IsStreaming()`.
+This is a data-loss class rather than tidiness: `ChunkifyWorld` distributes the
+**live** entities into the chunk grid, and mid-transition the live set is not
+the world — an incoming chunk's roots may be constructed but not admitted, so
+they are in no list it walks, and an outgoing chunk's may be half
+serialized-and-destroyed. The result is written over the only copy of the
+level. The editor's five-second autosave is the caller that matters, and it
+simply comes back on the next interval.
+`Streaming/SavingAWorldMidStreamIsRefusedRatherThanTruncated` drives a
+single-stepped transition and asserts the refusal.
+
+**What it does not prove.** The refusal makes the truncation case impossible;
+it does not prove "a saved world is diff-identical to a save taken at rest".
+That, the editor session and the `Validate(bBack)` split are phase 10.
+
+### Phase 8 — World switch behind the loading screen
+
+*Why now: phase 4 removed both costs inside `World::Initialize` and phase 5
+bounded the stamp, so a world can now be brought up over frames rather than in
+one - which is the precondition this always had. It is the last user-visible
+stall class (M4) and the only phase left that a player would name.*
+
+Re-derive K5: `WorldManager::LoadWorldAfterStreaming` + `UpdateStreamingWorld`
+(target world initialized hidden; only its `ChunkSystem` + `RenderSystem`
+advance - `PreTick` for admission, chunk `FixedTick`/`Tick`, budgeted `Render`
+slice, `PrepareModelMeshes` (K10); activation as one deferred transaction;
+deferred audio autoplay (`AudioSystem::SetAutoPlayDeferred`/
+`ActivateDeferredAutoPlay`); fade preserved; `DiscardActiveWorldSprites` before
+texture release - the freed-bindless-ID crash class),
+`World::Unload(bool releaseRenderContext)` and
+`RenderSystem::BeginWorldUnload` (skip the per-renderer clears and the mapped
+clears the incoming build overwrites anyway), and `WorldSwitch` passing
+`bWaitForInitialStreaming`.
+
+Three things this phase owns that are *not* in K5:
+
+- **`RenderSystem::Start`'s 258 ms**, which is `ResizeWorldBuffer` allocating
+  the two host-visible window buffers. It is the entire remainder of
+  `[world-switch] initialize` and phase 4 did not touch it. Reusing the
+  allocation across worlds of the same window size is the obvious move and has
+  not been costed.
+- **The `join` ui-script token.** Phase 0 recorded that joining a player on the
+  main menu is bound to `IK_GAMEPADOPTION`/`IK_MOUSEBUTTONLEFT` only and
+  `--ui-script` is keyboard-only, so **menu → level is not scriptable
+  headlessly** and this phase's headline acceptance cannot be met without it.
+  Do it first, not last.
+- **The far-field `IncrementalBuild` harness scenarios** phase 4 inherited and
+  did not write: cancel mid-build releases the model pins (assert by refcount),
+  a completed build transfers them, zero size is reported while building. The
+  harness has no `FarFieldVolume`, so this needs a seam of its own - the same
+  shape as `IVoxelWindow`, and worth the same care about it being a *seam* and
+  not an abstraction layer.
+
+**E9 discipline:** the sprite-only-world handling in `Present` must be
+re-derived minimally on top of master's bindless-packing `Present`, as one
+clearly-commented block, not scattered predicates - and it must distinguish
+"world with no scene submissions this frame" from "sprite-only world" by an
+explicit flag set by the world manager, not by `m_AABBList.empty()` inference.
+Wait for VDirect only where a buffer is genuinely replaced.
+
+**Editor note:** the editor swaps worlds through `LoadWorld`, not the loading
+screen; it benefits from `BeginWorldUnload` automatically. Verify open-world in
+the editor no longer multi-second-stalls.
+
+**Testability note:** `WorldManager`'s streaming logic must be written so its
+decisions are checkable without a render context - the pending-world state
+machine (single pending world, second-request rejection, activation only after
+`IsStreaming()` and mesh sync report done, `ClearWorlds` discarding a pending
+world) goes through methods the checks suite can drive with a stub "readiness"
+provider. What genuinely needs the real renderer (fade, sprite lifetime, VDirect
+gating) is verified by the headless game runs below and stays out of the
+harness.
+
+**Acceptance:** the WorldManager and far-field checks above green (ASan);
+menu → level via loading screen, headless ui-script: loading artwork animates
+for the whole load (no 0-fps stretch - the `[fps]` lines prove it), activation
+transaction < one frame, audio starts at activation, `[world-switch]` splits
+recorded and `initialize` reported per system; switching between two levels
+repeatedly leaks nothing (RSS plateau recorded, model-pin refcounts return to
+rest); editor open-world timed before/after; Joey watches the flow once on
+screen - fade, music timing, first-frame HUD, **and whether the materialising
+world phase 4 left uncovered now reads as a load rather than as a glitch**.
+
+### Phase 9 — Splitting one renderer's stamp
+
+*Why now: it is the only thing between the hitch gate and passing, and phase 5
+established that with a name and a number. Deliberately last of the performance
+phases, because it is the one that can lose geometry.*
+
+**Read phase 5's notes before writing a line.** This was built - cursor and
+duplicate-suppression position on `BakeData`, `ForEachStampedVoxelRange`,
+`OccupyInProgress`, the skip tests taught not to skip a half-stamped renderer,
+`Clear` resetting the cursor - and it took the worst transition frame from
+27.9 ms to **9.5 ms with zero violations**. It was reverted because the level it
+was drawing was **580 k voxels short**, and the deficit scaled with slice size.
+
+Re-derive it with the oracle built in from the first commit, not bolted on:
+
+- **The acceptance is an occupancy count, not a frame time.**
+  `VOXAGINE_VOXEL_AUDIT` on a settled `Fishing_Village_Beat2` reports
+  **4,104,267 active voxels** with the unbounded stamp and with phase 5's
+  per-renderer bound. A sliced stamp must report exactly that, **at several
+  slice sizes**, because the deficit scaling with slice size is the signature
+  of state not carried across a slice boundary.
+- **Do it in the harness first.** `ForEachStampedVoxelRange` needs only a
+  `VoxFrame`, and the check the plan always wanted - resuming at *every* cursor
+  value produces the identical voxel set as one unbounded walk, swept at
+  budget = 1 - is a unit test, not a game run.
+  `Tests/Harness/VoxModelFile.{h,cpp}` is recorded in CLAUDE.md as written but
+  uncommitted for the bamboo work; committing it is the cheapest way in.
+- **The suspects, in order**, none confirmed: the `lastPosition`
+  duplicate-suppression state; the interaction with `Clear`'s owner arbitration
+  when a partial stamp is cleared and restarted; and the skip tests reading
+  `Generation`/`StampKey`, which `Occupy` only writes on completion.
+
+Also this phase's, all inherited from phase 5 and all small: **E4's
+`WaitForVoxelReaders` measurement** in Release (if per-frame stamping into the
+front buffer really does stall against VDirect reads, prefer batching bake
+writes after the frame's fence over a blocking wait); and **the stamp arena**
+(E10's second half), still gated on `AcquireStampBuffer` actually costing frames
+- per-renderer buffer reuse via a high-water capacity in `BakeData` is the
+simple version and probably the whole of it.
+
+**Acceptance:** the harness resume-equivalence sweep green at budget = 1 under
+ASan; **the occupancy count identical to 4,104,267 at three slice sizes**;
+`VOXAGINE_COVERAGE_AUDIT` run *during* streaming with above-ground uncovered
+bricks at zero - phase 5 could argue voxels-without-proxy was impossible, and
+that argument stops holding here; `VOXAGINE_SYNC_AUDIT` and
+`VOXAGINE_PYRAMID_AUDIT` clean; **`gpu_chunk_streaming_frame_budget` passes in
+Release and `WILL_FAIL` comes off**; Joey judges pop-in on screen.
+
+### Phase 10 — Editor session and closing the plan
+
+*Last, and it is the only phase that cannot be done headless. Everything it
+asks for needs the editor open in front of somebody.*
+
+- Guard the remaining editor operations that assume a settled world - play-mode
+  enter and map switch wait on (or refuse during) `ChunkSystem::IsStreaming()`.
+  Save is already guarded (phase 7).
+- Editor View menu: the validation items (`Validate Occupancy Bricks`,
+  `Validate Coverage Pyramid`, `Validate Voxel Representations`) must be correct
+  against the double-buffered flush semantics phase 1 introduced - take the
+  branch's `Validate(bBack)` split.
+- Sweep the diff for anything in the keep list not yet landed, then **delete
+  `progressive-chunk-experiment` (local and origin)**. Not before: while phases
+  8 and 9 are open, K5's world-manager half, K9/K10's remainder and E9 are
+  unlanded and the branch is still the reference for them.
+- Update `CLAUDE.md`'s streaming sections and the ledgers here, and move this
+  plan's summary paragraph into `CLAUDE.md` the way the other plans do.
+
+**Acceptance:** editor session - open large world, slide window, edit, save,
+play, stop, switch world - with validation layers on and zero errors; a saved
+world diff-identical to a save taken at rest (phase 7's refusal makes
+truncation impossible, which is not the same claim); the complete suite -
+checks, scenarios (ASan, single-step sweep, fuzz), perf counters, both GPU
+gates - green in Debug and Release; branch deleted.
 
 ---
 

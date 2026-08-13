@@ -62,6 +62,10 @@ private:
 	Editor* m_pEditor = nullptr;
 	EditorCamera* m_pEditorCamera = nullptr;
 
+	/* The main camera as it was before PrepareSerialization swapped in the
+	   player camera - see UnPrepareSerialization. */
+	Camera* m_pMainCameraBeforeSerialization = nullptr;
+
 	bool m_bSpawnDefaultCamera = true;
 	UVector2 m_ChunkWorldSize = UVector2(1, 1);
 };

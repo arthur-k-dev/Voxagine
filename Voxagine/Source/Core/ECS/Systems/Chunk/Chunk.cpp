@@ -3,6 +3,7 @@
 #include "Core/Application.h"
 
 #include "Core/ECS/Components/VoxRenderer.h"
+#include "Core/ECS/Entities/Camera.h"
 #include "Core/ECS/Systems/Physics/Box.h"
 #include "Core/ECS/Systems/Chunk/ChunkSystem.h"
 #include "Core/ECS/Systems/Chunk/StreamingCounters.h"
@@ -913,8 +914,31 @@ void Chunk::SaveAndDeleteEntity(Entity* pEntity, bool bDelete)
 	m_RootEntities.emplace_back();
 	m_RootEntities.back().CopyFrom(entityVal, m_CopyDoc.GetAllocator());
 
-	//Delete entity only when it needs to be done by this chunk and is not destroyed already and isn't persistent
-	if (!bDelete || pEntity->IsDestroyed() || pEntity->IsPersistent())
+	/* **The camera is never destroyed by a chunk unload, whoever it is.**
+	   The main camera is the one entity this system *reads* to decide where the
+	   resident window goes, so unloading it is the window destroying the thing
+	   that positions it: the world is left with no camera at all, and anything
+	   holding it - CameraMultiplayer caches it in Start() - is disabled for the
+	   rest of the level.
+
+	   CLAUDE.md has described this since chunk streaming phase 2 ("a window
+	   sliding over the main camera serialized and destroyed it"), and until now
+	   the answer was per-caller: the GPU stress fixture pins its camera
+	   persistent and says so in a comment, and the streaming harness does the
+	   same. Both are working around this line. Phase 4 made it routine rather
+	   than occasional - gameplay is held until the initial window is resident,
+	   so the camera snaps to the players *after* the window has been built
+	   around its starting position, which slides the window straight off the
+	   chunk it is standing in.
+
+	   It is still *serialized* above, so it comes back with the chunk; it is
+	   only not destroyed. Deliberately not solved by marking it persistent,
+	   which would change how the chunk saves and reloads it.
+
+	   Delete entity only when it needs to be done by this chunk and is not
+	   destroyed already and isn't persistent. */
+	if (!bDelete || pEntity->IsDestroyed() || pEntity->IsPersistent() ||
+		pEntity == static_cast<Entity*>(m_pWorld->GetMainCamera()))
 		return;
 
 	/* The window this chunk was drawn in has already been replaced (US_COMMIT

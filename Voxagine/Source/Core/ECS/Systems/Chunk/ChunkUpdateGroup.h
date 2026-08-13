@@ -86,6 +86,13 @@ public:
 	bool HasCommitted() const { return m_bCommitted; }
 	void MarkCommitted() { m_bCommitted = true; }
 
+	/* The world's *first* window, built by ChunkSystem::Start through this same
+	   machine rather than synchronously. R1's hold ends when this group has
+	   admitted its roots, so the flag has to travel with the group - a second
+	   group can be queued behind the first before it has finished. */
+	bool IsInitial() const { return m_bInitial; }
+	void MarkInitial() { m_bInitial = true; }
+
 	/* End-to-end latency of a window transition: how long the player waits
 	   between crossing a boundary and the new chunks being there. Distinct from
 	   the *frame* cost the hitch gate measures, and the two move in opposite
@@ -125,6 +132,7 @@ private:
 	Vector3 m_worldOffset = Vector3(0);
 	bool m_bRendering = false;
 	bool m_bCommitted = false;
+	bool m_bInitial = false;
 	size_t m_uiItemCursor = 0;
 	size_t m_uiStagingCursor = 0;
 

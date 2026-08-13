@@ -24,9 +24,17 @@ public:
 
 	void Init(RenderSystem* pRenderSystem, PhysicsSystem* pPhysicsSystem);
 
-	virtual void Bake();
+	/* One budgeted pass over the renderers that want re-stamping
+	   (StreamingBudgets::VoxelBaking). Whatever it does not reach keeps its
+	   Updated/UpdateRequested flags and is found again next frame, so the loop
+	   is resumable without a cursor and without holding a pointer across a
+	   frame - see the budget's comment.
 
-	virtual uint32_t* Occupy(VoxRenderer* pRenderer, VoxRenderer::BakeData* pBakeData = nullptr);
+	   Returns true when nothing is left wanting a stamp, which is what
+	   RenderSystem::HasPendingVoxelBakes answers with. */
+	virtual bool Bake();
+
+virtual uint32_t* Occupy(VoxRenderer* pRenderer, VoxRenderer::BakeData* pBakeData = nullptr);
 
 	/* bNotify false suppresses the repair pass below, and is how a repair is
 	   stopped from provoking another one - see NotifyClearedRegion. */

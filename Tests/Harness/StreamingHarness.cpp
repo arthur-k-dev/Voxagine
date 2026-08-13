@@ -159,7 +159,7 @@ StreamingHarness::StreamingHarness(const std::string& sFixture, bool bInitialize
 		Initialize();
 }
 
-void StreamingHarness::Initialize()
+void StreamingHarness::Initialize(bool bSettleInitialWindow)
 {
 	if (m_bInitialized)
 		return;
@@ -184,6 +184,29 @@ void StreamingHarness::Initialize()
 	   Same call, and the same reason, as the GPU stress fixture's. */
 	if (Camera* pCamera = m_pWorld->GetMainCamera())
 		pCamera->SetPersistent(true);
+
+	/* **The initial window arrives here rather than inside World::Initialize**,
+	   as of chunk streaming phase 4: ChunkSystem::Start pushes an update group
+	   like any other slide instead of loading nine chunks synchronously, and
+	   gameplay is held (R1) until that group has admitted its roots. So the
+	   harness drives it to completion, which restores the precondition every
+	   check is written against - "you are handed a world whose first window is
+	   resident" - without any of them having to know how it got there.
+
+	   A check that wants to *observe* the hold constructs the harness with
+	   bInitialize = false and calls Initialize(false) itself. */
+	if (!bSettleInitialWindow)
+		return;
+
+	Settle();
+
+	/* And the counters start at zero for the check rather than at whatever the
+	   fixture's own startup cost. Before phase 4 the initial window was built
+	   outside the state machine and contributed nothing to count; it is a
+	   commit and nine chunk regions now, and every check that gates on
+	   "commits == 1" means its own slide. */
+	StreamingCounters::Reset();
+	m_Window.ResetSwapCount();
 }
 
 StreamingHarness::~StreamingHarness()

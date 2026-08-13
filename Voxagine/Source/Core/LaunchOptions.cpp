@@ -49,6 +49,10 @@ bool LaunchOptions::Parse(int argc, char** argv)
 		{
 			m_uiFrames = static_cast<uint32_t>(strtoul(argv[++i], nullptr, 10));
 		}
+		else if (strcmp(argv[i], "--editor-play") == 0 && bHasValue)
+		{
+			m_uiEditorPlayFrame = static_cast<uint32_t>(atoi(argv[++i]));
+		}
 		else if (strcmp(argv[i], "--hidden") == 0)
 		{
 			m_bHidden = true;

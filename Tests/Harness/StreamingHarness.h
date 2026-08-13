@@ -73,6 +73,11 @@ public:
 	   defects and this is what tells them apart. */
 	uint32_t SwapCount() const { return m_uiSwaps; }
 
+	/* The initial window is a commit and a swap like any other since phase 4,
+	   so a check counting *its own* slides starts from zero here the same way
+	   it does with StreamingCounters::Reset. */
+	void ResetSwapCount() { m_uiSwaps = 0; }
+
 	const std::vector<uint32_t>& FrontWords() const { return m_Words[m_uiFront]; }
 	const std::vector<uint32_t>& BackWords() const { return m_Words[m_uiFront ^ 1u]; }
 
@@ -135,7 +140,7 @@ public:
 
 	/* Starts the world's systems, which is where the initial 3x3 window is
 	   loaded. Called by the constructor unless it was told not to. */
-	void Initialize();
+	void Initialize(bool bSettleInitialWindow = true);
 
 	/* Drive World::Tick/FixedTick rather than the chunk system's directly, so
 	   that entities, gameplay systems and R1's hold are all in the loop. Off by

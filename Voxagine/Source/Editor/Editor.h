@@ -228,6 +228,7 @@ private:
 	std::string m_sWorldAutoSaveExtension = "_AutoSave";
 
 	float m_fAutoSaveTimer = 0.f;
+	uint32_t m_uiEditorPlayCountdown = 0;
 	bool m_bIsAutoSaving = false;
 
 };

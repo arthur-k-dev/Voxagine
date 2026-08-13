@@ -16,6 +16,8 @@
 
 #include "General/PlayerSlot.h"
 
+#include <cstdlib>
+
 #include "UI/Loadout.h"
 
 #include "Humanoids/Enemies/Monster.h"
@@ -132,16 +134,85 @@ void GameManager::ResolvePlayers()
 		pPlayer->Destroyed += Event<Entity*>::Subscriber([this, uiIndex](Entity*)
 		{
 			m_pPlayers[uiIndex] = nullptr;
+
+			/* And break the *other* player's link to this one, which nothing
+			   did: SetLinkPlayer hands out a raw Player* and chunk streaming
+			   destroys players routinely, so the survivor was left holding a
+			   freed pointer that it dereferences on every throw and catch. The
+			   cross-link below re-establishes both when the pair is complete
+			   again. */
+			const uint32_t uiOther = uiIndex == 0 ? 1 : 0;
+
+			if (m_pPlayers[uiOther] != nullptr)
+				m_pPlayers[uiOther]->SetLinkPlayer(nullptr);
 		}, this);
 	}
 
-	/* Cross-link only once both are present, and only on the transition - the
-	   old code did it inside the discovery branch, so a level whose second
-	   player arrived a frame late got no link at all. */
-	if (!bHadBoth && m_pPlayers[0] != nullptr && m_pPlayers[1] != nullptr)
+	/* Cross-link whenever both are present and are not already pointing at each
+	 * other. **Idempotent, not edge-triggered**, and that distinction is the
+	 * whole defect.
+	 *
+	 * This used to fire only on the transition into "both present"
+	 * (`!bHadBoth && both`), which is a trigger that can be consumed without
+	 * doing anything: ResolvePlayers runs from Awake, from StartGame and from
+	 * every Tick, so any call that observed both players before the links were
+	 * wanted left bHadBoth true forever after, and the pair was never linked.
+	 * Measured in a live session - both players resolved, correctly indexed,
+	 * with `partners now (nil) / (nil)` and `had both 1`.
+	 *
+	 * Everything the two-player loop does hangs off this one pointer: the
+	 * receiver role, the incoming-bullet list Recall iterates, and the catch. So
+	 * the visible symptom was "the bullet never comes back", three layers away
+	 * from the missed assignment.
+	 *
+	 * Two pointer comparisons per tick is not a cost worth an edge trigger. */
+	if (m_pPlayers[0] != nullptr && m_pPlayers[1] != nullptr)
 	{
-		m_pPlayers[0]->SetLinkPlayer(m_pPlayers[1]);
-		m_pPlayers[1]->SetLinkPlayer(m_pPlayers[0]);
+		if (m_pPlayers[0]->GetLinkedPlayer() != m_pPlayers[1])
+			m_pPlayers[0]->SetLinkPlayer(m_pPlayers[1]);
+
+		if (m_pPlayers[1]->GetLinkedPlayer() != m_pPlayers[0])
+			m_pPlayers[1]->SetLinkPlayer(m_pPlayers[0]);
+	}
+
+
+	/* VOXAGINE_GAMEPLAY_DEBUG=1, once per change. Both players report a null
+	   partner in a level that has two of them, and this is the only place that
+	   pairs them - so the question is which of "found index 0", "found index 1"
+	   and "took the cross-link branch" is not happening. */
+	static const bool s_bDebug = std::getenv("VOXAGINE_GAMEPLAY_DEBUG") != nullptr;
+
+	if (s_bDebug)
+	{
+		static const void* s_pLast0 = reinterpret_cast<const void*>(-1);
+		static const void* s_pLast1 = reinterpret_cast<const void*>(-1);
+
+		if (s_pLast0 != m_pPlayers[0] || s_pLast1 != m_pPlayers[1])
+		{
+			s_pLast0 = m_pPlayers[0];
+			s_pLast1 = m_pPlayers[1];
+
+			/* Every Player in the world with the index it is actually
+			   advertising - because if the pair never completes, the reason is
+			   almost certainly that two players are advertising the same index.
+			   Player::Awake derives it from the name, and the name arrives by
+			   deserialization. */
+			for (Player* pAny : GetWorld()->FindEntitiesOfType<Player>())
+			{
+				if (pAny == nullptr)
+					continue;
+
+				fprintf(stderr, "[gamemanager]   candidate %p '%s' index %d destroyed %d\n",
+					(void*)pAny, pAny->GetName().c_str(), pAny->GetPlayerIndex(), pAny->IsDestroyed() ? 1 : 0);
+			}
+
+			fprintf(stderr, "[gamemanager] players: [0] %p '%s', [1] %p '%s' (had both %d); partners now %p / %p\n",
+				(void*)m_pPlayers[0], m_pPlayers[0] ? m_pPlayers[0]->GetName().c_str() : "-",
+				(void*)m_pPlayers[1], m_pPlayers[1] ? m_pPlayers[1]->GetName().c_str() : "-",
+				bHadBoth ? 1 : 0,
+				(void*)(m_pPlayers[0] ? m_pPlayers[0]->GetLinkedPlayer() : nullptr),
+				(void*)(m_pPlayers[1] ? m_pPlayers[1]->GetLinkedPlayer() : nullptr));
+		}
 	}
 }
 

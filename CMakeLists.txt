@@ -645,15 +645,18 @@ if(VOXAGINE_BUILD_ENGINE)
         # Tests/Baselines/perf.txt.
         add_test(NAME gpu_world_occupancy
             COMMAND BitBuster
-                --hidden --size 320x180 --frames 1200
+                --hidden --size 320x180 --frames 3000
                 --map Content/Worlds/Fishing_Village/Fishing_Village_Beat1.wld)
         set_tests_properties(gpu_world_occupancy PROPERTIES
             WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/Game
-            # A two-second audit interval against a twenty-second run, because
-            # the audit fires on wall clock: at five seconds the first
-            # attempt raced a 5.5 s run and the gate failed for having measured
-            # nothing at all. A gate that depends on which side of a timer the
-            # process exits on is worse than no gate.
+            # Two seconds is a *floor* now, not the trigger: the audit fires at
+            # the first frame after it at which the world has stopped streaming
+            # (RenderSystem::Render). It used to fire on the clock alone, which
+            # first raced a 5.5 s run and measured nothing, and then - once
+            # phase 9 bounded one renderer's stamp and spread the level's
+            # geometry over more frames - read 1,400,089 at two seconds and
+            # called a correct level a regression. The frame count is the margin
+            # that lets it settle; the TIMEOUT is the real bound.
             ENVIRONMENT "VOXAGINE_VOXEL_AUDIT=2;VOXAGINE_AUDIO_NULL_DEVICE=1"
             PASS_REGULAR_EXPRESSION "2706535 active of 75497472"
             LABELS "gpu;integration;streaming"
@@ -664,11 +667,17 @@ if(VOXAGINE_BUILD_ENGINE)
         # player across a Beat2 chunk boundary through --ui-script and times the
         # window transition against a 16.7 ms per-frame ceiling.
         #
-        # This is the primary instrument of Docs/CHUNK_STREAMING_PLAN.md, and it
-        # FAILS on master by about 9x (peak 150-154 ms in Release; see phase 0's
-        # notes). Phases 1-5 drive it down and phase 3 removes the WILL_FAIL. A
-        # gate that is expected to fail is honest; deleting it until it passes is
-        # how the hitch stayed unmeasured.
+        # This is the primary instrument of Docs/CHUNK_STREAMING_PLAN.md. It
+        # failed on master by about 9x (peak 150-154 ms in Release; see phase 0's
+        # notes) and carried WILL_FAIL through the phases that drove it down:
+        # 150 -> 102 (1) -> 94 (3) -> 27.9 (5) -> **9.8-10.2 ms (9)**. It passes
+        # now, and the WILL_FAIL is off.
+        #
+        # A gate that is expected to fail is honest; deleting it until it passes
+        # is how the hitch stayed unmeasured. If this starts failing again, the
+        # peak it prints names the frame - and check the *occupancy* gate above
+        # in the same breath, because phase 9's whole hazard is a green hitch
+        # gate measured against a level that is not all there.
         #
         # --frames is a main-loop iteration count, not a wall clock: the fixture
         # exits itself when the transition closes, so this is set high enough not
@@ -683,7 +692,6 @@ if(VOXAGINE_BUILD_ENGINE)
             ENVIRONMENT "VOXAGINE_GPU_STREAMING_ONLY=1;VOXAGINE_AUDIO_NULL_DEVICE=1"
             LABELS "gpu;integration;streaming"
             RUN_SERIAL TRUE
-            WILL_FAIL TRUE
             TIMEOUT 180)
     endif()
 endif()

@@ -40,6 +40,10 @@ set(VOXAGINE_TEST_SOURCES
     # "did gameplay tick" are expressible at all - see StreamingProbe.h.
     ${VOXAGINE_TEST_DIR}/Harness/StreamingProbe.cpp
 
+    # A .vox read without the engine's resource stack, so a test can place a
+    # real model at a real transform - see the header.
+    ${VOXAGINE_TEST_DIR}/Harness/VoxModelFile.cpp
+
     # Voxel storage: the grid, the brick grid, the harness that models both.
     ${VOXAGINE_TEST_DIR}/VoxelStorage/VoxelGridChecks.cpp
     ${VOXAGINE_TEST_DIR}/VoxelStorage/VoxelBrickGridChecks.cpp
@@ -91,6 +95,7 @@ set(VOXAGINE_TEST_SOURCES
     # a device. The GPU integration fixture in the same directory is a separate
     # executable and is not part of this suite.
     ${VOXAGINE_TEST_DIR}/Rendering/ModelMeshUploadChecks.cpp
+    ${VOXAGINE_TEST_DIR}/Rendering/VoxelStampChecks.cpp
 
     # Engine-wide primitives that are not about voxels at all.
     ${VOXAGINE_TEST_DIR}/Foundation/GameTimerChecks.cpp

@@ -1,4 +1,6 @@
 #pragma once
+
+#include <unordered_set>
 #include <functional>
 #include <unordered_map>
 
@@ -114,6 +116,15 @@ private:
 	void ContainerValueToVariant(World* world, rttr::instance& instance, rttr::variant& variant, const Value& val, rttr::property& property, const rttr::type& variantType, rttr::variant& containerVar);
 
 	uint64_t GetHighestEntityID(Value& rootEntityVal);
+
+	/* Every entity id in a root array, children included - the same walk
+	   GetHighestEntityID makes, for World::SetKnownEntityIds. */
+	void CollectEntityIds(Value& rootEntityVal, std::unordered_set<uint64_t>& out);
+
+	/* Writes a null into one element of a reflected sequential container - the
+	   repair for a container link whose target has been destroyed. See
+	   ClearEntityLinks. */
+	bool ClearInstanceArrayElement(rttr::instance& instance, const rttr::property& property, int index);
 };
 
 template<typename T>

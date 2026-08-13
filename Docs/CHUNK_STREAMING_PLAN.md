@@ -49,7 +49,7 @@ world switch, and the loading screen.
 | 6 — Occupancy-cell proxies + march budget (**gated**) | **NOT TAKEN** | — | Closed on phase 5's measurements, which is what the gate asked for. Every remaining frame over budget is *CPU*, and named: one `VoxelBaker` stamp of 140,640 voxels. During a slide the GPU passes read Voxel 0.24 ms, Sun Shadow 0.34, Pyramid Upload 0.82 — three orders of magnitude below the frames that break the budget. Neither proxy submission nor voxel-pass overdraw is a remaining cost, so E5 and E6 stay open and unmeasured rather than being re-derived on speculation. |
 | 7 — The save guard | DONE | `chunk-streaming-phase-7` | `JsonSerializer::SerializeWorld` refuses a world whose chunks are still streaming, with a harness check. A data-loss class rather than tidiness — see the phase 7 notes. **Renamed from "Editor integration and guards": everything needing the editor open is phase 10**, which cannot be done headless and should not sit inside a phase that can. |
 | 8 — World switch behind the loading screen | DONE except three named items | `chunk-streaming-phase-8` | K5's world-manager half. A level is initialized hidden, streamed over frames the loading screen keeps drawing, and swapped in whole: the same **~300 ms** `initialize` is paid behind the loading screen instead of in the one frame the player waits through, plus **1666–1717 ms** of streaming over **2518–3716 drawn frames**, plus a **16.8–19.0 ms** activation. Readiness folds in the far field and that is free, which closes phase 4's horizon judgement call. `join` and the auto-joined player one landed first, so menu → level is scriptable headlessly at all. **Not done and not attempted: `RenderSystem::Start`'s 258 ms, the far-field harness scenarios, E9's sprite-only *flag* (the sprite discard itself landed).** Confirmed on screen by Joey after the black-frame fix. |
-| 9 — Splitting one renderer's stamp | OPEN | | Flips the hitch gate. **Read phase 5's notes first — this was built and reverted.** |
+| 9 — Splitting one renderer's stamp | DONE | `chunk-streaming-phase-9` | **The hitch gate flips: peak 27.9 → 9.82 / 10.15 / 10.31 ms against 16.67, and the `WILL_FAIL` is off.** The walk turned out not to be what lost the 580 k voxels — it is resume-identical at every budget from 1 up, checked against two real models — so the fixes are the two *interactions*: `Bake` no longer clears a half-written renderer, and the bake bookkeeping is written at the start of a stamp rather than the end. Occupancy identical at four slice sizes over eight runs; coverage, sync and pyramid audits clean during streaming with combat. Costs **728–779 → 910–1,071 held ticks** before gameplay starts. Left open: **Joey has not judged pop-in on screen**, and `gpu_destruction_sync_stress` is broken *on master* — see the notes. |
 | 10 — Editor session and closing the plan | OPEN | | Needs Joey at the machine. Deletes `progressive-chunk-experiment`. |
 
 ---
@@ -1976,6 +1976,181 @@ that argument stops holding here; `VOXAGINE_SYNC_AUDIT` and
 `VOXAGINE_PYRAMID_AUDIT` clean; **`gpu_chunk_streaming_frame_budget` passes in
 Release and `WILL_FAIL` comes off**; Joey judges pop-in on screen.
 
+#### Phase 9 notes — the walk was never the problem
+
+**The split is back, and this time the equivalence is a check rather than a
+claim.** `ForEachStampedVoxelRange` carries the loop counters *and* the
+duplicate-suppression position on a `VoxelStampCursor`, and
+`ForEachStampedVoxel` is now that function with no budget - one loop, not two
+that have to be kept in step.
+
+The first thing that fell out of building it that way: **the walk was not where
+the 580 k voxels went.** `Tests/Rendering/VoxelStampChecks.cpp` sweeps the
+sliced walk against the unbounded one at budgets 1, 2, 3, 7, 64, 97, 1000 and
+8192, over six poses (quantized rotation, scale above one, negative scale,
+off-lattice origin, with and without an override colour) and two real models -
+the three-stalk bamboo and the 140,640-voxel `Riverbed` that phase 5 named. Every
+one is identical, position for position and colour for colour, first time.
+`Tests/Harness/VoxModelFile` is what made that possible: a `.vox` read without
+the resource stack, sorted exactly the way `VoxModel::SortFrameVoxels` sorts -
+which matters, because a sorted model is the input that makes the duplicate
+suppression fire at all.
+
+So the suspects that remained were the two *interactions*, and one of them is
+almost certainly what happened:
+
+- **`Bake` clears before it stamps, and a resumed stamp must not be cleared
+  again.** `Clear` erases by recorded position, and failing that by owner slot
+  over the renderer's whole box - either way it reaches the half of the model
+  that is already written, and the resumed walk never goes back for it. A
+  renderer interrupted *n* times would keep only its last slice. That is a
+  deficit that grows as the slices get finer, which is exactly the reported
+  shape. `bResuming` now gates the clear, the transform resets and every skip
+  test in the pass.
+- **The bookkeeping is written at the *start* of a stamp, not the end.**
+  `Positions`, `Size`, `Generation`, the stamp key and the stamped box all
+  describe what is in the buffer *right now*, including mid-stamp, so a partial
+  stamp is an ordinary state: it can be cleared, abandoned or resumed by the
+  same code that handles a whole one. `Clear` and `ForgetChunkStamp` reset the
+  cursor, so no path can leave a cursor pointing into a stamp whose first half
+  has been erased.
+- **A partial that the ground moved under is restarted, not continued.** If the
+  voxel buffer was rebuilt (`Generation`) or the window slid (`WorldOffset`) or
+  the stamp key changed, the second half would land where the first half is not.
+  `StreamingCounters::VoxelStampRestarts` counts it; it should stay small, and a
+  number that grows with playing time means stamps are being invalidated faster
+  than they can finish.
+
+**The oracle, run for real.** A settled `Fishing_Village_Beat2` reports
+**4,930,065 active voxels** unsliced and at 8,192, 2,048 and 512 samples - four
+slice sizes, two runs each, **all eight the same number to the voxel**. (The
+plan's 4,104,267 is a pre-phase-8 figure for the same level; what the acceptance
+needs is that the runs agree, and they do.) `VOXAGINE_STAMP_SAMPLES` is what
+makes that a sweep rather than four rebuilds - `StreamingBudgets.cpp`, and the
+same argument as `--map` replacing an edit to `ProjectSettings.vgps`.
+
+**The trap that number sets, and what was done about it.** Read *six seconds*
+into the same run, the sliced counts are 3,431,976 at 8,192 and 2,194,720 at 512
+against 4,930,065 unsliced - a deficit of over a million that scales with slice
+size, which is precisely the signature the phase notes tell you to accept as
+proof of lost geometry. It is not. Bounding a stamp moves work out of the worst
+frame and into *more frames*, so a sliced run reaches any given instant with
+less of the level written; wait for it to settle and every voxel is there. It is
+not possible to say from here whether that is what the first attempt measured,
+because that code is gone - but the measurement it was reverted on cannot
+distinguish the two, and this one could not either until it was taken later.
+`AuditVoxelRepresentation` now says **`- STILL STREAMING, this count is not
+settled`** on the line itself when `ChunkSystem::IsStreaming()`, so the reading
+cannot be misread again.
+
+**What it costs, which is the honest half.** The level takes longer to become
+playable, because each frame does less. `[world] gameplay held`, two runs each
+(`ChunkSystem` prints it now - CLAUDE.md described that line as existing and it
+did not):
+
+| slice | held ticks | active voxels |
+|---|---|---|
+| unsliced | 728 / 779 | 4,930,065 |
+| 8,192 (shipping) | 910 / 1,071 | 4,930,065 |
+| 2,048 | 1,422 / 1,480 | 4,930,065 |
+| 512 | 3,041 / 4,567 | 4,930,065 |
+
+The knob for that is `StreamingBudgets::VoxelBaking`'s 2 ms, **not** the sample
+count: unsliced, one renderer overshoots that budget by 20 ms, so the level is
+written sooner precisely *because* the frames are bad. Whether 2 ms is still the
+right allowance while the initial window is being built - where the only thing
+competing for the frame is a loading screen animating - is a judgement for
+phase 10 and for Joey on screen. **Do not lower the sample budget to make
+streaming smoother**; below 8,192 the hold grows faster than the frame time
+falls, and at 512 it is four times the unsliced wait.
+
+##### The gate, and the gate that was already dead
+
+`gpu_chunk_streaming_frame_budget` **passes**: peak **9.82 / 10.15 / 10.31 ms**
+against the 16.67 ms ceiling over 13,159–13,421 frames, three runs. That is the
+whole arc of this plan - 150.2 (phase 0) → 102.4 (1) → 94.2 (3) → 27.9 (5) →
+**10.3 ms** - and the `WILL_FAIL` is off. The three streaming audits are clean
+over a scripted boundary crossing: **0** uncovered bricks above the ground row
+(18,313 in the deliberately-uncovered y = 0 row), **0** of 10.8 M pyramid cells
+disagreeing, **0** of 75.5 M voxels disagreeing between the CPU chunk and the
+mapping.
+
+**That run has no combat in it, and this phase's acceptance asked for some.**
+The `--ui-script` `fire` token presses P and P never reaches `Weapon::Fire` -
+measured by instrumenting its first line, which printed nothing across 2,500
+frames with `join` and four `fire`s. So the audits above cover streaming and
+movement across a window slide, not destruction during one. Nothing headless in
+this tree destroys a voxel today, and the verification reference has been
+claiming otherwise for four phases; making `fire` work is small and is owed.
+
+The CPU suite is green in Release and under **ASan + UBSan** in Debug - 118
+checks, 31 scenarios x 5 invariants, the perf counters unmoved (879 s for the
+three under the sanitizers). Nothing in the perf baseline shifted: the harness
+does not run `VoxelBaker`, so the two new counters
+(`VoxelStampSlices`/`VoxelStampRestarts`) are reported by the game and gated by
+nothing yet.
+
+`gpu_world_occupancy` needed a real fix rather than a new number, and it is the
+same lesson twice: it audited on a **wall clock**, so it read 1,400,089 of
+Beat1's 2,706,535 and failed a level that was entirely correct and still being
+written. The clock is a floor now and the audit fires at the first frame after
+it at which `ChunkSystem::IsStreaming()` is false. It passes, at the same
+2,706,535 as before.
+
+**`gpu_destruction_sync_stress` is broken and it is not this phase's doing.**
+It fails 0/256 bursts, 0/6 chunk switches, "application exited before the
+fixture completed" - **identically on master `c5595d3`**, built and run to check.
+Its `--frames 6000` is a main-loop iteration count and the fixture is
+`--uncapped`, so 6,000 frames go by in 1.7 s while R1 holds gameplay for ten
+seconds or more; it has therefore measured nothing since phase 4 made the
+initial window stream. Raising it to 400,000 (the streaming gate's own trick -
+let `TIMEOUT` be the bound) gets the fixture *running* but it does not complete
+within 300 s, so the frame count is not the whole of it. **Deliberately not
+fixed here**: it is a destruction gate, this is a streaming phase, and a fix
+that has not been shown to make it *pass* would only move the failure. Phase 10
+should own it, and until then `-L gpu` is two green and one red rather than
+three green.
+
+#### What the play session after phase 9 found
+
+Phase 9's own acceptance is met and its numbers are above. What follows was
+found by Joey playing the branch, and is recorded here because most of it is
+*streaming* work that no phase had named - not because it belongs to phase 9.
+Nine of the ten defects predate this branch; the tenth is phase 9's own.
+
+| what | where | mine? |
+|---|---|---|
+| Solo throw segfaults on the partner | `Weapon::Fire`, `Player::Catch` | no, 2023 |
+| Players never paired - edge-triggered cross-link | `GameManager::ResolvePlayers` | no |
+| Zero-extent collider spins the sweep forever | `PhysicsSystem` | no |
+| Raycast loop cannot terminate (`dist == 0.f`) | `PhysicsSystem` | no |
+| Grid lock counter is a plain `int` across threads | `PathfindingChunkGrid` | no |
+| Job captures a vector element by reference | `PathfindingChunkGrid` | no |
+| Concurrent `operator[]` on shared node maps | `ContinuumCrowdsGroup` | no |
+| Spawner links abandoned before their chunk arrives | `JsonSerializer` | no |
+| Container links never nulled on destroy | `JsonSerializer` | no |
+| Uninitialised `glm::quat` in four stamp structs | `VoxelStamp.h`, `VoxRenderer.h` | half |
+
+**The theme is one sentence: a raw pointer to streamed content, held across a
+frame, with nothing to tell it the target died.** CLAUDE.md has documented that
+as a class since M8 and each instance is still being found by crashing. The
+answer is not more guards - two of mine crashed *inside* the guard - but a
+handle type (id plus generation, resolved on use) that game code uses instead of
+`Entity*`/`Component*` for anything it keeps. `PlayerSlot` is that, for one
+case. **That is the next piece of work this plan should own**, and it is bigger
+than a phase note.
+
+**Open, and not this branch's**: the CPU voxels and the mapping disagree during
+play - 540 voxels present only on the CPU (invisible but solid) and 4,426 only
+on the GPU (visible and not there), which is a destroyed pillar coming back
+visually while collision stays correct. **Not phase 9**: master `c5595d3` and
+this branch both report 0 disagreements on the same headless run, so it needs
+input, destruction or a world switch to appear. The map-load reading of
+`149800 of 8388608` is probably an artefact of auditing during a phase-8 world
+switch, where two worlds are alive and the audit compares one world's voxels
+against the other's mapping. Chasing it needs a headless run that actually
+destroys voxels, which needs the `fire` token fixed first.
+
 ### Phase 10 — Editor session and closing the plan
 
 *Last, and it is the only phase that cannot be done headless. Everything it
@@ -2017,7 +2192,12 @@ ctest --test-dir Build/Linux/Editor/Release --output-on-failure
 # The streaming hitch gate and the destruction stress (GPU, local only):
 ctest --test-dir Build/Linux/Game/Release -L gpu --output-on-failure
 
-# A scripted boundary crossing with combat, headless, audits on:
+# A scripted boundary crossing, headless, audits on. **Not combat**: the `fire`
+# token presses P, and P never reaches Weapon::Fire in a headless run - measured
+# by instrumenting that function's first line, which printed nothing across a
+# 2,500-frame run with `join` and four `fire`s. Movement and streaming are
+# driven; destruction is not, and no headless script in this tree destroys a
+# voxel today. Say "with combat" only once that is fixed.
 cd Game && VOXAGINE_AUDIO_NULL_DEVICE=1 VOXAGINE_SYNC_AUDIT=10 VOXAGINE_COVERAGE_AUDIT=10 \
   ../Build/Linux/Game/Release/bin/BitBuster --hidden --size 1440x810 --frames 3000 \
   --map Content/Worlds/Fishing_Village/Fishing_Village_Beat2.wld \

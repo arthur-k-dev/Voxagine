@@ -687,6 +687,13 @@ uint32_t Chunk::AdmitStagedGameplay()
 		++uiAdmitted;
 	}
 
+	/* Once per pass, not once per root: a pending world link spends a retry on
+	   each pass that fails to complete it, and one admission can be 430 roots -
+	   counting those individually would burn the whole budget on a single
+	   chunk. See World::NoteStreamedRootAdmitted. */
+	if (uiAdmitted > 0 && m_pWorld != nullptr)
+		m_pWorld->NoteStreamedRootAdmitted();
+
 	return uiAdmitted;
 }
 
@@ -706,6 +713,9 @@ bool Chunk::AdmitStagedStatic(StreamingBudget::Scope& budget)
 		if (budget.Exhausted())
 			break;
 	}
+
+	if (uiAdmitted > 0 && m_pWorld != nullptr)
+		m_pWorld->NoteStreamedRootAdmitted();
 
 	if (!budget.IsUnbounded())
 		StreamingCounters::RaiseMax(StreamingCounters::Get().MaxRootsPerAdmissionSlice, uiAdmitted);

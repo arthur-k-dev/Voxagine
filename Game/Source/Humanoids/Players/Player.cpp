@@ -264,6 +264,17 @@ void Player::Start()
 
 	m_pInputHandler->BindAction("Fire", IKS_PRESSED, [&]() 
 	{
+		/* VOXAGINE_GAMEPLAY_DEBUG=1. Which branch Fire takes is the whole of
+		   "I can't recall the bullet", and it is decided by four values that
+		   nothing prints. */
+		static const bool s_bDebug = std::getenv("VOXAGINE_GAMEPLAY_DEBUG") != nullptr;
+
+		if (s_bDebug)
+			fprintf(stderr, "[player] Fire on '%s': receiver %d, ammo %u, incoming %zu, casted %zu, partner %p, return %d\n",
+				GetName().c_str(), m_bIsReceiver ? 1 : 0, m_pWeapon->GetCurrentAmmo(),
+				m_vIncomingBullets.size(), m_vCastedBullets.size(),
+				(void*)m_pReferencePlayer, m_bReturn ? 1 : 0);
+
 		// If you are the receiver
 		if(m_bIsReceiver && m_pWeapon->GetCurrentAmmo() == 0)
 		{
@@ -478,11 +489,33 @@ void Player::Tick(float fDeltaTime)
 	}
 
 	/* if there is no bullet at all we need to feed it someone */
-// 	if(bIsReceiver && (m_vIncomingBullets.empty() && m_vCastedBullets.empty()))
-// 	{
-// 		m_pWeapon->SetCurrentAmmo(m_pWeapon->GetCurrentAmmo() + 1);
-// 		m_bRumble = true;
-// 	}
+	/* The authors' own recovery, above, restricted to the case that needs it.
+	 *
+	 * A thrown bullet can leave for good - past a wall, out of bounds, or timed
+	 * out - and with two players that is survivable because the other one still
+	 * has the shared bullet's other half of the loop. Solo it is a dead end: no
+	 * bullet in flight, no ammo, nothing to recall, and the level cannot be
+	 * continued. Reported as "if it goes beyond the wall I can't recall it
+	 * anymore".
+	 *
+	 * Deliberately not enabled for two players, which is why it was commented
+	 * out rather than deleted: both lists are empty at the start of a level too,
+	 * so the receiver would be handed an ammo before anyone has thrown and the
+	 * one-bullet-between-two-players rule would stop being a rule. */
+	if (!m_pReferencePlayer && m_bIsReceiver &&
+		!m_pWeapon->HasInfiniteAmmo() && m_pWeapon->GetCurrentAmmo() == 0 &&
+		m_vIncomingBullets.empty() && m_vCastedBullets.empty())
+	{
+		m_pWeapon->SetCurrentAmmo(m_pWeapon->GetCurrentAmmo() + 1);
+		m_bRumble = true;
+
+		/* Back to being the thrower: the aim marker returns and the recall
+		   marker goes, which is what Start does for a player who has ammo. */
+		m_bIsReceiver = false;
+		m_pRecallEntity->SetEnabled(false);
+
+		ShowAimer();
+	}
 
 	// Note for debug purposes
 	// TODO adding recall feature automatic after n seconds
@@ -563,8 +596,12 @@ void Player::AddSpawnedBullet(Bullet* pBullet)
 {
 	m_vCastedBullets.push_back(pBullet);
 
-	if(m_pReferencePlayer)
-		m_pReferencePlayer->m_vIncomingBullets.push_back(pBullet);
+	/* The receiver's incoming list is what Recall and the Fire-as-catch action
+	   iterate, so with no second player it has to be this one's - otherwise a
+	   solo throw is unrecallable and the bullet simply leaves. See Switch. */
+	Player* const pReceiver = m_pReferencePlayer ? m_pReferencePlayer : this;
+
+	pReceiver->m_vIncomingBullets.push_back(pBullet);
 }
 
 
@@ -600,11 +637,16 @@ void Player::Switch()
 	// So now you are the thrower and the other one is the receiver now
 	m_bIsReceiver = false;
 	m_pRecallEntity->SetEnabled(false);
-	if (m_pReferencePlayer)
-	{
-		m_pReferencePlayer->m_pRecallEntity->SetEnabled(true);
-		m_pReferencePlayer->m_bIsReceiver = true;
-	}
+
+	/* Unless there is no other one, in which case you are both ends of the
+	   throw. Catch() and the recall both run only for m_bIsReceiver, so without
+	   this a solo player throws once and can never get the bullet back - the
+	   role was handed to a partner who does not exist. The escape procedure in
+	   Weapon::Fire is what stops it being caught the moment it is thrown. */
+	Player* const pReceiver = m_pReferencePlayer ? m_pReferencePlayer : this;
+
+	pReceiver->m_pRecallEntity->SetEnabled(true);
+	pReceiver->m_bIsReceiver = true;
 }
 
 bool Player::Damage(float damage, Vector3 impactNormal, float fLaunchStrength /*= 1.0f*/)
@@ -725,7 +767,15 @@ void Player::Catch()
 			if (m_pBullet == pBullet && m_bReturn)
 			{
 				m_pBullet = nullptr;
-				m_pReferencePlayer->m_pBullet = nullptr;
+
+				/* Guarded like every other use of the reference player in this
+				   file: there may not be a second one. Same defect as
+				   Weapon::Fire's - catching your own returning bullet alone
+				   reaches this, and it is the crash immediately after that one
+				   is fixed. */
+				if (m_pReferencePlayer)
+					m_pReferencePlayer->m_pBullet = nullptr;
+
 				m_bReturn = false;
 			}
 

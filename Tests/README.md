@@ -54,8 +54,10 @@ happens to live in.
 ```
 Framework/     the runner, the four registries, the assertion macros, the baseline format
 Harness/       a whole voxel world with no GPU (VoxelWorldHarness), the destruction
-               pipeline driven once (DestructionRun), and a whole chunk-streaming
-               world with no render context (StreamingHarness)
+               pipeline driven once (DestructionRun), a whole chunk-streaming
+               world with no render context (StreamingHarness), and a .vox read
+               without the resource stack (VoxModelFile) so a test can place a
+               real model at a real transform
 Fixtures/      synthetic .wld worlds the streaming harness loads - a 5x5 chunk
                level, and a copy of it whose chunks lead with deliberately
                malformed roots (T7)
@@ -68,6 +70,8 @@ VoxelEditing/  VoxelEditBatch — the one voxel write path
 Destruction/   SphericalDestruction, plus the scenarios and invariants
 Integrity/     IntegrityChecker — which geometry is still holding itself up
 Particles/     ParticleCore, ParticleLanding, ParticleSimulation
+Rendering/     the renderer's CPU-side decisions - model mesh uploads, and where a
+               model's voxels land (VoxelStamp, including the resumable stamp)
 Foundation/    engine-wide primitives that are not about voxels at all
 ```
 

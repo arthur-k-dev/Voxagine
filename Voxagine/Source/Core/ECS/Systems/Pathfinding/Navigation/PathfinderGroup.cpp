@@ -54,18 +54,50 @@ namespace pathfinding
 	void PathfinderGroup::Start()
 	{
 		Entity::Start();
-		m_pGrid = dynamic_cast<ChunkGrid*>(GetWorld()->FindEntity("PathfindingGrid"));
-		assert(m_pGrid);
-		if (m_pGrid != nullptr)
-			m_pGrid->addGroup(*this);
+
+		/* No assert: with chunk streaming there may be no grid *yet*. Start runs
+		   when this group is admitted, and the PathfindingGrid entity is admitted
+		   on its own schedule, so "not found" here is an ordinary early state
+		   rather than a broken level. Tick keeps asking. */
+		ResolveGrid();
 
 		for (auto& agent : m_agents)
 			agent->updatePositionVelocitySize();
 	}
 
+	bool PathfinderGroup::ResolveGrid()
+	{
+		if (m_pGrid != nullptr)
+			return true;
+
+		m_pGrid = dynamic_cast<ChunkGrid*>(GetWorld()->FindEntity("PathfindingGrid"));
+
+		if (m_pGrid == nullptr)
+			return false;
+
+		m_pGrid->addGroup(*this);
+
+		return true;
+	}
+
 	void PathfinderGroup::Tick(float deltaTime)
 	{
 		Entity::Tick(deltaTime);
+
+		/* Re-resolved rather than looked up once at Start, and this is the same
+		 * rule the rest of the tree has had to learn: a link that is null now is
+		 * not a link that will always be null.
+		 *
+		 * Two ways this group loses its grid. It can be admitted before the grid
+		 * is - Start then found nothing and the group was orphaned for the whole
+		 * level, with no path updates and no complaint. And ~ChunkGrid nulls
+		 * m_pGrid on every group in the world, so a world switch or a level
+		 * ending leaves every group pointing at nothing; when a grid comes back
+		 * the group has to register with it or it is never ticked again.
+		 *
+		 * The find is by name and therefore not free, which is why it only runs
+		 * while there is no grid. */
+		ResolveGrid();
 
 		if (m_goals.size() == 0 || m_agents.size() == 0)
 			return;

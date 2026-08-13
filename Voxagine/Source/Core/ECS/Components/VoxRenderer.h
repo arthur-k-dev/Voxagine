@@ -8,6 +8,7 @@
 
 #include "Core/ECS/Systems/Physics/VoxelGrid.h"
 #include "Core/ECS/Systems/Physics/Box.h"
+#include "Core/ECS/Systems/Rendering/VoxelStampCursor.h"
 
 class RenderSystem;
 
@@ -97,7 +98,10 @@ public:
 		struct StampKey
 		{
 			Vector3 Origin = Vector3(0.f);
-			Quaternion Rotation;
+
+			/* Identity rather than uninitialised: two default-constructed keys
+			   have to compare equal, and GLM leaves this as stack garbage. */
+			Quaternion Rotation = Quaternion(1.f, 0.f, 0.f, 0.f);
 			Vector3 Scale = Vector3(1.f);
 			Vector3 RoundedScale = Vector3(0.f);
 
@@ -139,7 +143,12 @@ public:
 
 		Vector3 LastLocation = Vector3(0.f, 0.f, 0.f);
 		Vector3 LastScale = Vector3(1.f, 1.f, 1.f);
-		Quaternion LastRotation;
+
+		/* Identity, for the same reason as StampKey::Rotation above:
+		   CheckRendererChange compares this against the transform's rotation to
+		   decide whether a renderer moved, and stack garbage makes that answer
+		   arbitrary on the first frame. */
+		Quaternion LastRotation = Quaternion(1.f, 0.f, 0.f, 0.f);
 
 		bool IsEnabled = true;
 		bool IsStatic = false;
@@ -149,6 +158,30 @@ public:
 		   back voxels somebody else erased, so its own clear must not send a
 		   third renderer round the same loop. Cleared by the bake it triggers. */
 		bool RepairOnly = false;
+
+		/* Where a stamp that ran out of budget stopped, and that it did.
+		   CHUNK_STREAMING_PLAN.md phase 9.
+		 *
+		 * This is the one piece of bake state that survives a frame boundary,
+		 * and it is deliberately a *cursor* rather than anything with a
+		 * lifetime: it names a position in the renderer's own model, so
+		 * nothing it refers to can be destroyed while it is held. The renderer
+		 * itself leaving takes the whole BakeData with it.
+		 *
+		 * While OccupyInProgress is set, Positions/Size describe the part of
+		 * the stamp that is already in the buffer - which is what makes an
+		 * interrupted stamp safe to clear, and is the thing the first attempt
+		 * at this phase got wrong: re-clearing a half-written renderer on every
+		 * resume erased everything but its last slice, and a level 580,000
+		 * voxels short reads as content rather than as a bug. */
+		VoxelStampCursor StampCursor;
+		bool OccupyInProgress = false;
+
+		/* Accumulated across the slices of one stamp, so the clipped-geometry
+		   warning below still reports the whole model rather than whichever
+		   part of it the last frame happened to reach. Reset with the cursor. */
+		uint32_t StampDropped = 0;
+		uint32_t StampPlaced = 0;
 	};
 
 	Event<VoxRenderer*> FrameChanged;

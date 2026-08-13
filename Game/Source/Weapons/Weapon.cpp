@@ -115,17 +115,27 @@ void Weapon::Fire()
 	// Set the caster
 	pBullet->SetCurrentCaster(m_pPlayer);
 
-	// Set the receiver
-	const auto pLinkedPlayer = m_pPlayer->GetLinkedPlayer();
-	pBullet->SetCurrentReceiver(pLinkedPlayer);
+	/* With nobody else in the level you throw to yourself, and every rule below
+	   then works unchanged. This is also the crash fix: the receiver used to be
+	   dereferenced with no check at all, so a solo throw segfaulted. */
+	Player* const pReceiver = m_pPlayer->GetLinkedPlayer() ? m_pPlayer->GetLinkedPlayer() : m_pPlayer;
+
+	pBullet->SetCurrentReceiver(pReceiver);
 
 	m_pPlayer->AddSpawnedBullet(pBullet);
 
 	pBullet->SetSpeed(m_pManager->m_fBulletSpeed * (m_pPlayer->IsDashing() ? m_pManager->m_fBulletSpeedDashMultiplier : 1.f));
 	pBullet->SetDamageAmount(m_pManager->GetCurrentType()->m_fDamage);
 
+	/* The escape procedure, and it is exactly what makes throwing to yourself
+	   work rather than something to skip. It exists so a bullet thrown at a
+	   receiver standing too close is not caught the instant it leaves the hand:
+	   the bullet is marked un-escaped and must travel clear of the escape
+	   position before it becomes catchable again (Bullet::FixedTick). Solo, the
+	   receiver is the thrower, the distance is the spawn offset, so it always
+	   engages - which is the behaviour you want. */
 	//Calculate if the escape procedure is necessary
-	const float fDist = glm::distance(pLinkedPlayer->GetTransform()->GetPosition(), pBullet->GetTransform()->GetPosition());
+	const float fDist = glm::distance(pReceiver->GetTransform()->GetPosition(), pBullet->GetTransform()->GetPosition());
 	const float fAutoRange = pBullet->GetAutoCatchRange();
 	const float fRange = pBullet->GetCatchRange();
 	const float fEscapeRange = pBullet->GetEscapeRange();
@@ -133,7 +143,7 @@ void Weapon::Fire()
 	//The receiver stood to close to the throwing player, start escape procedure
 	if (fDist < fAutoRange + fEscapeRange || fDist < fRange + fEscapeRange){
 		pBullet->SetEscaped(false);
-		pBullet->SetEscapePosition(pLinkedPlayer->GetTransform()->GetPosition());
+		pBullet->SetEscapePosition(pReceiver->GetTransform()->GetPosition());
 	}
 
 	m_uiAmmo--;

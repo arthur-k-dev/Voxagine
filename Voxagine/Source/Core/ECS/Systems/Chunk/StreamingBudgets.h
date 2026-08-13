@@ -59,6 +59,13 @@ public:
 
 	bool IsUnbounded() const { return m_uiUnits == 0 && m_fMilliseconds <= 0.0; }
 
+	/* The unit count, or UINT32_MAX when this budget is not counted in units -
+	   which, for a loop whose only possible bound is a count, means all of it.
+	   The one caller is VoxelBaker::Occupy, whose slice budget is passed *into*
+	   the walk rather than polled around it: the walk is the only thing that
+	   knows where a sample begins. */
+	uint32_t UnitsOrUnbounded() const { return m_uiUnits == 0 ? UINT32_MAX : m_uiUnits; }
+
 	/* One pass over a resumable loop. Constructed at the top of the state,
 	   asked after each item, and never consulted before the first one: every
 	   budgeted loop must make progress on at least one item per entry or a
@@ -174,6 +181,28 @@ struct StreamingBudgets
 	   already happening every frame. Nothing survives a frame boundary, so
 	   there is no ledger-E1 shape here to defend. */
 	StreamingBudget VoxelBaking = StreamingBudget::Milliseconds(2.0);
+
+	/* How much of *one* renderer's model may be stamped in one pass, in units of
+	   voxel samples - one (model voxel, scale offset) pair, which is what the
+	   walk costs whether or not it writes. Phase 9.
+	 *
+	 * The budget above bounds the pass; this bounds its atom. Phase 5 left them
+	 * the same thing and measured what that costs: `RiverBedStraight10` stamps
+	 * 140,640 voxels in 22 ms, so a frame that started one was a 22 ms frame
+	 * however little else it did, and those single renderers were every
+	 * remaining violation of the hitch gate.
+	 *
+	 * A count rather than a clock, and deliberately so even though the work pays
+	 * as it goes: this is the loop whose resumption a test has to single-step,
+	 * and the only honest way to sweep resumption points is for the machine not
+	 * to decide where they are (see the file comment). 8,192 is what phase 5
+	 * measured the split at - about 1.3 ms of the riverbed - and it is a tuning
+	 * knob, not a contract.
+	 *
+	 * **Do not lower it to "make streaming smoother" without re-running the
+	 * occupancy oracle.** A sliced stamp that loses geometry loses more of it the
+	 * finer it slices, and the symptom is a level that reads as content. */
+	StreamingBudget VoxelBakingSamples = StreamingBudget::Units(8192);
 
 
 	/* Stamping the level's static geometry into the far-field volume, in units

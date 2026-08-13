@@ -6,6 +6,7 @@
 #include "Core/ECS/Systems/Physics/VoxelGrid.h"
 #include "Core/Platform/Rendering/VoxelBrickGrid.h"
 #include "Core/Voxels/VoxelEditBatch.h"
+#include "Harness/VoxModelFile.h"
 
 /* A whole voxel world with no GPU, no window and no World.
  *
@@ -83,6 +84,25 @@ public:
 	 * dynamic voxel, so no test could have failed. Anything that reads a colour
 	 * out of the world should be exercised against both. */
 	void SetDynamic(uint32_t uiX, uint32_t uiY, uint32_t uiZ, uint32_t uiColor);
+
+	/* Stamps a real model at a real world transform, through the engine's own
+	 * placement (ComputeVoxelStampTransform / ForEachStampedVoxelRange) rather
+	 * than a copy of it, and returns how many voxels landed outside the world
+	 * and were dropped.
+	 *
+	 * uiSliceSamples is CHUNK_STREAMING_PLAN.md phase 9's budget: the stamp is
+	 * driven that many samples at a time, resuming from its cursor, exactly as
+	 * VoxelBaker::Occupy does across frames. UINT32_MAX is the whole model in
+	 * one go, which is what every other caller wants.
+	 *
+	 * The dropped count is the other reason this exists: a model placed by its
+	 * *centre* whose transform sits lower than half its height loses its base
+	 * silently, and until a test could express that, the suite could only
+	 * describe boxes standing on flat ground.
+	 */
+	uint32_t StampModel(const VoxModelFile& model, const VoxelStampPose& pose,
+	                    uint16_t uiOwnerSlot, bool bStatic = true,
+	                    uint32_t uiSliceSamples = UINT32_MAX);
 
 	/* A ground layer at y = 0 plus a solid box, which is the shape every
 	   destruction test wants: something to blow a hole in and something for the

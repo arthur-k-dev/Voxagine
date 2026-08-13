@@ -156,3 +156,55 @@ uint32_t VoxelWorldHarness::Validate()
 {
 	return m_Bricks.Validate(false, m_Words.data());
 }
+
+uint32_t VoxelWorldHarness::StampModel(const VoxModelFile& model, const VoxelStampPose& pose,
+                                       uint16_t uiOwnerSlot, bool bStatic, uint32_t uiSliceSamples)
+{
+	VoxelStampTransform stamp;
+
+	/* Origin zero and voxel size one: the harness *is* level space, the way the
+	   far field is. The resident window passes its own world offset instead,
+	   and that parameter is the only difference between the two grids. */
+	ComputeVoxelStampTransform(model.Describe(), pose, Vector3(0.f), 1.f, stamp);
+
+	/* State tag 1, matching a renderer in its default state: alpha is the
+	   occupancy tag, not an opacity. */
+	const uint32_t uiStateTag = VoxelStateTag(RS_DEFAULT, false);
+
+	uint32_t uiDropped = 0;
+
+	const auto place = [&](const Vector3& v3Position, uint32_t uiColor)
+	{
+		/* An in-range test, never a rejection test - a NaN passes every
+		   comparison in the latter and static_cast<int32_t> of it is
+		   INT32_MIN. */
+		const bool bInside =
+			v3Position.x >= 0.f && v3Position.x < static_cast<float>(m_v3Size.x) &&
+			v3Position.y >= 0.f && v3Position.y < static_cast<float>(m_v3Size.y) &&
+			v3Position.z >= 0.f && v3Position.z < static_cast<float>(m_v3Size.z);
+
+		if (!bInside)
+		{
+			++uiDropped;
+			return;
+		}
+
+		const uint32_t uiX = static_cast<uint32_t>(v3Position.x);
+		const uint32_t uiY = static_cast<uint32_t>(v3Position.y);
+		const uint32_t uiZ = static_cast<uint32_t>(v3Position.z);
+
+		if (bStatic)
+			Set(uiX, uiY, uiZ, uiColor, uiOwnerSlot);
+		else
+			SetDynamic(uiX, uiY, uiZ, uiColor);
+	};
+
+	VoxelStampCursor cursor;
+
+	while (!ForEachStampedVoxelRange(model.Voxels(), uiStateTag, nullptr, stamp,
+	                                 cursor, uiSliceSamples, place))
+	{
+	}
+
+	return uiDropped;
+}

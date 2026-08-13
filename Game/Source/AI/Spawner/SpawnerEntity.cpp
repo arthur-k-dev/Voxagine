@@ -326,7 +326,8 @@ void SpawnerEntity::OnCollisionEnter(Collider * collider, const Manifold & manif
 				}
 
 				// if we are the manager enable walls
-				if (m_pPlayer1 && m_pPlayer2 && !m_BoundWalls.empty())
+				/* One player is enough - see SpawnerManager::OnCollisionStay. */
+				if ((m_pPlayer1 || m_pPlayer2) && !m_BoundWalls.empty())
 				{
 					for (auto pWall : m_BoundWalls)
 					{
@@ -338,8 +339,8 @@ void SpawnerEntity::OnCollisionEnter(Collider * collider, const Manifold & manif
 				}
 			}
 
-			// If we have both players start the spawner
-			if (m_pPlayer1 && m_pPlayer2)
+			// If we have a player in the box, start the spawner
+			if (m_pSpawnerComponent != nullptr && (m_pPlayer1 || m_pPlayer2))
 			{
 				m_pSpawnerComponent->StartWave();
 			}

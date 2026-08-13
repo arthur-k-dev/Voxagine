@@ -167,6 +167,20 @@ struct StreamingCounters
 	   zero, which is why it is a counter and not only a comment. */
 	std::atomic<uint64_t> ChunkInstanceRestamps{ 0 };
 
+	/* One renderer's stamp interrupted by StreamingBudgets::VoxelBakingSamples
+	   and resumed on a later pass - phase 9. Ordinary and expected: it is what
+	   keeps a 140,640-voxel model out of one frame. Reported rather than
+	   asserted, because how many there are is a function of the budget. */
+	std::atomic<uint64_t> VoxelStampSlices{ 0 };
+
+	/* A partial stamp thrown away because the ground moved under it - the voxel
+	   buffer was rebuilt or the chunk window slid - and started again from the
+	   beginning. Correct, and *should* be rare: one per renderer that happened
+	   to be mid-stamp at a commit. A number that grows with playing time means
+	   something is invalidating stamps faster than they can finish, and the
+	   stamp would then never complete. */
+	std::atomic<uint64_t> VoxelStampRestarts{ 0 };
+
 	static StreamingCounters& Get() { return s_Counters; }
 
 	static void Reset()
@@ -199,6 +213,8 @@ struct StreamingCounters
 		c.BackBufferFlushRaces.store(0, std::memory_order_relaxed);
 		c.PublishesOutsideCommit.store(0, std::memory_order_relaxed);
 		c.ChunkInstanceRestamps.store(0, std::memory_order_relaxed);
+		c.VoxelStampSlices.store(0, std::memory_order_relaxed);
+		c.VoxelStampRestarts.store(0, std::memory_order_relaxed);
 	}
 
 	static void RaiseMax(std::atomic<uint64_t>& target, uint64_t uiValue)

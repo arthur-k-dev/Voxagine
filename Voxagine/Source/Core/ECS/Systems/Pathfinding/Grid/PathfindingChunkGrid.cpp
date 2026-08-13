@@ -150,7 +150,7 @@ namespace pathfinding
 		}
 
 		// Rebuild paths
-		if (m_iGridLocks == 0)
+		if (m_iGridLocks.load() == 0)
 		{
 			// Select job
 			if (m_currentGridJob == REBUILD_GRID && m_fTimer > m_fRebuildInterval)
@@ -175,7 +175,7 @@ namespace pathfinding
 				{
 					if (pJobQueue)
 					{
-						m_iGridLocks++;
+						m_iGridLocks.fetch_add(1);
 						pJobQueue->Enqueue<int*>([this, connection]()
 						{
 							PhysicsSystem* physicsSystem = GetWorld()->GetPhysics();
@@ -185,7 +185,7 @@ namespace pathfinding
 							if (connection.second.size() > 0)
 								m_grid[connection.first].connectChunkNeighbours(*voxelGrid, const_cast<ChunkConnections&>(connection.second));
 							return nullptr;
-						}, [this](int*) { m_iGridLocks--; });
+						}, [this](int*) { m_iGridLocks.fetch_sub(1); });
 					}
 				}
 
@@ -194,7 +194,7 @@ namespace pathfinding
 				if (pJobQueue)
 				{
 					// Build shared field
-					m_iGridLocks++;
+					m_iGridLocks.fetch_add(1);
 					pJobQueue->Enqueue<int*>([this]()
 					{
 						for (auto& group : m_groups)
@@ -214,25 +214,41 @@ namespace pathfinding
 						buildDiscomfortField();
 						buildAvgVelocityField();
 						return nullptr;
-					}, [this](int*) { m_iGridLocks--; });
+					}, [this](int*) { m_iGridLocks.fetch_sub(1); });
 				}
 			} else if (m_currentGridJob == BUILD_GROUP_FIELDS)
 			{
 				// Process groups
 				addAndRemoveGroups();
 
-				// Build group fields
-				for (auto& group : m_groups)
+				/* One job for all the groups, not one job each, and the
+				 * capture is by value.
+				 *
+				 * Two defects in four lines. `[this, &group]` captured a
+				 * reference to a *vector element* and ran later, so any
+				 * reallocation of m_groups left the job reading freed memory -
+				 * and groups are added mid-level now that PathfinderGroup
+				 * re-resolves its grid rather than giving up in Start.
+				 *
+				 * And every group's job writes the *same* nodes'
+				 * m_groupProperties map, inserting into it with operator[]; two
+				 * of those running at once is a rehash under another thread's
+				 * read, which is undefined and crashes in exactly the place
+				 * this was reported from. Groups are few and the work stays off
+				 * the main thread either way, so they are walked in sequence. */
+				if (pJobQueue)
 				{
-					if (pJobQueue)
+					m_iGridLocks.fetch_add(1);
+					pJobQueue->Enqueue<int*>([this]()
 					{
-						m_iGridLocks++;
-						pJobQueue->Enqueue<int*>([this, &group]()
+						for (PathfinderGroup* pGroup : m_groups)
 						{
-							group->updatePaths();
-							return nullptr;
-						}, [this](int*) { m_iGridLocks--; });
-					}
+							if (pGroup != nullptr)
+								pGroup->updatePaths();
+						}
+
+						return nullptr;
+					}, [this](int*) { m_iGridLocks.fetch_sub(1); });
 				}
 			}
 
@@ -342,7 +358,7 @@ namespace pathfinding
 		[[maybe_unused]] VoxelGrid* voxelGrid = physicsSystem->GetVoxelGrid();
 		assert(voxelGrid);
 
-		m_iGridLocks++;
+		m_iGridLocks.fetch_add(1);
 		pJobQueue->Enqueue<int*>([this, gridCenter, pJobQueue]()
 		{
 			// Get grid corner
@@ -364,7 +380,7 @@ namespace pathfinding
 			pJobQueue->EnqueueBulk(jobs);
 
 			return nullptr;
-		}, [this](int*) { m_iGridLocks--; });
+		}, [this](int*) { m_iGridLocks.fetch_sub(1); });
 	}
 
 	void ChunkGrid::buildDiscomfortField()

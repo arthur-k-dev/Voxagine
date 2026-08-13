@@ -697,7 +697,23 @@ void RenderSystem::Render(const GameTimer& fixedTimer)
 		{
 			s_fElapsed += fixedTimer.GetElapsedSeconds();
 
-			if (s_fElapsed >= s_fAuditAfter)
+			/* The clock is a *floor*, not the trigger: the audit fires at the
+			   first frame after it at which the world has stopped streaming.
+			 *
+			 * CHUNK_STREAMING_PLAN.md phase 9 is why. This count is the oracle
+			 * that phase accepts against, and bounding a stamp moves work into
+			 * more frames - so a sliced run reaches any given instant with less
+			 * of the level written, and the shortfall looks exactly like lost
+			 * geometry, right down to scaling with the slice size. Taking the
+			 * reading on a wall clock made the `gpu_world_occupancy` gate read
+			 * 1,400,089 of Beat1's 2,706,535 and call it a regression.
+			 *
+			 * If the world never settles the audit never fires, and the gate
+			 * fails for having measured nothing - which is the honest outcome
+			 * rather than the race the old form had. */
+			const ChunkSystem* pChunkSystem = m_pWorld->GetChunkSystem();
+
+			if (s_fElapsed >= s_fAuditAfter && (pChunkSystem == nullptr || !pChunkSystem->IsStreaming()))
 			{
 				s_bDone = true;
 				AuditVoxelRepresentation();
@@ -1062,9 +1078,23 @@ void RenderSystem::AuditVoxelRepresentation()
 			++uiDeadOwners;
 	}
 
-	fprintf(stderr, "[voxel-audit] %llu active of %u (%zu B per CPU voxel + %zu B of owner slot)\n",
+	/* Whether the number above is a *settled* number, said out loud.
+	 *
+	 * This count is the oracle CHUNK_STREAMING_PLAN.md phase 9 accepts against -
+	 * a sliced stamp must reproduce the unsliced level's occupancy exactly - and
+	 * the one way to misread it is to take it while stamping is still going on.
+	 * Bounding a stamp moves work out of the worst frame and into more frames,
+	 * so a sliced run reaches any given wall-clock instant with *less* of the
+	 * level written, and the deficit looks exactly like lost geometry: it even
+	 * scales with slice size, which is the signature the phase notes name.
+	 * Measured six seconds into a Beat2 run, this reads 3.4 M against the
+	 * unsliced 4.9 M; at twenty-five seconds both read 4,930,065. */
+	const bool bStreaming = m_pWorld->GetChunkSystem() != nullptr && m_pWorld->GetChunkSystem()->IsStreaming();
+
+	fprintf(stderr, "[voxel-audit] %llu active of %u (%zu B per CPU voxel + %zu B of owner slot)%s\n",
 	        (unsigned long long)uiActive, dims.x * dims.y * dims.z,
-	        sizeof(Voxel), sizeof(uint16_t));
+	        sizeof(Voxel), sizeof(uint16_t),
+	        bStreaming ? " - STILL STREAMING, this count is not settled" : "");
 
 	fprintf(stderr, "[voxel-audit] owners: %llu set, %llu naming a dead entity, %llu on an inactive voxel, %llu on the reserved slot (%zu distinct slots of %zu allocated)\n",
 	        (unsigned long long)uiOwners, (unsigned long long)uiDeadOwners,

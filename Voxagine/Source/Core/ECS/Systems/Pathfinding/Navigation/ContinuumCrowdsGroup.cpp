@@ -80,7 +80,19 @@ namespace pathfinding
 
 	void ContinuumCrowdsGroup::updatePaths()
 	{
-		assert(m_pGrid);
+		/* The grid can go away underneath this, and it is not an error.
+		 *
+		 * ChunkGrid::Tick enqueues one updatePaths *job* per group and returns;
+		 * the work runs on a worker thread some time later. ~ChunkGrid walks
+		 * every entity in the world and nulls m_pGrid on each PathfinderGroup,
+		 * so a grid destroyed between the enqueue and the execution - a world
+		 * switch, or the level ending - leaves an in-flight job holding a null,
+		 * and the assert that used to be here fired on a job thread. There is
+		 * nothing to update without a grid; PathfinderGroup::Tick re-resolves
+		 * one and re-registers when it comes back. */
+		if (m_pGrid == nullptr)
+			return;
+
 		
 		// Prepare containers
 		std::make_heap(std::begin(m_candidatesHeap), std::end(m_candidatesHeap), std::greater<CandidateNode>());

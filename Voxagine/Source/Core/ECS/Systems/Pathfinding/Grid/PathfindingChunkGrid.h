@@ -1,4 +1,6 @@
 #pragma once
+
+#include <atomic>
 #include <array>
 #include <vector>
 #include "Core/Math.h"
@@ -44,7 +46,21 @@ namespace pathfinding
 		float m_fMinDensity;
 		float m_fMaxDensity;
 
-		int m_iGridLocks; // How many objects are currently locking the grid. (prevents rebuilding while grid locks > 0)
+		/* How many jobs are currently locking the grid; the grid may only be
+		 * rebuilt at zero, because rebuilding frees the chunks a job is walking.
+		 *
+		 * **Atomic, and it was a plain int.** It is incremented on the main
+		 * thread and decremented from job-completion callbacks on worker
+		 * threads, so a non-atomic read-modify-write loses decrements - and a
+		 * lost decrement is not the dangerous direction. The dangerous one is
+		 * the main thread reading a stale zero while a job is still iterating
+		 * m_grid, calling rebuildGrid, and freeing the chunks underneath it:
+		 * ContinuumCrowdsGroup::updatePaths then segfaults on a node access with
+		 * a perfectly valid `this` and a perfectly valid m_pGrid, which is
+		 * exactly how it was reported. The default sequential consistency also
+		 * supplies the release/acquire edge that made the job's writes visible
+		 * here by luck rather than by rule. */
+		std::atomic<int> m_iGridLocks;
 		bool m_rebuildGrid;
 		std::vector<PathfinderGroup*> m_groups;
 		std::vector<PathfindingObstacle*> m_obstacles;

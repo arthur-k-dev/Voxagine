@@ -266,7 +266,19 @@ void ChunkSystem::Tick(float fDeltaTime)
 		RenderSystem* pRenderSystem = m_pWorld->GetRenderSystem();
 
 		if (pRenderSystem == nullptr || !pRenderSystem->HasPendingVoxelBakes())
+		{
 			m_bInitialWindowReady = true;
+
+			/* The number CLAUDE.md's link-retry note asks for, and the one phase 9
+			   trades against: bounding a stamp below one renderer moves work out
+			   of the worst frame and into more frames, so this is where the cost
+			   of that trade shows up. If it ever exceeds
+			   World::k_uiMaxWorldLinkRetries, every cross-chunk link in the level
+			   has already been abandoned before gameplay begins. */
+			fprintf(stderr, "[world] gameplay held %llu ticks\n",
+				static_cast<unsigned long long>(
+					StreamingCounters::Get().GameplayTicksHeld.load(std::memory_order_relaxed)));
+		}
 	}
 
 	/* One slice of the level's far field, if one is outstanding. Deliberately

@@ -1,4 +1,6 @@
 #pragma once
+
+#include <unordered_set>
 #include <vector>
 #include "Core/Event.h"
 #include "Core/ECS/Components/Transform.h"
@@ -84,6 +86,39 @@ public:
 	   forms, and the cost of a too-large one is a few pointer comparisons a
 	   frame on a level that references something it no longer contains. */
 	static constexpr uint32_t k_uiMaxWorldLinkRetries = 240;
+
+	/* Bumped every time an entity enters or leaves the world.
+	 *
+	 * The link budget above is spent only when this has *not* moved since the
+	 * last attempt - see JsonSerializer::ResolveWorldLinks. A streamed level
+	 * admits the entity a link is waiting for whenever the player walks to its
+	 * chunk, which may be minutes; a budget counted in frames is a deadline
+	 * that loses that race, and it did. Counting "tries that learned nothing"
+	 * instead keeps the bound doing its job - a link to an entity the level no
+	 * longer contains still expires, because a settled world stops moving this
+	 * number - without ever expiring one whose end is simply not resident yet. */
+	uint64_t GetEntityPopulationGeneration() const { return m_uiEntityPopulationGeneration; }
+
+	/* Called when chunk streaming admits a root, which is the *only* event that
+	   can give a pending link a new chance. Bullets and monsters spawning move
+	   the population too and are noise here: counting those, a link waiting for
+	   a chunk three hundred metres away burns its whole budget on a firefight
+	   somewhere else. */
+	void NoteStreamedRootAdmitted() { ++m_uiEntityPopulationGeneration; }
+
+	/* Every entity id the level file contains, across all chunks, collected
+	   while loading. It answers the one question the link retry budget could
+	   never ask: *can this end ever arrive?*
+	 *
+	 * An id that is in here is in a chunk, and a chunk arrives when the player
+	 * walks to it - which may be minutes, and no frame count can wait that long
+	 * without also refusing to give up on a link that is genuinely broken. An id
+	 * that is not in here has no entity coming, so the bound still applies to
+	 * it. Empty for a world with no chunk data, which leaves the old behaviour
+	 * exactly as it was. */
+	void SetKnownEntityIds(std::unordered_set<uint64_t>&& ids) { m_KnownEntityIds = std::move(ids); }
+	bool LevelContainsEntityId(uint64_t uiId) const { return m_KnownEntityIds.find(uiId) != m_KnownEntityIds.end(); }
+	bool HasKnownEntityIds() const { return !m_KnownEntityIds.empty(); }
 
 	/* Processes Start and Tick functions on entities, components and systems */
 	virtual void Tick(float fDeltaTime);
@@ -261,6 +296,11 @@ private:
 		   arrive in different frames, and dropping the first one is exactly the
 		   transient null the experiment patched per manager (ledger E3). */
 		uint32_t uiAttempts = 0;
+
+		/* The entity population generation the last attempt was made against.
+		   An attempt only costs a retry when this has not moved - see
+		   GetEntityPopulationGeneration. */
+		uint64_t uiLastPopulationGeneration = 0;
 	};
 
 	/* A link that *has* been made, remembered so that destroying the target can
@@ -311,6 +351,12 @@ private:
 	   it is bounded by the number of live cross-entity references - tens, in
 	   every shipped level. */
 	std::vector<EntityLinkRecord> m_vEntityLinks = {};
+
+	/* See GetEntityPopulationGeneration. */
+	uint64_t m_uiEntityPopulationGeneration = 0;
+
+	/* See SetKnownEntityIds. */
+	std::unordered_set<uint64_t> m_KnownEntityIds = {};
 
 	void DeleteEntity(Entity* pEntity);
 };

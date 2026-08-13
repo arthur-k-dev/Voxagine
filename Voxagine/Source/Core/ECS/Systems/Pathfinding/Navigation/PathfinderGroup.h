@@ -29,6 +29,12 @@ namespace pathfinding
 		virtual void Start() override;
 		virtual void Tick(float deltaTime) override;
 
+		/* Finds the world's PathfindingGrid and registers with it, if it has not
+		   already. False while there is none - an ordinary state under chunk
+		   streaming, both before the grid is admitted and after one is
+		   destroyed. See the definition. */
+		bool ResolveGrid();
+
 		virtual void updatePaths() = 0;
 		virtual void updateAgents(Pathfinder& pathfinder) {};
 		int getId() const;

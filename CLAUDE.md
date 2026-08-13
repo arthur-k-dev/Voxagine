@@ -64,11 +64,35 @@ worst frame is **150.2 -> 10.3 ms** across them - the hitch gate passes and its
 + generation, resolved on use) for the raw pointers game code holds into
 streamed content, which is four of the phase 9 play session's ten defects and
 ledger M8; then 10, the editor session, which needs Joey at the machine, deletes
-`progressive-chunk-experiment`, and owns both of the things phase 9 left open -
-**pop-in has not been judged on screen**, and `gpu_destruction_sync_stress` is
-broken *on master* (its `--frames` budget expires before R1 releases gameplay,
-so it has measured nothing since phase 4). The table in that plan is in
+`progressive-chunk-experiment`, and owns the one thing phase 9 left open -
+**pop-in has not been judged on screen**. The table in that plan is in
 execution order, not numeric order.
+
+**`gpu_destruction_sync_stress` runs again and is the widest gate in the tree**
+(phase 12). It had measured nothing since phase 4 - `--frames` is a main-loop
+iteration count and 6,000 uncapped frames go by in 1.7 s while R1 holds
+gameplay - and it now walks eight resident-window phases alternating between two
+chunk columns, **256 destruction bursts over 19 chunks and 43 models**, six
+window transitions and a real Beat1 -> Beat2 level switch, in **31 s in
+Release**. It also *checks what its name claims* for the first time: at the end
+of every phase it compares each CPU voxel against the occupancy bitmap (cached,
+~370 ms over 75.5 M) and on the last phase against the mapped words too. **With
+phase 12's republish disabled it fails at world 0 phase 1 with 64 solid-but-
+invisible voxels**, so it is a gate rather than a green light. Its own audit
+cost is excluded from the hitch measurement - the first version reported six
+370 ms "chunk transitions" that were the audit itself - and a window that moves
+mid-phase is a *wait* rather than a failure, bounded in seconds, because the
+fixture's own camera steering causes it and 600 frames of an uncapped run is a
+fifth of a second. **It found one thing immediately: the asynchronous
+`Beat1 -> Beat2` switch dies intermittently** - a segfault on one run and an
+abort on another out of about twenty, always at the switch, never once under
+`gdb`, and not in the twelve runs since - ledger M9 in the plan, open, and
+phase 13's shape (`OpenWorldAsync` enqueues onto the *old* world's job queue
+and its completion destroys that world). **The two timing gates are registered in
+Release only**: Debug cannot meet a 16.7 ms or a 250 ms frame limit with the
+validation layers on (the same transition is 10.2 ms Release, 988 ms Debug),
+and at Debug speed the level's own gameplay reaches `Game_Over_Screen` before
+the route finishes.
 
 **A window commit used to throw away every voxel written while it was
 building**, and that is the whole of the CPU/GPU disagreement Joey saw in play

@@ -4,6 +4,7 @@
 #include "Core/ECS/Entities/Camera.h"
 #include "Core/ECS/Systems/Chunk/Chunk.h"
 #include "Core/ECS/Systems/Chunk/ChunkSystem.h"
+#include "Core/ECS/Systems/Chunk/StreamingCounters.h"
 #include "Core/ECS/Systems/Physics/PhysicsSystem.h"
 #include "Core/ECS/Systems/Physics/VoxelGrid.h"
 #include "Core/ECS/World.h"
@@ -145,6 +146,9 @@ namespace
 		static constexpr uint32_t kResidentStableFrames = 30;
 		static constexpr uint32_t kDrainFrames = 120;
 		static constexpr uint32_t kStallFrameLimit = 600;
+		/* How long a phase will wait for the window it asked for before calling
+		   it wedged. Seconds, because this run is uncapped - see the wait. */
+		static constexpr double kWindowSettleTimeoutSeconds = 60.0;
 		static constexpr uint32_t kMinDestroyedChunks = 4;
 		static constexpr uint32_t kMinDestroyedModels = 8;
 		static constexpr uint32_t kMinDestroyedChunksPerPhase = 2;
@@ -429,20 +433,157 @@ namespace
 			}
 		}
 
+		/* **Does the window still say what the world says?**
+		 *
+		 * CHUNK_STREAMING_PLAN.md phase 12. This fixture was named for GPU sync
+		 * and checked residency, storage identity and hitches - never whether
+		 * the two representations of a voxel agree, which is the one thing a
+		 * route that destroys geometry across chunk boundaries and level
+		 * switches is uniquely placed to catch. A window commit publishing a
+		 * buffer built before the last burst is invisible to every other check
+		 * here: the chunks are resident, the pointers are right, no frame is
+		 * long, and the level is quietly missing the damage.
+		 *
+		 * Two forms, because they cost three orders of magnitude apart:
+		 *
+		 * - **occupancy** compares the CPU voxel against the brick grid's
+		 *   occupancy bitmap, which is ordinary cached memory: ~370 ms over
+		 *   75.5 M voxels, so it runs at the end of every phase.
+		 * - **colour** compares the CPU voxel against the mapped word, which is
+		 *   a PCIe read of VRAM - a 300 MB staged copy, seconds. Once, at the
+		 *   end of the route.
+		 *
+		 * Neither has a legitimate non-zero population any more: dynamic
+		 * renderers stopped stamping the voxel buffer (DYNAMIC_MODELS_PLAN.md
+		 * phase 3), so every voxel in the mapping came from a chunk or from a
+		 * VoxelEditBatch and both of those write the CPU voxel too.
+		 */
+		bool CheckRepresentationsAgree(VoxelGrid& grid, bool bCompareMapping, const char* pWhen)
+		{
+			RenderContext* pContext = GetPlatform().GetRenderContext();
+
+			if (pContext == nullptr)
+				return true;
+
+			const VoxelBrickGrid& bricks = pContext->GetBrickGrid();
+			const UVector3 dims = grid.GetDimensions();
+
+			/* Staged rather than read in the loop: scattered reads of ReBAR
+			   host-visible memory cost ~500 ns each, which over 75 M voxels is
+			   the difference between an audit and a hang. */
+			std::vector<uint32_t> staged;
+			const uint32_t uiWordCount = pContext->GetVoxelDataSize();
+
+			if (bCompareMapping)
+			{
+				const uint32_t* pMapped = pContext->GetVoxelData();
+
+				if (pMapped == nullptr)
+					return true;
+
+				staged.assign(pMapped, pMapped + uiWordCount);
+			}
+
+			uint64_t uiSolidAndInvisible = 0;
+			uint64_t uiDrawnAndAbsent = 0;
+			uint64_t uiColourDisagreements = 0;
+			uint32_t uiFirstX = 0, uiFirstY = 0, uiFirstZ = 0;
+			bool bHaveFirst = false;
+
+			for (uint32_t z = 0; z < dims.z; ++z)
+			for (uint32_t y = 0; y < dims.y; ++y)
+			for (uint32_t x = 0; x < dims.x; ++x)
+			{
+				const uint32_t uiID = x + y * dims.x + z * dims.x * dims.y;
+
+				if (uiID >= uiWordCount)
+					continue;
+
+				const VoxelCell cell = grid.GetCell(x, y, z);
+
+				if (!cell)
+					continue;
+
+				const uint32_t uiCPU = cell.GetColor();
+				const bool bCPUOccupied = (uiCPU >> 24) != 0;
+				const bool bWindowOccupied = bricks.IsOccupied(uiID);
+
+				if (bCPUOccupied != bWindowOccupied)
+				{
+					if (bCPUOccupied)
+						++uiSolidAndInvisible;
+					else
+						++uiDrawnAndAbsent;
+
+					if (!bHaveFirst)
+					{
+						bHaveFirst = true;
+						uiFirstX = x;
+						uiFirstY = y;
+						uiFirstZ = z;
+					}
+				}
+
+				if (bCompareMapping && uiCPU != staged[uiID])
+					++uiColourDisagreements;
+			}
+
+			/* The check itself is a second of main thread and a 300 MB PCIe read
+			   on the last phase, and the next interval measured would otherwise
+			   be that - reported as a chunk-transition hitch, which is exactly
+			   the wrong answer. Drop the timestamp so the following frame starts
+			   a fresh interval. */
+			m_bHaveFrameTimestamp = false;
+
+			if (uiSolidAndInvisible == 0 && uiDrawnAndAbsent == 0 && uiColourDisagreements == 0)
+			{
+				fprintf(stderr, "[gpu-test] representations agree %s (%u voxels%s)\n",
+				        pWhen, dims.x * dims.y * dims.z,
+				        bCompareMapping ? ", mapping included" : "");
+				return true;
+			}
+
+			Fail("representations disagree %s: %llu solid but invisible, %llu drawn but absent, "
+			     "%llu colour mismatches, first at grid (%u %u %u)",
+			     pWhen,
+			     static_cast<unsigned long long>(uiSolidAndInvisible),
+			     static_cast<unsigned long long>(uiDrawnAndAbsent),
+			     static_cast<unsigned long long>(uiColourDisagreements),
+			     uiFirstX, uiFirstY, uiFirstZ);
+
+			return false;
+		}
+
+		/* Why the last ValidateResidentWindow call declined, for the failure
+		   message. "The window changed while bursts were being issued" was true
+		   and useless: the interesting part is *which* of six conditions moved,
+		   and the answer turned out to be "a group started streaming" rather
+		   than anything about the chunks themselves. */
+		const char* m_pWindowRejection = "not asked yet";
+
 		bool ValidateResidentWindow(VoxelGrid& grid, ChunkSystem& chunks,
 		                            std::unordered_set<uint32_t>& o_resident)
 		{
 			o_resident.clear();
 			if (chunks.IsStreaming())
+			{
+				m_pWindowRejection = "a chunk update group is streaming";
 				return false;
+			}
 
 			const std::unordered_map<uint32_t, Chunk*>& allChunks = chunks.GetChunks();
 			if (allChunks.empty())
+			{
+				m_pWindowRejection = "the world has no chunks";
 				return false;
+			}
 
 			Chunk* pFirstChunk = allChunks.begin()->second;
 			if (pFirstChunk == nullptr)
+			{
+				m_pWindowRejection = "a chunk slot is null";
 				return false;
+			}
 
 			const UVector3 v3ChunkSize = pFirstChunk->GetChunkSize();
 			const UVector2 v2WorldSize = chunks.GetWorldSize();
@@ -462,7 +603,10 @@ namespace
 			const Vector3 v3ActualOffset = grid.GetWorldOffset();
 
 			if (v3ActualOffset != v3ExpectedOffset)
+			{
+				m_pWindowRejection = "the world offset is not the phase's";
 				return false;
+			}
 
 			for (uint32_t z = 0; z < 3; ++z)
 			{
@@ -474,13 +618,17 @@ namespace
 					const auto chunkIt = allChunks.find(uiChunkKey);
 
 					if (chunkIt == allChunks.end() || chunkIt->second == nullptr)
+					{
+						m_pWindowRejection = "a window chunk is missing";
 						return false;
+					}
 
 					Chunk* pChunk = chunkIt->second;
 					if (!pChunk->IsLoaded() || !pChunk->IsTargetLoaded() ||
 					    pChunk->IsLoading() || pChunk->IsUnloading() ||
 					    pChunk->GetGridTarget() != UVector2(x, z))
 					{
+						m_pWindowRejection = "a window chunk is not resident at its slot";
 						return false;
 					}
 
@@ -489,19 +637,32 @@ namespace
 					const size_t uiExpectedVoxels = static_cast<size_t>(v3ChunkSize.x) *
 					                                v3ChunkSize.y * v3ChunkSize.z;
 					if (voxels.size() != uiExpectedVoxels || owners.Size() != uiExpectedVoxels)
+					{
+						m_pWindowRejection = "a window chunk has no voxel storage";
 						return false;
+					}
 
 					/* This pointer equality proves that the VoxelGrid slot used by
 					   destruction names this exact newly loaded chunk storage. */
 					const Voxel* pGridVoxel = grid.GetVoxel(x * v3ChunkSize.x, 0, z * v3ChunkSize.z);
 					if (pGridVoxel != voxels.data())
+					{
+						m_pWindowRejection = "the grid slot does not point at the chunk's storage";
 						return false;
+					}
 
 					o_resident.insert(uiChunkKey);
 				}
 			}
 
-			return o_resident.size() == 9;
+			if (o_resident.size() != 9)
+			{
+				m_pWindowRejection = "fewer than nine chunks are resident";
+				return false;
+			}
+
+			m_pWindowRejection = "none";
+			return true;
 		}
 
 		void RequestCurrentPhase(ChunkSystem& chunks, Camera& camera)
@@ -837,6 +998,20 @@ namespace
 			        static_cast<unsigned long long>(m_uiPhaseDestroyedVoxels),
 			        m_PhaseDestroyedChunkIds.size(), m_PhaseOwnerIds.size());
 
+			/* Before the phase advances, so the window this checks is the one
+			   the bursts were issued into. The last phase pays for the mapping
+			   compare as well: by then the route has crossed six window
+			   transitions and a level switch, which is every path that can
+			   publish a buffer over a write. */
+			{
+				char sWhen[96];
+				snprintf(sWhen, sizeof(sWhen), "after world %u phase %u",
+				         m_uiWorldIndex, PhaseInWorld());
+
+				if (!CheckRepresentationsAgree(grid, m_uiPhase + 1 == kPhaseCount, sWhen))
+					return;
+			}
+
 			++m_uiPhase;
 			m_uiBurstsInPhase = 0;
 			m_uiResidentStableFrames = 0;
@@ -913,12 +1088,66 @@ namespace
 					return;
 			}
 
+			/* **The window moving mid-phase is a wait, not a failure**, and the
+			   reason is the fixture's own steering rather than the engine.
+			   RequestCurrentPhase computes SetCameraLoadOffset from the camera
+			   in Tick and ChunkSystem consumes it in FixedTick, and this map's
+			   camera follows players who walk, dash and die - so when the camera
+			   moves far enough between the two, the effective load position
+			   crosses a chunk boundary and a group starts for a window nobody
+			   asked for. It is the same mismatch DriveStreamingOnly's comment
+			   below records, and it made this route fail about one run in three
+			   with "the resident window changed", which reads like an engine
+			   defect and is not one.
+
+			   So wait for the requested window to come back and carry on where
+			   the phase left off. The bound is the same stall limit everything
+			   else here uses: a window that never settles is a real failure and
+			   still reports one, now naming which of the six conditions is
+			   holding. */
 			std::unordered_set<uint32_t> resident;
 			if (!ValidateResidentWindow(*pGrid, *pChunks, resident))
 			{
-				Fail("resident window changed while world %u phase %u was issuing bursts",
-				     m_uiWorldIndex, PhaseInWorld());
+				if (++m_uiWindowUnsettledFrames == 1)
+				{
+					m_WindowUnsettledSince = std::chrono::steady_clock::now();
+
+					fprintf(stderr,
+					        "[gpu-test] world %u phase %u paused after %u/%u bursts: %s\n",
+					        m_uiWorldIndex, PhaseInWorld(), m_uiBurstsInPhase, kBurstsPerPhase,
+					        m_pWindowRejection);
+				}
+
+				/* Wall clock, not frames. This run is --uncapped and spends
+				   thousands of iterations a second, so a frame count that sounds
+				   generous - the 600 the GPU timeline uses - is a fifth of a
+				   second, and a window transition legitimately takes longer than
+				   that. Bounding a wait in the wrong unit is how the first
+				   version of this turned a working transition into a failure. */
+				const double fWaitedSeconds = std::chrono::duration<double>(
+					std::chrono::steady_clock::now() - m_WindowUnsettledSince).count();
+
+				if (fWaitedSeconds > kWindowSettleTimeoutSeconds)
+				{
+					Fail("world %u phase %u waited %.0f s for its window and never got it: %s",
+					     m_uiWorldIndex, PhaseInWorld(), fWaitedSeconds, m_pWindowRejection);
+				}
+
 				return;
+			}
+
+			if (m_uiWindowUnsettledFrames != 0)
+			{
+				fprintf(stderr, "[gpu-test] world %u phase %u resumed after %u frames (%.2f s)\n",
+				        m_uiWorldIndex, PhaseInWorld(), m_uiWindowUnsettledFrames,
+				        std::chrono::duration<double>(
+					        std::chrono::steady_clock::now() - m_WindowUnsettledSince).count());
+				m_uiWindowUnsettledFrames = 0;
+
+				/* The interval that spans the wait is a window transition the
+				   route did not schedule; measuring it as steady destruction
+				   would report a hitch that is a chunk transition. */
+				m_bHaveFrameTimestamp = false;
 			}
 
 			if (!m_bCandidateSearchPending)
@@ -1124,6 +1353,26 @@ namespace
 			        static_cast<unsigned long long>(uiCompleted),
 			        static_cast<unsigned long long>(m_uiMaxSubmittedTimeline));
 
+			/* Reported rather than asserted, and the difference matters. This is
+			   how hard the route hit phase 12's race - voxels written while a
+			   window was being built, which the swap would have discarded - and
+			   two runs of this same fixture measured 4,952 and 224,918 of them,
+			   because it depends on how much debris happens to be landing while
+			   a worker builds. A gate on a number with that spread would be
+			   flaky; a number printed beside a passing audit says the audit was
+			   asked a real question. */
+			{
+				const StreamingCounters& counters = StreamingCounters::Get();
+
+				fprintf(stderr,
+				        "[gpu-test] window commits republished %llu voxel writes, %llu of "
+				        "which the swap would have lost\n",
+				        static_cast<unsigned long long>(
+					        counters.WindowCommitWritesReplayed.load(std::memory_order_relaxed)),
+				        static_cast<unsigned long long>(
+					        counters.WindowCommitWritesLost.load(std::memory_order_relaxed)));
+			}
+
 			m_bPassed = true;
 			m_bFinished = true;
 			Exit();
@@ -1145,6 +1394,10 @@ namespace
 		uint32_t m_uiLevelSwitches = 0;
 		uint32_t m_uiWorldIndex = 0;
 		uint32_t m_uiResidentStableFrames = 0;
+		/* Frames spent waiting for a phase's window to come back - see the
+		   wait in DriveDestruction. */
+		uint32_t m_uiWindowUnsettledFrames = 0;
+		std::chrono::steady_clock::time_point m_WindowUnsettledSince;
 		uint32_t m_uiDrainFrames = 0;
 		size_t m_uiNextChunkCursor = 0;
 		bool m_bCandidateSearchPending = false;

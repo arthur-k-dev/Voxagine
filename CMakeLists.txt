@@ -614,15 +614,45 @@ if(VOXAGINE_BUILD_ENGINE)
             add_dependencies(voxagine_gpu_destruction_stress voxagine_shaders_game)
         endif()
 
+        # **The two timing gates below are Release gates, and are registered
+        # only there.** Both measure main-thread frame intervals against hard
+        # limits - 16.7 ms for a window transition, 250 ms for one under
+        # destruction - and a Debug build with the validation layers on cannot
+        # meet either: the same Beat2 transition that peaks at 10.2 ms in
+        # Release takes 988 ms in Debug. The destruction route has a second
+        # Debug-only problem that is nothing to do with budgets: it drives the
+        # real game for minutes of wall clock, and at Debug speed the level's
+        # own gameplay reaches Game_Over_Screen before the eight-phase route
+        # finishes. Registering either in Debug produces a red lane nobody will
+        # chase, which this plan says is worse than no gate at all.
+        # gpu_world_occupancy is a count rather than a clock and stays in both.
+        if(NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
+
+        # **--frames is a main-loop iteration count, not a clock, and 6000 of
+        # them stopped being enough at chunk streaming phase 4.** A world's
+        # initial window streams now, and gameplay is held through it (R1) while
+        # the loop spins uncapped - so this fixture spent its entire budget
+        # before its first burst and reported "exited before the fixture
+        # completed (0/256 bursts)" for every phase since. It has measured
+        # nothing since then, which is what the plan recorded and phase 12
+        # repaired. The fixture exits itself when the route finishes; the
+        # TIMEOUT is the real bound, and the number here only has to be larger
+        # than any legitimate run.
         add_test(NAME gpu_destruction_sync_stress
             COMMAND voxagine_gpu_destruction_stress
-                --hidden --uncapped --size 640x360 --frames 6000
+                --hidden --uncapped --size 640x360 --frames 200000
                 --map Content/Worlds/Fishing_Village/Fishing_Village_Beat1.wld)
         set_tests_properties(gpu_destruction_sync_stress PROPERTIES
             WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/Game
-            LABELS "gpu;integration"
+            ENVIRONMENT "VOXAGINE_AUDIO_NULL_DEVICE=1"
+            LABELS "gpu;integration;streaming"
             RUN_SERIAL TRUE
-            TIMEOUT 180)
+            # The route is eight resident-window phases, 256 bursts, six window
+            # transitions and a real level switch, plus a representation audit
+            # per phase - 31 s in Release on this machine.
+            TIMEOUT 900)
+
+        endif()
 
         # **The gate that would have caught a level losing 8% of its geometry.**
         #
@@ -663,6 +693,9 @@ if(VOXAGINE_BUILD_ENGINE)
             RUN_SERIAL TRUE
             TIMEOUT 180)
 
+        # Release only, for the reason given above the destruction route.
+        if(NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
+
         # The same fixture in its VOXAGINE_GPU_STREAMING_ONLY mode: it walks the
         # player across a Beat2 chunk boundary through --ui-script and times the
         # window transition against a 16.7 ms per-frame ceiling.
@@ -693,6 +726,8 @@ if(VOXAGINE_BUILD_ENGINE)
             LABELS "gpu;integration;streaming"
             RUN_SERIAL TRUE
             TIMEOUT 180)
+
+        endif()
     endif()
 endif()
 

@@ -53,11 +53,11 @@ world switch, and the loading screen.
 | 6 — Occupancy-cell proxies + march budget (**gated**) | **NOT TAKEN** | — | Closed on phase 5's measurements, which is what the gate asked for. Every remaining frame over budget is *CPU*, and named: one `VoxelBaker` stamp of 140,640 voxels. During a slide the GPU passes read Voxel 0.24 ms, Sun Shadow 0.34, Pyramid Upload 0.82 — three orders of magnitude below the frames that break the budget. Neither proxy submission nor voxel-pass overdraw is a remaining cost, so E5 and E6 stay open and unmeasured rather than being re-derived on speculation. |
 | 7 — The save guard | DONE | `chunk-streaming-phase-7` | `JsonSerializer::SerializeWorld` refuses a world whose chunks are still streaming, with a harness check. A data-loss class rather than tidiness — see the phase 7 notes. **Renamed from "Editor integration and guards": everything needing the editor open is phase 10**, which cannot be done headless and should not sit inside a phase that can. |
 | 8 — World switch behind the loading screen | DONE except three named items | `chunk-streaming-phase-8` | K5's world-manager half. A level is initialized hidden, streamed over frames the loading screen keeps drawing, and swapped in whole: the same **~300 ms** `initialize` is paid behind the loading screen instead of in the one frame the player waits through, plus **1666–1717 ms** of streaming over **2518–3716 drawn frames**, plus a **16.8–19.0 ms** activation. Readiness folds in the far field and that is free, which closes phase 4's horizon judgement call. `join` and the auto-joined player one landed first, so menu → level is scriptable headlessly at all. **Not done and not attempted: `RenderSystem::Start`'s 258 ms, the far-field harness scenarios, E9's sprite-only *flag* (the sprite discard itself landed).** Confirmed on screen by Joey after the black-frame fix. |
-| 9 — Splitting one renderer's stamp | DONE | `chunk-streaming-phase-9` | **The hitch gate flips: peak 27.9 → 9.82 / 10.15 / 10.31 ms against 16.67, and the `WILL_FAIL` is off.** The walk turned out not to be what lost the 580 k voxels — it is resume-identical at every budget from 1 up, checked against two real models — so the fixes are the two *interactions*: `Bake` no longer clears a half-written renderer, and the bake bookkeeping is written at the start of a stamp rather than the end. Occupancy identical at four slice sizes over eight runs; coverage, sync and pyramid audits clean during streaming — **not** with combat, whatever this row said before: the `fire` token does not work and phase 11 owns it. Costs **728–779 → 910–1,071 held ticks** before gameplay starts. Left open: **Joey has not judged pop-in on screen**, and `gpu_destruction_sync_stress` is broken *on master* — see the notes. |
+| 9 — Splitting one renderer's stamp | DONE | `chunk-streaming-phase-9` | **The hitch gate flips: peak 27.9 → 9.82 / 10.15 / 10.31 ms against 16.67, and the `WILL_FAIL` is off.** The walk turned out not to be what lost the 580 k voxels — it is resume-identical at every budget from 1 up, checked against two real models — so the fixes are the two *interactions*: `Bake` no longer clears a half-written renderer, and the bake bookkeeping is written at the start of a stamp rather than the end. Occupancy identical at four slice sizes over eight runs; coverage, sync and pyramid audits clean during streaming — **not** with combat, whatever this row said before: the `fire` token does not work and phase 11 owns it. Costs **728–779 → 910–1,071 held ticks** before gameplay starts. Left open: **Joey has not judged pop-in on screen**. (`gpu_destruction_sync_stress` was broken *on master* and is repaired in phase 12 — see its notes.) |
 | 11 — `--ui-script fire`, and the first headless run that destroys a voxel | DONE | `chunk-streaming-phase-11` | **The token was never broken; the script's clock was.** It counted display frames from process start, so a level whose hold ran long spent every token before `Player::Start` had bound anything — 621 held ticks in one Release run and **2,930** in the next, same binary, same command line, which is the whole of why it read as intermittent. The clock now stops while `World::IsGameplayHeld()`. A scripted run destroys **25,062 voxels over 32 bursts** where it destroyed 0, ever; `[destruction]` is printed by every run. **Both prior diagnoses were wrong** — see the notes. The acceptance run reproduces phase 12 headlessly (228 CPU-only voxels), which is the point of doing 11 first. |
 | 12 — The CPU/GPU voxel disagreement during play | DONE | `chunk-streaming-phase-12` | **The window commit was throwing writes away.** A slide rebuilds the whole incoming window into the back buffer from the chunks' CPU voxels and then swaps, so every voxel the main thread writes while that build is in flight lands in the buffer the swap retires — the CPU keeps it, the image loses it. Destruction is what writes voxels during play, which is why it needed phase 11 to be reproducible at all. Those writes are journalled and republished inside the same commit transaction: `VOXAGINE_SYNC_AUDIT` **106–188 → 0 of 75,497,472**, on a run that destroys 23–38 k voxels, slides the window and switches world. **The first hypothesis — `VoxelBaker::Clear` erasing an unowned voxel — was wrong and its counter says so**, which is why that counter stayed. |
 | 13 — A lifetime handle for streamed content | OPEN | | Four of the ten defects the phase 9 play session found are one shape, and so is ledger M8: a raw pointer to streamed content, held across a frame, with nothing to say the target died. More guards is not the answer — two of them crashed *inside* the guard. `PlayerSlot` generalised into a handle (id + generation, resolved on use). |
-| 10 — Editor session and closing the plan | OPEN — **last** | | Needs Joey at the machine. Runs after 11–13: it deletes `progressive-chunk-experiment` and its acceptance is the whole suite green, so it cannot honestly precede work that is still landing. Also owns `gpu_destruction_sync_stress` (broken on master, see the phase 9 notes) and the pop-in judgement. |
+| 10 — Editor session and closing the plan | OPEN — **last** | | Needs Joey at the machine. Runs after 11–13: it deletes `progressive-chunk-experiment` and its acceptance is the whole suite green, so it cannot honestly precede work that is still landing. **No longer owns `gpu_destruction_sync_stress`** — phase 12 repaired it and gave it a representation audit, so `-L gpu` is three green. What is left here is the pop-in judgement. |
 
 **The order to fix, and why it is this one.** 11 first because it is small and
 because 12 cannot be *measured* without it. 12 second because it is a live
@@ -180,6 +180,22 @@ Release at phase 0).
   `EncodeVoxels`; `FindEntitiesInChunk` + `SaveAndDeleteEntities` (full RTTR
   serialization) run on the main thread first. CLAUDE.md's "Chunk loading
   stalls the frame" ledger entry is this.
+- **M9 — OPEN (found by phase 12's repair of `gpu_destruction_sync_stress`).**
+  **The asynchronous level switch dies intermittently**, in Release, under a
+  route that has been destroying geometry and sliding the window for minutes:
+  `Beat1 -> Beat2` through `World::OpenWorldAsync`, always at the switch and
+  never before it. Twice in about twenty runs - once `SIGSEGV`, once an abort -
+  and not once in the twelve runs since, six of them under `gdb`. So it is a
+  rare race that a debugger closes, and the next thing to capture is what it
+  says as it dies: run the fixture in a loop keeping each run's stderr, or
+  arrange a core dump. `gdb -ex run` is exactly the wrong tool here. It is **not** a representation defect: the audit immediately before
+  the switch agrees on all 75,497,472 voxels. The obvious shape to check first
+  is a lifetime one, which is why this is phase 13's: `OpenWorldAsync` enqueues
+  onto the *old* world's job queue and its completion destroys that world, and
+  the chunk render job captures `this` and `&group` - so the ordering of
+  `DiscardJobQueue`, the completion callbacks it then runs, and `~ChunkSystem`
+  is where to start. Reproduce with `ctest -L gpu -R gpu_destruction_sync_stress`
+  in Release, repeatedly.
 - **M1 — FIXED (phase 1).** `VoxelBrickGrid::FlushDirty` walked *both*
   buffers' dirty bits on the main thread every frame while
   `ChunkSystem::RenderChunk` wrote back-buffer bits from the worker: a data
@@ -2113,6 +2129,7 @@ it at which `ChunkSystem::IsStreaming()` is false. It passes, at the same
 2,706,535 as before.
 
 **`gpu_destruction_sync_stress` is broken and it is not this phase's doing.**
+*(Repaired in phase 12 - see its notes. What follows is what phase 9 found.)*
 It fails 0/256 bursts, 0/6 chunk switches, "application exited before the
 fixture completed" - **identically on master `c5595d3`**, built and run to check.
 Its `--frames 6000` is a main-loop iteration count and the fixture is
@@ -2494,6 +2511,80 @@ swap moves the words and the bits together and leaves the CPU behind.
 - Whole suite green in Debug and Release (checks 125, scenarios 31, perf 0
   regressions).
 
+##### The GPU destruction stress test runs again, and it is the wider gate
+
+`gpu_destruction_sync_stress` had measured nothing since phase 4 - it exits
+"before the fixture completed (0/256 bursts)" on master, because `--frames` is a
+main-loop iteration count and 6,000 uncapped frames go by in 1.7 s while R1
+holds gameplay. Phase 9 recorded that raising it got the fixture *running* but
+not passing, and left it to phase 10. It passes now, in **31 s in Release**, and
+what it walks is precisely the shape this defect needed: eight resident-window
+phases alternating between two chunk columns (out, back, out, back), 256
+destruction bursts spread across **19 world chunks and 43 model owners**, six
+window transitions and a real asynchronous level switch from Beat1 to Beat2.
+
+Three changes, and the third is the one worth having:
+
+- **`--frames 6000 -> 200000`**, the streaming gate's own trick: the fixture
+  exits itself when the route finishes and `TIMEOUT` is the real bound.
+- **`ValidateResidentWindow` says *why* it declined.** "The resident window
+  changed while bursts were being issued" was true and useless; the six
+  conditions are named now, and the answer is usually "a group is streaming".
+- **A window that moves mid-phase is now a wait rather than a failure**, and
+  the cause is the fixture's own steering: `RequestCurrentPhase` computes
+  `SetCameraLoadOffset` from the camera in `Tick` and `ChunkSystem` consumes it
+  in `FixedTick`, so when this map's follow camera moves far enough between the
+  two - a player dashing or dying - the effective load position crosses a
+  boundary and a group starts for a window nobody asked for. It failed about
+  one run in three with "the resident window changed", which reads like an
+  engine defect and is not one; it waits for the requested window and resumes
+  the phase now. (The mismatch itself is what `DriveStreamingOnly`'s comment
+  already recorded.) **The wait is bounded in seconds, not frames** - the first
+  version reused the 600-frame GPU-timeline bound, and 600 frames of an
+  `--uncapped` run is a fifth of a second, so it failed every window transition
+  it was meant to wait through.
+- **The fixture checks that the two representations agree**, which - despite
+  its name - it never did: it checked residency, storage identity and frame
+  time, all of which a window that has quietly lost the damage satisfies. At
+  the end of every phase it compares each CPU voxel against the occupancy
+  bitmap (cached memory, ~370 ms over 75.5 M voxels) and on the last phase
+  against the mapped words as well (a 300 MB PCIe read). **Its own cost is
+  excluded from the hitch measurement** - the first version reported six
+  370 ms "chunk-window transitions" that were the audit.
+
+**With the republish disabled it fails at world 0 phase 1: `64 solid but
+invisible, 0 drawn but absent, first at grid (0 1 278)`.** With it enabled all
+eight audits agree, and the run reports **4,952 (one run) to 224,918 (another)
+writes the swap would have lost** - the spread is how much debris happens to be
+landing while a window builds, and either number is the same statement: this
+route hammers the race that phase 12 fixes, and before the fix it would have
+left a level with tens of thousands of voxels that physics can see and the
+image cannot.
+
+**What it found on its first honest outing**: the asynchronous Beat1 -> Beat2
+level switch **dies intermittently** - a `SIGSEGV` on one run and an abort on
+another, both at the switch itself and never before it, in Release, out of
+about twenty runs. It has not recurred in the **twelve consecutive runs** since
+the fixture's last change, six of them under `gdb`, so it is a race that a
+debugger's slowdown closes and a rare one. It is *not* the representation
+defect - every audit up to the switch agrees, including the one immediately
+before it - and it is recorded as ledger **M9** rather than fixed here, because
+this session's phase is 12 and a lifetime defect in the world switch is phase
+13's shape exactly. **The gate is registered anyway**: an intermittent death on
+a real code path is a finding, and hiding it until it is convenient is how the
+hitch stayed unmeasured for four phases.
+
+Otherwise `-L gpu` is **three green** for the first time since phase 4 - *in
+Release*.
+The two timing gates are registered only there now, and stating why is part of
+the repair: a Debug build with the validation layers on takes **988 ms** over
+the same Beat2 transition that peaks at 10.2 ms in Release, so neither the
+16.7 ms nor the 250 ms limit is meetable, and the destruction route has a
+second Debug-only problem that is nothing to do with budgets - it drives the
+real game for minutes of wall clock, and at Debug speed the level's own
+gameplay reaches `Game_Over_Screen` before the eight phases finish.
+`gpu_world_occupancy` is a count rather than a clock and stays in both.
+
 ##### What phase 12 did not do
 
 - **The CPU voxels themselves are still read by the worker while the main
@@ -2570,11 +2661,11 @@ open in front of somebody.*
   `Validate Coverage Pyramid`, `Validate Voxel Representations`) must be correct
   against the double-buffered flush semantics phase 1 introduced - take the
   branch's `Validate(bBack)` split.
-- **Fix `gpu_destruction_sync_stress`, or retire it and say so.** It has
-  measured nothing since phase 4 and fails identically on master - see the
-  phase 9 notes for what was tried and why raising `--frames` is not the whole
-  of it. Until then `-L gpu` is two green and one red, and a red gate nobody
-  expects to pass is worse than no gate.
+- ~~**Fix `gpu_destruction_sync_stress`, or retire it and say so.**~~ **Done in
+  phase 12**: the frame budget, a legible rejection reason and a
+  representation audit per phase. It passes in 31 s in Release and fails at
+  world 0 phase 1 with the phase 12 republish disabled, so it is a gate rather
+  than a green light.
 - **Joey judges pop-in on screen.** The streaming budget constants are tuned
   against a judgement nobody has made yet, and phase 9's sliced stamping moved
   work into more frames precisely where that shows. Whether

@@ -21,6 +21,7 @@
 #include <iostream>
 #include <thread>
 #include <SDL3/SDL_messagebox.h>
+#include "Core/Platform/Rendering/RenderDocCapture.h"
 #include "Core/GameTimer.h"
 #include "ECS/WorldManager.h"
 #include "ECS/Systems/Physics/PhysicsSystem.h"
@@ -84,6 +85,14 @@ void Application::Run()
 #endif
 
 	m_JobManager.Initialize();
+
+	/* Before Platform::Initialize, and that is the whole constraint: RenderDoc
+	   hooks Vulkan through the loader, so its library has to be in the process
+	   before VKRenderContext::InitializeBackend calls volkInitialize and creates
+	   the instance. A no-op when RenderDoc is neither injected nor asked for,
+	   which is every ordinary run. See RenderDocCapture.h. */
+	RenderDocCapture::Get().Initialize();
+
 	m_Platform.Initialize();
 
 	/* A window/input platform may initialize while its renderer rejects the

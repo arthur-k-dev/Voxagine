@@ -9,6 +9,11 @@
 
 #include "Core/Platform/Input/SDL/SDLGamePad.h"
 
+#include "Core/Platform/Input/Temp/KeyboardController.h"
+#include "Core/Platform/Input/Temp/MouseController.h"
+#include "Core/Platform/Input/Temp/GamePadController.h"
+#include "Core/Platform/Input/Temp/TouchController.h"
+
 RTTR_REGISTRATION
 {
 	rttr::registration::class_<InputHandler>("InputHandler")
@@ -99,6 +104,26 @@ void InputHandler::SetPlayerHandle(int playerHandle)
 int InputHandler::GetPlayerHandle() const
 {
 	return m_iPlayerHandle;
+}
+
+bool InputHandler::HasConnectedDevice() const
+{
+	if (GetPlayerHandle() == INVALID_PLAYER_ID || m_pPlayerController == nullptr)
+		return false;
+
+	/* Any one of them is enough - the handle is a player, not a device, and a
+	   player with a pad and no keyboard is as present as one with a keyboard
+	   and no pad. Only player one is given the keyboard, mouse and touch (see
+	   InputContextNew::Initialize), so a second handle answers on its pad. */
+	const KeyboardController* pKeyboard = m_pPlayerController->GetKeyBoardController();
+	const MouseController* pMouse = m_pPlayerController->GetMouseController();
+	const GamePadController* pGamePad = m_pPlayerController->GetGamePadController();
+	const TouchController* pTouch = m_pPlayerController->GetTouchController();
+
+	return (pKeyboard != nullptr && pKeyboard->IsConnected())
+		|| (pMouse != nullptr && pMouse->IsConnected())
+		|| (pGamePad != nullptr && pGamePad->IsConnected())
+		|| (pTouch != nullptr && pTouch->IsConnected());
 }
 
 void InputHandler::VibrateGamePad(float fLeftMotor, float fRightMotor)

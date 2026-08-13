@@ -61,6 +61,11 @@ namespace
 	}
 }
 
+Application& StreamingHarness::SharedApplication()
+{
+	return TestApplication();
+}
+
 void HarnessVoxelWindow::Create(const UVector3& v3Size)
 {
 	const size_t uiWords = static_cast<size_t>(v3Size.x) * v3Size.y * v3Size.z;

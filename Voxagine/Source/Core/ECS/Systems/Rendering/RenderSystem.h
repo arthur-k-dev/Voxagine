@@ -33,6 +33,23 @@ public:
 
 	virtual void Start() override;
 
+	/* This world is going away; nothing it drew can be presented again.
+
+	   Two things follow and both are the point. Every renderer's stamp is
+	   *forgotten* rather than cleared - the same distinction a chunk unload
+	   makes (see OnComponentDestroyed): the voxel window is about to be
+	   replaced wholesale, so rewriting it a renderer at a time is thousands of
+	   passes over storage no future frame can expose. And the renderer list is
+	   emptied in one go rather than erased from the middle once per component
+	   as World::Unload destroys entities.
+
+	   bReleaseVoxelWindow is false only when the world being unloaded is *not*
+	   the one whose voxels are in the window - the loading screen at the moment
+	   its replacement is activated, whose own unload would otherwise wipe the
+	   level that was just streamed in behind it. Docs/CHUNK_STREAMING_PLAN.md
+	   phase 8. */
+	void BeginWorldUnload(bool bReleaseVoxelWindow = true);
+
 	virtual bool CanProcessComponent(Component * pComponent) override;
 	virtual void Tick(float fDeltaTime) override;
 	virtual void PostTick(float fDeltaTime) override;
@@ -214,6 +231,12 @@ private:
 	/* False until Start() has wiped and sized the voxel buffer. See
 	   OnComponentAdded. */
 	bool m_bStarted = false;
+
+	/* See BeginWorldUnload. The second is what the destructor reads, so a
+	   world unloaded without ever calling BeginWorldUnload behaves as it always
+	   did. */
+	bool m_bWorldUnloading = false;
+	bool m_bReleaseVoxelWindow = true;
 
 	bool m_bForcedUpdate = true;
 

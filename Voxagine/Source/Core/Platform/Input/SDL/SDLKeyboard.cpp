@@ -43,6 +43,7 @@ namespace
 		if (token == "confirm") return SDL_SCANCODE_RETURN;
 		if (token == "back") return SDL_SCANCODE_ESCAPE;
 		if (token == "fire") return SDL_SCANCODE_P;
+		if (token == "join") return SDL_SCANCODE_J;
 		if (token == "wait") return SDL_SCANCODE_UNKNOWN;
 
 		fprintf(stderr, "[ui] unknown script token \'%s\'\n", token.c_str());
@@ -313,6 +314,7 @@ Keyboard::State Keyboard::GetState() const
 		case SDL_SCANCODE_RETURN: state.Enter = true; break;
 		case SDL_SCANCODE_ESCAPE: state.Escape = true; break;
 		case SDL_SCANCODE_P:      state.P = true; break;
+		case SDL_SCANCODE_J:      state.J = true; break;
 		case SDL_SCANCODE_W:      state.W = true; break;
 		case SDL_SCANCODE_S:      state.S = true; break;
 		/* A token whose scancode is not listed here does nothing at all, in

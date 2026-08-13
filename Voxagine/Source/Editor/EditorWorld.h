@@ -16,7 +16,7 @@ public:
 
 	/* Setup functions */
 	virtual void Initialize() override;
-	virtual void Unload() override;
+	virtual void Unload(bool bReleaseSharedRenderState = true) override;
 
 	/* Processes the add and remove queues for entities and components */
 	virtual void PreTick() override;

@@ -463,13 +463,19 @@ void RenderContext::EnableDebugLines(bool bEnabled)
 	m_bDebugCleared = false;
 }
 
-bool RenderContext::ResizeWorldBuffer()
+bool RenderContext::ResizeWorldBuffer(World* pWorld)
 {
-	/* Called from the world load and unload paths, where the top world can be
+	/* **The world is a parameter, and it has to be.** This used to ask the world
+	   manager for the top world, which is right exactly while the world being
+	   sized is the one on screen. Since phase 8 a level is initialized *behind*
+	   the loading screen, so at RenderSystem::Start the top world is the menu -
+	   and the voxel window was sized from a sprite-only menu world's grid while
+	   the level streamed into it. The level was all there on the CPU (the voxel
+	   audit says 2.7 M active voxels) and the frame was black.
+
+	   Callers are the world load and resume paths, where the world can still be
 	   absent or half-constructed - a sprite-only menu world has no physics
 	   system at all. Every one of these was an unchecked dereference. */
-	Application* pApplication = m_pPlatform->GetApplication();
-	World* pWorld = pApplication->GetWorldManager().GetTopWorld();
 	if (pWorld == nullptr)
 		return false;
 

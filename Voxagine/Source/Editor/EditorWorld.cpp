@@ -77,9 +77,9 @@ void EditorWorld::Initialize()
 	GetRenderSystem()->Start();
 }
 
-void EditorWorld::Unload()
+void EditorWorld::Unload(bool bReleaseSharedRenderState)
 {
-	World::Unload();
+	World::Unload(bReleaseSharedRenderState);
 
 	if (HasEditorCamera())
 		delete m_pEditorCamera;

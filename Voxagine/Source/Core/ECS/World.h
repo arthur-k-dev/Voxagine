@@ -45,7 +45,14 @@ public:
 	   phase 3 - run through Tick/FixedTick, which is what makes R1's gameplay
 	   hold expressible as a check rather than only as a comment. */
 	void PreLoad(bool bCreateRenderSystem = true);
-	virtual void Unload();
+
+	/* bReleaseSharedRenderState is false for exactly one caller: the loading
+	   screen at the moment the world streamed in behind it is activated. That
+	   world already owns the voxel window and the far-field build, so the
+	   overlay leaving must not cancel or clear either - which is what an
+	   ordinary unload does, and doing it here would wipe the level that was
+	   just built. Docs/CHUNK_STREAMING_PLAN.md phase 8. */
+	virtual void Unload(bool bReleaseSharedRenderState = true);
 
 	/* Empty functions used in the future */
 	void Pause();
@@ -181,7 +188,13 @@ public:
 
 	//Loads a new world asynchronously
 	//Set replace to true if the new worlds needs to replace the current world
-	void OpenWorldAsync(const std::string& worldName, bool bReplace = true);
+	/* bWaitForInitialStreaming replaces the visible world only once the new
+	   one's first window is resident, keeping the current one on screen and
+	   ticking meanwhile - which is only correct when the current one is a
+	   loading screen. Docs/CHUNK_STREAMING_PLAN.md phase 8. Ignored when
+	   bReplace is false: a pushed world is an overlay, not a replacement. */
+	void OpenWorldAsync(const std::string& worldName, bool bReplace = true,
+	                    bool bWaitForInitialStreaming = false);
 
 	JobQueue* GetJobQueue();
 

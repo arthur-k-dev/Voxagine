@@ -107,9 +107,13 @@ static void LoadNextWorld(World* m_pNewWorld, std::string m_sWorldFilepath, bool
 		m_pNewWorld->GetRenderSystem()->SetFadeValue(1.f);
 	}
 
-	// Open the world and switch to it
+	/* bWaitForInitialStreaming. With a loading screen there is something on
+	   screen to keep drawing, so the target world is initialized and streamed
+	   behind it and swapped in whole (WorldManager::LoadWorldAfterStreaming).
+	   Without one there is nothing to cover the wait, and the old blocking load
+	   is what the caller asked for. Docs/CHUNK_STREAMING_PLAN.md phase 8. */
 	if (m_bLoadAsync || m_bUseLoadingScreen) {
-		m_pNewWorld->OpenWorldAsync(m_sWorldFilepath);
+		m_pNewWorld->OpenWorldAsync(m_sWorldFilepath, true, m_bUseLoadingScreen);
 	}
 	else {
 		m_pNewWorld->OpenWorld(m_sWorldFilepath);

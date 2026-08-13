@@ -41,6 +41,12 @@ public:
 	void SetPlayerHandle(int playerHandle);
 	int GetPlayerHandle() const;
 
+	/* Is there a physical device behind this handle right now - a connected
+	   keyboard, mouse, pad or touchscreen. Asked by anything that wants to act
+	   for a player without being told to: the main menu joins player one on its
+	   own, and a handle with nothing plugged into it must not be joined. */
+	bool HasConnectedDevice() const;
+
 	void VibrateGamePad(float fLeftMotor, float fRightMotor);
 
 private:

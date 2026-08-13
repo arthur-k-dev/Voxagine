@@ -48,7 +48,7 @@ world switch, and the loading screen.
 | 5 — Bounded stamping, per renderer | DONE | `chunk-streaming-phase-5` | Both stamps are bounded per *renderer*: `OnComponentAdded` requests instead of stamping inline, and `VoxelBaker::Bake` runs under `StreamingBudgets::VoxelBaking`. Peak transition frame **95 → 27.9 ms**. **Splitting below one renderer is phase 9** — it was built here, made the gate pass at 9.5–10.1 ms, and was reverted for silently losing 580 k voxels, so it needs its own acceptance rather than a note. |
 | 6 — Occupancy-cell proxies + march budget (**gated**) | **NOT TAKEN** | — | Closed on phase 5's measurements, which is what the gate asked for. Every remaining frame over budget is *CPU*, and named: one `VoxelBaker` stamp of 140,640 voxels. During a slide the GPU passes read Voxel 0.24 ms, Sun Shadow 0.34, Pyramid Upload 0.82 — three orders of magnitude below the frames that break the budget. Neither proxy submission nor voxel-pass overdraw is a remaining cost, so E5 and E6 stay open and unmeasured rather than being re-derived on speculation. |
 | 7 — The save guard | DONE | `chunk-streaming-phase-7` | `JsonSerializer::SerializeWorld` refuses a world whose chunks are still streaming, with a harness check. A data-loss class rather than tidiness — see the phase 7 notes. **Renamed from "Editor integration and guards": everything needing the editor open is phase 10**, which cannot be done headless and should not sit inside a phase that can. |
-| 8 — World switch behind the loading screen | OPEN | | Phase 4's world-manager half. The last user-visible stall class. |
+| 8 — World switch behind the loading screen | DONE except three named items | `chunk-streaming-phase-8` | K5's world-manager half. A level is initialized hidden, streamed over frames the loading screen keeps drawing, and swapped in whole: the same **~300 ms** `initialize` is paid behind the loading screen instead of in the one frame the player waits through, plus **1666–1717 ms** of streaming over **2518–3716 drawn frames**, plus a **16.8–19.0 ms** activation. Readiness folds in the far field and that is free, which closes phase 4's horizon judgement call. `join` and the auto-joined player one landed first, so menu → level is scriptable headlessly at all. **Not done and not attempted: `RenderSystem::Start`'s 258 ms, the far-field harness scenarios, E9's sprite-only *flag* (the sprite discard itself landed).** Confirmed on screen by Joey after the black-frame fix. |
 | 9 — Splitting one renderer's stamp | OPEN | | Flips the hitch gate. **Read phase 5's notes first — this was built and reverted.** |
 | 10 — Editor session and closing the plan | OPEN | | Needs Joey at the machine. Deletes `progressive-chunk-experiment`. |
 
@@ -1802,6 +1802,131 @@ repeatedly leaks nothing (RSS plateau recorded, model-pin refcounts return to
 rest); editor open-world timed before/after; Joey watches the flow once on
 screen - fade, music timing, first-frame HUD, **and whether the materialising
 world phase 4 left uncovered now reads as a load rather than as a glitch**.
+
+#### Phase 8 notes — what landed, and what it measured
+
+All Release, headless, quiet machine (RTX 4070 SUPER), through the *real* menu
+flow: `--map Main_Menu` and a `--ui-script` of three `confirm`s, which reaches
+Main_Menu → Level_Selection_Menu → Loadingscreen → `Fishing_Village_Beat1`.
+
+| What | Before | After |
+|---|---|---|
+| `[world-switch] initialize` for the level | **293.8 – 307.9 ms, in one visible frame** | **301.6 / 322.9 / 342.2 ms**, behind the loading screen |
+| Arriving | — | **1666 / 1684 / 1717 ms**, over **2518 – 3716 drawn frames** |
+| Activation transaction | — | **16.8 / 18.0 / 19.0 ms** |
+
+**`initialize` did not get cheaper and that is the point** - it moved. It is the
+same ~300 ms of work (258 of which is `RenderSystem::Start`'s
+`ResizeWorldBuffer`, still phase 8's unlanded item), paid on a frame where a
+loading screen is animating rather than on the one frame the player was waiting
+through.
+
+**Count frames *and* wall clock, or the number lies in the direction that
+matters.** The activation line reports both, and the first reading of the frame
+count alone said this phase had made loading seven times worse: 1400 frames
+divided by the 81 fps the `[fps]` line was reporting is seventeen seconds. It
+is not - the loading screen is a sprite-only world with a hidden world behind
+it, so its frames cost almost nothing and it runs at two to three thousand of
+them a second. **The frame count is the evidence that the artwork animated; it
+is not a clock.** Two runs disagreeing by 4x (441 against 1687 frames) were
+this machine compiling in the background, which is the other half of the same
+lesson.
+
+**The defect this phase introduced, found by Joey on screen: the level was
+black.** `RenderContext::ResizeWorldBuffer()` took no world - it asked the
+world manager for the **top** world, which is right exactly while the world
+being sized is the one on screen. It never was here: a level is initialized
+*behind* the loading screen, so at `RenderSystem::Start` the top world was the
+menu, and the resident voxel window was sized from a sprite-only menu world's
+grid while the level streamed into it. It takes a `World*` now, and both
+callers pass their own.
+
+Three things about how it was found, because the first two nearly went the
+wrong way:
+
+- **`VOXAGINE_VOXEL_AUDIT` split the problem in one run.** It reported
+  **2,706,535 active voxels** on the black frame - the level was entirely
+  there on the CPU - which took "the world did not load" off the table and left
+  only rendering.
+- **The next probe said the rendering state was identical**: fader 1.000, 464
+  proxies submitted, the same camera position and offset as a direct `--map`
+  load of the same level. Everything a frame is drawn *from* matched; what did
+  not match was what the buffer had been *sized* as, which no probe was
+  looking at.
+- **Headless capture plus two scalars is the whole test.** Mean luminance
+  **1.73 / non-black 0.026** against a direct load's **96.94 / 0.995**, and
+  **96.11 / 0.995** after the fix. No screenshot needed looking at.
+
+**Readiness is `IsInitialWindowReady() && !IsStreaming()`, and the second half
+turned out to be free.** The obvious worry is that waiting for the far field
+doubles the load, so both were measured: **832 / 848 / 882 ms** with it against
+**867 / 914 ms** without. Identical, because `FarFieldBaker` builds in 4 ms
+slices from `ChunkSystem::Tick` *alongside* the window rather than after it. So
+the strict test costs nothing and **closes phase 4's open judgement call** - the
+horizon arriving 1.4 s into gameplay is now in front of the loading screen
+instead. (Both of those were taken *before* the black-frame fix below, so they
+are on the low side in absolute terms; the comparison between them is the
+finding and it is unaffected - the same work in both.)
+
+**The pending world is the one `World` that exists and is not in
+`GetWorlds()`.** Same shape as phase 3's staged root, same defense: it leaves by
+activation, by refusal, or with `ClearWorlds`, and nothing else knows it is
+there. A second `LoadWorldAfterStreaming` is **refused**, not queued and not
+allowed to replace the world already being prepared - this is not a cancellation
+API, and cancelling would strand a half-streamed world's chunk jobs and staged
+roots.
+
+**`IWorldStreamingReadiness` (`Core/ECS/WorldStreamingReadiness.h`) is a test
+seam, not an abstraction layer** - the same warning `IVoxelWindow` carries, and
+for the same reason. `Streaming/WorldStreamingChecks.cpp` drives the whole state
+machine on `PreLoad(false)` worlds with a stub that arrives when the check says
+so: no renderer, no chunks, no clock. Four checks, and the one worth naming is
+*a pending world is not advanced once its activation is queued* - there is a
+real frame of gap between deciding and swapping, and a slice run across it
+advances a world that is about to be ticked properly instead.
+
+**A world's music belongs to the world you are looking at.**
+`AudioSystem::SetAutoPlayDeferred` gates **both** autoplay paths, and the second
+is the one that matters: chunk streaming admits roots for as long as the world
+is hidden, so `OnComponentAdded` - not `Start` - is where a hidden level's
+music would actually have come out.
+
+**The loading screen leaving must not undo what the world behind it built.**
+`World::Unload(bool bReleaseSharedRenderState)` is that distinction and it has
+exactly one caller passing false. `RenderSystem::BeginWorldUnload` is the other
+half and is a win on every path: every renderer's stamp is *forgotten* rather
+than cleared (the same distinction a chunk unload makes) and the renderer list
+is emptied once instead of erased from the middle per component.
+
+##### What phase 8 did not do
+
+Three of its four listed items are **not landed**, and none of them was
+attempted:
+
+- **`RenderSystem::Start`'s 258 ms** (`ResizeWorldBuffer` allocating the two
+  host-visible window buffers) is untouched and still the whole remainder of
+  `initialize`. It is now paid behind the loading screen rather than in a
+  visible frame, which is why it stopped being the thing to fix first - but it
+  is still 258 ms of the ~900.
+- **The far-field `IncrementalBuild` harness scenarios** inherited from phase 4
+  are still not written. Still needs a seam of its own.
+- **E9's explicit sprite-only-world flag in `Present`** is not landed.
+  `DiscardActiveWorldSprites` *is*, on every world change rather than only this
+  one - that is the crash class (a frame with no fixed tick drawing freed
+  bindless IDs), and it is the half that was actually reachable. The
+  "distinguish no-submissions-this-frame from sprite-only-world by an explicit
+  flag" half was not needed by anything observed here and is unlanded.
+
+Also not done: the two-level repeat leak run (RSS plateau, model-pin refcounts)
+and the editor open-world timing.
+
+##### Confirmed on screen by Joey
+
+The whole menu → level flow, after the black-frame fix: fade, music timing at
+activation and the first frame of the level all read correctly. That was the
+phase's last acceptance item and the one nothing headless can answer - the
+black frame itself is the argument, since every automated gate in this plan was
+green while the level was rendering nothing.
 
 ### Phase 9 — Splitting one renderer's stamp
 

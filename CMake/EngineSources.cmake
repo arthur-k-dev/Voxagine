@@ -70,6 +70,7 @@ set(VOXAGINE_ENGINE_SOURCES
     ${VOXAGINE_SOURCE_DIR}/Core/ECS/Systems/ScriptSystem.cpp
     ${VOXAGINE_SOURCE_DIR}/Core/ECS/World.cpp
     ${VOXAGINE_SOURCE_DIR}/Core/ECS/WorldManager.cpp
+    ${VOXAGINE_SOURCE_DIR}/Core/ECS/WorldStreamingReadiness.cpp
 
     # Both of these shipped as a header plus a Windows .lib, so there was
     # nothing to link against. TeenyPath is reimplemented on std::filesystem

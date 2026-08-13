@@ -26,6 +26,19 @@ public:
 
 	bool IsPlaying(void* pChannel);
 
+	/* A world brought up behind the loading screen is initialized, ticked and
+	   streamed while something else is on screen, and its music must not start
+	   until it is the world you are looking at. Set before World::Initialize;
+	   Activate is the other half and belongs to the activation transaction
+	   (WorldManager::UpdateStreamingWorld). Docs/CHUNK_STREAMING_PLAN.md phase 8.
+
+	   It gates both autoplay paths, and the second one is the one that is easy
+	   to miss: chunk streaming admits roots for as long as the world exists, so
+	   OnComponentAdded keeps arriving the whole time it is hidden. */
+	void SetAutoPlayDeferred(bool bDeferred) { m_bAutoPlayDeferred = bDeferred; }
+	bool IsAutoPlayDeferred() const { return m_bAutoPlayDeferred; }
+	void ActivateDeferredAutoPlay();
+
 protected:
 	void OnWorldPaused(World* pWorld);
 	void OnWorldResumed(World* pWorld);
@@ -69,4 +82,9 @@ protected:
 
 	// Sources added before Start must not autoplay; Start's own pass does it.
 	bool m_bStarted = false;
+
+	// See SetAutoPlayDeferred.
+	bool m_bAutoPlayDeferred = false;
+
+	void StartAutoPlaySources();
 };

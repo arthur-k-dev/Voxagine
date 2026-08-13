@@ -128,6 +128,9 @@ public:
 	 *   back                escape / pause
 	 *   wait                do nothing this slot, for a world load to settle
 	 *   fire                the player's weapon
+	 *   join                press-to-join on the main menu, which is the only
+	 *                       way a script reaches a level from the menus at all
+	 *                       - see StartToJoinPlayerComponent::Awake
 	 *   forward-on/-off     hold/release walk forward, for a window slide
 	 *   backward-on/-off    hold/release walk back, which is what makes a chunk
 	 *                       unload and then reload

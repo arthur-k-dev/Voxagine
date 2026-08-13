@@ -160,7 +160,7 @@ void World::PreLoad(bool bCreateRenderSystem)
 		SetRenderSystem(new RenderSystem(this));
 }
 
-void World::Unload()
+void World::Unload(bool bReleaseSharedRenderState)
 {
 	OPTICK_EVENT();
 	m_pApplication->GetJobManager().DiscardJobQueue(m_JobQueueHandle);
@@ -169,8 +169,17 @@ void World::Unload()
 	   every model the level names, so it has to be abandoned before either goes
 	   away. Releasing the pins is the half that would otherwise be silent: they
 	   would keep the whole level's models loaded for the rest of the session. */
-	if (RenderContext* pRenderContext = GetRenderContext())
-		pRenderContext->CancelFarFieldBuild();
+	if (bReleaseSharedRenderState)
+	{
+		if (RenderContext* pRenderContext = GetRenderContext())
+			pRenderContext->CancelFarFieldBuild();
+	}
+
+	/* Before any entity is destroyed, so that the renderer list is emptied once
+	   instead of erased from the middle per component, and so that no stamp is
+	   replayed against a window that is about to be replaced. */
+	if (m_pRenderSystem != nullptr)
+		m_pRenderSystem->BeginWorldUnload(bReleaseSharedRenderState);
 
 	for (Entity* pEntity : m_Entities)
 	{
@@ -661,7 +670,8 @@ void World::OpenWorld(const std::string& worldName, bool bReplace /* = true */)
 	delete pNewWorld;
 }
 
-void World::OpenWorldAsync(const std::string& worldName, bool bReplace /*= true*/)
+void World::OpenWorldAsync(const std::string& worldName, bool bReplace /*= true*/,
+                           bool bWaitForInitialStreaming /*= false*/)
 {
 	JobQueue* pJobQueue = GetJobQueue();
 	if (!pJobQueue) return;
@@ -695,12 +705,14 @@ void World::OpenWorldAsync(const std::string& worldName, bool bReplace /*= true*
 
 		return pNewWorld;
 
-	}, [this, bReplace](World* pWorld)
+	}, [this, bReplace, bWaitForInitialStreaming](World* pWorld)
 	{
 		if (pWorld == nullptr)
 			return;
 
-		if (bReplace)
+		if (bReplace && bWaitForInitialStreaming)
+			m_pApplication->GetWorldManager().LoadWorldAfterStreaming(pWorld);
+		else if (bReplace)
 			m_pApplication->GetWorldManager().LoadWorld(pWorld);
 		else
 		{

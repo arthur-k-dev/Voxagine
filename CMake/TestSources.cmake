@@ -75,6 +75,7 @@ set(VOXAGINE_TEST_SOURCES
     ${VOXAGINE_TEST_DIR}/Streaming/ChunkReloadChecks.cpp
     ${VOXAGINE_TEST_DIR}/Streaming/ChunkUnloadChecks.cpp
     ${VOXAGINE_TEST_DIR}/Streaming/EntityStreamingChecks.cpp
+    ${VOXAGINE_TEST_DIR}/Streaming/WorldStreamingChecks.cpp
     ${VOXAGINE_TEST_DIR}/Streaming/StreamingPerf.cpp
 
     # Connectivity: which geometry is still holding itself up.

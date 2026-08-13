@@ -90,27 +90,40 @@ RenderSystem::RenderSystem(World* pWorld) :
 
 RenderSystem::~RenderSystem()
 {
-	for (VoxRenderer* pRenderer : m_VoxRenderers)
-	{
-		/* Remove old voxels if array is valid */
-		if (pRenderer->m_BakeData.Positions)
-		{
-			delete[] pRenderer->m_BakeData.Positions;
-			pRenderer->m_BakeData.Positions = nullptr;
-		}
-	}
+	/* Idempotent, and normally already done by World::Unload - this is the
+	   path for a RenderSystem destroyed without one (the editor, and the
+	   harness). ForgetChunkStamp frees BakeData::Positions, which is what this
+	   loop used to do by hand. */
+	BeginWorldUnload(m_bReleaseVoxelWindow);
 
 	m_pRenderContext->SetFadeValue(1.f);
 
-	/* Clear the current world's voxels */
-	ClearVoxels();
+	/* Clear the current world's voxels - unless this world is not the one whose
+	   voxels are in the window. See BeginWorldUnload. */
+	if (m_bReleaseVoxelWindow)
+		ClearVoxels();
 
 	m_pWorld->Resumed -= this;
 }
 
+void RenderSystem::BeginWorldUnload(bool bReleaseVoxelWindow)
+{
+	m_bReleaseVoxelWindow = bReleaseVoxelWindow;
+
+	if (m_bWorldUnloading)
+		return;
+
+	m_bWorldUnloading = true;
+
+	for (VoxRenderer* pRenderer : m_VoxRenderers)
+		m_VoxelBaker.ForgetChunkStamp(pRenderer);
+
+	m_VoxRenderers.clear();
+}
+
 void RenderSystem::Start()
 {
-	if (!m_pRenderContext->ResizeWorldBuffer())
+	if (!m_pRenderContext->ResizeWorldBuffer(m_pWorld))
 		ClearVoxels();
 
 	/* Only from here on is a stamp worth making: everything above wipes the
@@ -728,7 +741,7 @@ void RenderSystem::OnWorldResumed(World* pWorld)
 {
 	/* Clear voxel world, make planes and force update */
 
-	if (!m_pRenderContext->ResizeWorldBuffer())
+	if (!m_pRenderContext->ResizeWorldBuffer(m_pWorld))
 		ClearVoxels();
 
 	if (!m_pWorld->GetApplication()->IsInEditor())

@@ -328,6 +328,20 @@ void Application::Run()
 				activeWorld->PostTick(fElapsed);
 			}
 
+			/* A world being brought up behind the loading screen advances here,
+			   with the same fixed-step count the visible world was ticked with,
+			   and only its ChunkSystem and RenderSystem move. It is deliberately
+			   after the active world's ticks and before its Render: the pending
+			   world's stamps and the visible world's are both budgeted, and this
+			   order spends the pending one's budget on a frame that has already
+			   done everything it owes the player.
+			   Docs/CHUNK_STREAMING_PLAN.md phase 8. */
+			{
+				StageTimer stage("CPU Frame Streaming World");
+				m_WorldManager.UpdateStreamingWorld(
+					*m_Platform.m_pFixedGameTimer, bFixedStep ? 1u : 0u);
+			}
+
 			Camera* pCamera = nullptr;
 			if (activeWorld) {
 				pCamera = activeWorld->GetMainCamera();

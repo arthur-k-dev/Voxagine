@@ -282,7 +282,12 @@ public:
 	   by the black bar; identity when nothing is locked. */
 	Vector2 WindowToRenderNormalized(const Vector2& v2WindowPoint) const;
 
-	bool ResizeWorldBuffer();
+	/* Sizes the resident voxel window to a world's grid. **Pass the world being
+	   sized, not the visible one** - since CHUNK_STREAMING_PLAN.md phase 8 they
+	   are different things while a level comes up behind the loading screen, and
+	   getting it from the world manager put a menu world's dimensions on a level.
+	   See the definition. */
+	bool ResizeWorldBuffer(World* pWorld);
 	inline bool ModifyVoxel(uint32_t uiID, uint32_t uiColor, bool bOverwrite = true)
 	{
 		/* The callers derive this ID from float world positions, so a bad

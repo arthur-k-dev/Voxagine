@@ -29,21 +29,41 @@ void AudioSystem::Start()
 {
 	m_bStarted = true;
 
-	if (!m_pWorld->GetApplication()->IsInEditor())
-	{
-		for (auto& it : m_AudioSources)
-		{
-			if (it.first->m_bAutoPlay)
-			{
-				if (it.first->IsBGM())
-				{
-					it.first->SetAsBGM(0.f);
-					continue;
-				}
+	if (!m_bAutoPlayDeferred)
+		StartAutoPlaySources();
+}
 
-				it.first->Play();
+void AudioSystem::ActivateDeferredAutoPlay()
+{
+	if (!m_bAutoPlayDeferred)
+		return;
+
+	m_bAutoPlayDeferred = false;
+
+	/* The same pass Start would have made, over the sources this world has
+	   *now* - which includes everything chunk streaming admitted while it was
+	   hidden, and is the reason this is one pass over the map rather than a
+	   replay of what was skipped. */
+	StartAutoPlaySources();
+}
+
+void AudioSystem::StartAutoPlaySources()
+{
+	if (m_pWorld->GetApplication()->IsInEditor())
+		return;
+
+	for (auto& it : m_AudioSources)
+	{
+		if (it.first->m_bAutoPlay)
+		{
+			if (it.first->IsBGM())
+			{
+				it.first->SetAsBGM(0.f);
 				continue;
 			}
+
+			it.first->Play();
+			continue;
 		}
 	}
 }
@@ -494,8 +514,12 @@ void AudioSystem::OnComponentAdded(Component* pComponent)
 		/* Only once Start has run. A source added while the world is still
 		   loading would otherwise start playing there and be started a second
 		   time by Start's own pass over m_AudioSources - two channels for one
-		   effect, and a BGM crossfaded against itself. */
-		if (!bIsEditor && m_bStarted)
+		   effect, and a BGM crossfaded against itself.
+
+		   And not at all while autoplay is deferred: a world behind the loading
+		   screen keeps admitting roots for as long as it is hidden, so this is
+		   the path its music would actually come out of. */
+		if (!bIsEditor && m_bStarted && !m_bAutoPlayDeferred)
 		{
 			if (pSource->IsBGM() && pSource->m_bAutoPlay)
 				pSource->SetAsBGM(0.0f);

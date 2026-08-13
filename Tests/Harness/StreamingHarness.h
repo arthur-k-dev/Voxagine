@@ -128,6 +128,13 @@ public:
 	~StreamingHarness();
 
 	World& GetWorld() { return *m_pWorld; }
+
+	/* The one Application in the process. Exposed for checks about things that
+	   live on it rather than on a world - WorldManager's pending-world state
+	   machine is the first (CHUNK_STREAMING_PLAN.md phase 8). A check that uses
+	   it owns whatever it puts in the world manager: the harness's own world is
+	   deliberately not registered there. */
+	static Application& SharedApplication();
 	ChunkSystem& Chunks();
 	VoxelGrid& Grid();
 	Camera& MainCamera();

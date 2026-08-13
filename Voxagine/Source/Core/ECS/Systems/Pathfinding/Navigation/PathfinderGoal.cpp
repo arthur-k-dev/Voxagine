@@ -18,22 +18,51 @@ namespace pathfinding
 	PathfinderGoal::PathfinderGoal(Entity * pOwner) :
 		Component(pOwner),
 		m_group(nullptr),
+		m_pRegisteredGroup(nullptr),
 		m_bProjectPosition(true),
 		m_fPotential(0)
 	{}
 
 	PathfinderGoal::~PathfinderGoal()
 	{
-		if (m_group != nullptr)
-			m_group->removeGoal(*this);
+		if (m_pRegisteredGroup != nullptr)
+			m_pRegisteredGroup->removeGoal(*this);
+	}
+
+	void PathfinderGoal::SetGroup(ContinuumCrowdsGroup* pGroup)
+	{
+		m_group = pGroup;
+		SyncGroupRegistration();
+	}
+
+	void PathfinderGoal::SyncGroupRegistration()
+	{
+		if (m_pRegisteredGroup == m_group)
+			return;
+
+		if (m_pRegisteredGroup != nullptr)
+			m_pRegisteredGroup->removeGoal(*this);
+
+		m_pRegisteredGroup = m_group;
+
+		if (m_pRegisteredGroup != nullptr)
+			m_pRegisteredGroup->addGoal(*this);
+	}
+
+	void PathfinderGoal::ForgetGroup(const PathfinderGroup* pGroup)
+	{
+		if (m_pRegisteredGroup == pGroup)
+			m_pRegisteredGroup = nullptr;
+
+		if (m_group == pGroup)
+			m_group = nullptr;
 	}
 
 	void PathfinderGoal::Start()
 	{
 		Component::Start();
 
-		if (m_group != nullptr)
-			m_group->addGoal(*this);
+		SyncGroupRegistration();
 	}
 
 	IVector3 PathfinderGoal::getGoalWorldPos() const

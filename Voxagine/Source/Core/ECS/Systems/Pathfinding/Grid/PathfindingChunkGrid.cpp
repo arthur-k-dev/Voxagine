@@ -73,12 +73,17 @@ namespace pathfinding
 				if (entity == this)
 					continue;
 
+				/* Only where the link names *this* grid. Nulling it
+				   unconditionally is the shape that stranded agents in
+				   ~PathfinderGroup - see the comment there - and while there is
+				   normally one grid, "normally one" is not a reason to write
+				   the version that breaks when there are two. */
 				PathfinderGroup* pathfinderGroup = dynamic_cast<PathfinderGroup*>(entity);
-				if (pathfinderGroup != nullptr)
+				if (pathfinderGroup != nullptr && pathfinderGroup->m_pGrid == this)
 					pathfinderGroup->m_pGrid = nullptr;
 
 				PathfindingObstacle* pathfindingObstacle = dynamic_cast<PathfindingObstacle*>(entity->GetComponent<PathfindingObstacle>());
-				if (pathfindingObstacle != nullptr)
+				if (pathfindingObstacle != nullptr && pathfindingObstacle->m_pGrid == this)
 					pathfindingObstacle->m_pGrid = nullptr;
 			}
 		}
@@ -135,23 +140,47 @@ namespace pathfinding
 #endif
 
 		JobQueue* pJobQueue = GetWorld()->GetJobQueue();
-		if (pJobQueue)
-		{
-			// Update agents
-			pJobQueue->Enqueue<int*>([this]()
-			{
-				for (auto& group : m_groups)
-				{
-					for (auto& agent : group->m_agents)
-						group->updateAgents(*agent);
-				}
-				return nullptr;
-			}, [this](int*) {});
-		}
 
 		// Rebuild paths
 		if (m_iGridLocks.load() == 0)
 		{
+			/* Zero locks means every job body has finished - the completion
+			 * callback that decrements runs on this thread, from
+			 * JobManager::ProcessFinishedJobs, after the body - so this is the
+			 * one point in the frame at which the things jobs read may be
+			 * mutated. Groups are added and removed here, and the snapshots the
+			 * jobs read instead of the live agent, goal and obstacle lists are
+			 * rebuilt here, before anything below is enqueued. */
+			addAndRemoveGroups();
+			syncJobSnapshots();
+
+			if (pJobQueue)
+			{
+				/* Update agents.
+				 *
+				 * This used to be enqueued every Tick, outside this gate and
+				 * without taking a lock, which is two defects in one job. It
+				 * could overlap addAndRemoveGroups' writes to m_groups and any
+				 * number of copies of itself - and it dereferenced every
+				 * Pathfinder* in every group while the main thread was free to
+				 * destroy the entities those components belong to. A chunk
+				 * unloading around a wave of spawned enemies is exactly that,
+				 * and it is the reported segfault. It reads the snapshot now. */
+				m_iGridLocks.fetch_add(1);
+				pJobQueue->Enqueue<int*>([this]()
+				{
+					for (PathfinderGroup* pGroup : m_groups)
+					{
+						if (pGroup == nullptr)
+							continue;
+
+						for (AgentState& agent : pGroup->m_agentStates)
+							pGroup->updateAgents(agent);
+					}
+					return nullptr;
+				}, [this](int*) { m_iGridLocks.fetch_sub(1); });
+			}
+
 			// Select job
 			if (m_currentGridJob == REBUILD_GRID && m_fTimer > m_fRebuildInterval)
 			{
@@ -197,18 +226,15 @@ namespace pathfinding
 					m_iGridLocks.fetch_add(1);
 					pJobQueue->Enqueue<int*>([this]()
 					{
-						for (auto& group : m_groups)
+						for (PathfinderGroup* pGroup : m_groups)
 						{
-							for (auto& agent : group->m_agents)
+							if (pGroup == nullptr)
+								continue;
+
+							for (const AgentState& agent : pGroup->m_agentStates)
 							{
-								if (agent != nullptr)
-								{
-									Vector2 velocity = agent->getVelocity();
-									//assert(!std::isnan(velocity.x));
-									//assert(!std::isnan(velocity.y));
-									if (!std::isnan(velocity.x) && !std::isnan(velocity.y))
-										splatEnity(agent->getPosition(), agent->getHalfBoxSize(), agent->getVelocity());
-								}
+								if (!std::isnan(agent.m_velocity.x) && !std::isnan(agent.m_velocity.y))
+									splatEnity(agent.m_position, agent.m_halfBoxSize, agent.m_velocity);
 							}
 						}
 						buildDiscomfortField();
@@ -218,10 +244,13 @@ namespace pathfinding
 				}
 			} else if (m_currentGridJob == BUILD_GROUP_FIELDS)
 			{
-				// Process groups
-				addAndRemoveGroups();
-
-				/* One job for all the groups, not one job each, and the
+				/* addAndRemoveGroups used to be called here. It is at the top of
+				 * this block now, because the agents job below it also walks
+				 * m_groups and is enqueued every slot rather than every fourth -
+				 * so the mutation has to happen before anything in the slot is
+				 * enqueued, not in the middle of the rotation.
+				 *
+				 * One job for all the groups, not one job each, and the
 				 * capture is by value.
 				 *
 				 * Two defects in four lines. `[this, &group]` captured a
@@ -257,15 +286,22 @@ namespace pathfinding
 		}
 	}
 
+	/* Both queues carry the group's id alongside the pointer, because both are
+	 * drained a frame or more after they are filled and the id is what the drain
+	 * needs. removeGroup in particular is called from ~PathfinderGroup, so by
+	 * the time addAndRemoveGroups ran, group->getId() was a read of a destroyed
+	 * object - and the value it returns decides which node properties get
+	 * erased. The pointer that remains is compared against m_groups and never
+	 * dereferenced. */
 	void ChunkGrid::addGroup(PathfinderGroup & group)
 	{
 		// Add group
-		m_groupsToAdd.push_back(&group);
+		m_groupsToAdd.push_back({ &group, group.getId() });
 	}
 
 	void ChunkGrid::removeGroup(PathfinderGroup & group)
 	{
-		m_groupsToRemove.push_back(&group);
+		m_groupsToRemove.push_back({ &group, group.getId() });
 	}
 
 	void ChunkGrid::addObstacle(PathfindingObstacle & obstacle)
@@ -316,36 +352,67 @@ namespace pathfinding
 	void ChunkGrid::addAndRemoveGroups()
 	{
 		// Add new groups
-		for (auto& group : m_groupsToAdd)
+		for (const auto& group : m_groupsToAdd)
 		{
 			// For each node add group
 			for (auto& chunk : m_grid)
 			{
 				for (auto& node : chunk.m_nodes)
-					node.m_groupProperties[group->getId()] = GroupNode();
+					node.m_groupProperties[group.second] = GroupNode();
 			}
 
 			// Add group
-			m_groups.push_back(group);
+			m_groups.push_back(group.first);
 		}
 		m_groupsToAdd.clear();
 
 		// Remove old groups
-		for (auto& group : m_groupsToRemove)
+		for (const auto& group : m_groupsToRemove)
 		{
 			// For each node remove group
 			for (auto& chunk : m_grid)
 			{
 				for (auto& node : chunk.m_nodes)
-					node.m_groupProperties.erase(group->getId());
+					node.m_groupProperties.erase(group.second);
 			}
 
 			// Remove group
-			m_groups.erase(std::remove_if(m_groups.begin(), m_groups.end(), [&](const PathfinderGroup* other) {
-				return other->getId() == group->getId();
-			}), m_groups.end());
+			m_groups.erase(std::remove(m_groups.begin(), m_groups.end(), group.first), m_groups.end());
 		}
 		m_groupsToRemove.clear();
+	}
+
+	/* Rebuilds everything the jobs read that would otherwise be a raw pointer
+	 * into an entity.
+	 *
+	 * Only ChunkGrid::Tick calls this, and only while m_iGridLocks is zero. That
+	 * matters twice over: a snapshot rebuilt while a job walks it is the same
+	 * iterator-invalidation crash it exists to remove, one level down. */
+	void ChunkGrid::syncJobSnapshots()
+	{
+		for (PathfinderGroup* pGroup : m_groups)
+		{
+			if (pGroup != nullptr)
+				pGroup->syncJobSnapshots();
+		}
+
+		m_obstacleStates.clear();
+		m_obstacleStates.reserve(m_obstacles.size());
+		for (PathfindingObstacle* pObstacle : m_obstacles)
+		{
+			if (pObstacle == nullptr || pObstacle->GetOwner() == nullptr)
+				continue;
+
+			Transform* pTransform = pObstacle->GetTransform();
+			if (pTransform == nullptr)
+				continue;
+
+			ObstacleState state;
+			state.m_position = pTransform->GetPosition();
+			state.m_halfBoxSize = pObstacle->m_halfBoxSize;
+			state.m_fDiscomfort = pObstacle->m_fDiscomfort;
+			m_obstacleStates.push_back(state);
+		}
 	}
 
 	void ChunkGrid::rebuildGrid(const IVector2& gridCenter)
@@ -385,10 +452,11 @@ namespace pathfinding
 
 	void ChunkGrid::buildDiscomfortField()
 	{
-		for (auto& obstacle : m_obstacles)
+		// The snapshot, not m_obstacles - see syncJobSnapshots. This runs in a job.
+		for (const ObstacleState& obstacle : m_obstacleStates)
 		{
-			Vector3 position = obstacle->GetTransform()->GetPosition();
-			IVector3 halfBoxSize = IVector3(glm::ceil(obstacle->m_halfBoxSize / (float)Chunk::g_NODESIZE * 0.5f));
+			Vector3 position = obstacle.m_position;
+			IVector3 halfBoxSize = IVector3(glm::ceil(obstacle.m_halfBoxSize / (float)Chunk::g_NODESIZE * 0.5f));
 
 			IVector2 minTilePos = Chunk::getChunkPos(glm::floor(position));
 			IVector2 maxTilePos = Chunk::getChunkPos(glm::ceil(position));
@@ -433,7 +501,7 @@ namespace pathfinding
 						if (nodeYPos >= minYPos && nodeYPos <= maxYPos)
 						{
 							Node& node = chunk->m_nodes[nodeIdx.second];
-							node.m_fDiscomfort = obstacle->m_fDiscomfort;
+							node.m_fDiscomfort = obstacle.m_fDiscomfort;
 						}
 					}
 				}

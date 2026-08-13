@@ -12,6 +12,18 @@ namespace pathfinding
 	struct Node;
 	class ContinuumCrowdsGroup;
 	class PathfindingObstacle;
+
+	/* A value copy of one obstacle, taken on the main thread. Same reason as
+	   PathfinderGroup::AgentState, and the same hazard: a PathfindingObstacle is
+	   a component, buildDiscomfortField runs on a worker thread, and a chunk
+	   unload destroys the entity it belongs to. */
+	struct ObstacleState
+	{
+		Vector3 m_position = Vector3(0.f);
+		Vector3 m_halfBoxSize = Vector3(0.f);
+		float m_fDiscomfort = 0.f;
+	};
+
 	class ChunkGrid : public Entity
 	{
 	public:
@@ -64,13 +76,15 @@ namespace pathfinding
 		bool m_rebuildGrid;
 		std::vector<PathfinderGroup*> m_groups;
 		std::vector<PathfindingObstacle*> m_obstacles;
+		std::vector<ObstacleState> m_obstacleStates;
 		std::vector<std::pair<int, ChunkConnections>> m_chunksNeedingConnecting;
 
 	private:
 		IVector2 m_gridCenter;
 		IVector2 m_gridCenterTemp;
-		std::vector<PathfinderGroup*> m_groupsToAdd;
-		std::vector<PathfinderGroup*> m_groupsToRemove;
+		// (group, its id). See addGroup for why the id is carried separately.
+		std::vector<std::pair<PathfinderGroup*, int>> m_groupsToAdd;
+		std::vector<std::pair<PathfinderGroup*, int>> m_groupsToRemove;
 		float m_fTimer = 0;
 		float m_fRebuildInterval = 0.f;
 		int m_iRebuildCount = 0;
@@ -100,6 +114,11 @@ namespace pathfinding
 
 	private:
 		void addAndRemoveGroups();
+
+		/* Rebuilds every snapshot the jobs read, from the live lists. Main
+		   thread, and only while m_iGridLocks is zero. See the definition. */
+		void syncJobSnapshots();
+
 		void rebuildGrid(const IVector2& gridCenter);
 
 		// Calculate shared fields

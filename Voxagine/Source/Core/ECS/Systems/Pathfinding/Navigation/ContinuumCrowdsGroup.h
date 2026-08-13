@@ -35,7 +35,7 @@ namespace pathfinding
 		void Awake() override;
 		void Start() override;
 		void updatePaths() override;
-		void updateAgents(Pathfinder& pathfinder) override;
+		void updateAgents(AgentState& agent) override;
 
 		// Get the desired velocity and height given an agent.
 		using PathfinderGroup::getDesiredVeclocityAndHeight;
@@ -57,7 +57,7 @@ namespace pathfinding
 		CandidateNode popCandidateFromHeap();
 
 		// Calculte group properties
-		GroupNode* getGoalNode(const PathfinderGoal& goal);
+		GroupNode* getGoalNode(const GoalState& goal);
 		float calculateSpeed(Node& fromNode, const Node& toNode, const NodeConnection& connection, Node::Directions direction);
 		float calculateCost(Node& fromNode, const Node& toNode, const NodeConnection& connection, Node::Directions direction);
 		CandidateNode getCandidateNode(const Node& fromNode, Node& toNode);

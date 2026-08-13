@@ -42,26 +42,60 @@ namespace pathfinding
 		m_bClampVelocity(true),
 		m_flockVelocityX(0),
 		m_flockVelocityY(0),
+		m_pRegisteredGroup(nullptr),
+		m_position(0.f),
+		m_velocity(0.f),
+		m_halfBoxSize(0.f),
 		m_bIsOnGrid(false),
 		m_desiredVelocity(0)
 	{}
 
 	Pathfinder::~Pathfinder()
 	{
-		if (m_group != nullptr)
-			m_group->removeAgent(*this);
+		/* The group it is registered with, never m_group - see the member. */
+		if (m_pRegisteredGroup != nullptr)
+			m_pRegisteredGroup->removeAgent(*this);
+	}
+
+	void Pathfinder::SetGroup(ContinuumCrowdsGroup* pGroup)
+	{
+		m_group = pGroup;
+		SyncGroupRegistration();
+	}
+
+	void Pathfinder::SyncGroupRegistration()
+	{
+		if (m_pRegisteredGroup == m_group)
+			return;
+
+		if (m_pRegisteredGroup != nullptr)
+			m_pRegisteredGroup->removeAgent(*this);
+
+		m_pRegisteredGroup = m_group;
+
+		if (m_pRegisteredGroup != nullptr)
+			m_pRegisteredGroup->addAgent(*this);
+	}
+
+	void Pathfinder::ForgetGroup(const PathfinderGroup* pGroup)
+	{
+		/* No removeAgent: the group is mid-destruction and its m_agents is
+		   about to go with it. */
+		if (m_pRegisteredGroup == pGroup)
+			m_pRegisteredGroup = nullptr;
+
+		if (m_group == pGroup)
+			m_group = nullptr;
 	}
 
 	void Pathfinder::Start()
 	{
 		BehaviorScript::Start();
 
-		if (m_group != nullptr)
-		{
-			m_group->addAgent(*this);
-			if (m_group->IsInitialized())
-				updatePositionVelocitySize();
-		}
+		SyncGroupRegistration();
+
+		if (m_group != nullptr && m_group->IsInitialized())
+			updatePositionVelocitySize();
 	}
 
 	void Pathfinder::FixedTick(const GameTimer& time)

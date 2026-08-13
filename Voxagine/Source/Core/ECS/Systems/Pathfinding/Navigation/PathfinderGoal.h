@@ -11,10 +11,18 @@ namespace pathfinding
 		bool m_bProjectPosition;
 		float m_fPotential;
 
+	private:
+		// See Pathfinder::m_pRegisteredGroup; a goal has the same asymmetry.
+		pathfinding::ContinuumCrowdsGroup* m_pRegisteredGroup;
+
 	public:
 		PathfinderGoal(Entity* pOwner);
 		~PathfinderGoal();
 		void Start() override;
+
+		void SetGroup(ContinuumCrowdsGroup* pGroup);
+		void SyncGroupRegistration();
+		void ForgetGroup(const PathfinderGroup* pGroup);
 
 		IVector3 getGoalWorldPos() const;
 

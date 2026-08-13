@@ -98,11 +98,11 @@ namespace pathfinding
 		std::make_heap(std::begin(m_candidatesHeap), std::end(m_candidatesHeap), std::greater<CandidateNode>());
 
 		// Mark all goal nodes
-		for (auto& goal : m_goals)
+		for (const GoalState& goal : m_goalStates)
 		{
-			GroupNode* node = getGoalNode(*goal);
+			GroupNode* node = getGoalNode(goal);
 			if (node != nullptr)
-				node->setGoal(true, goal->m_fPotential);
+				node->setGoal(true, goal.m_fPotential);
 		}
 
 		// For each node
@@ -164,15 +164,18 @@ namespace pathfinding
 		m_fMaxGradientVel = 0.f;
 	}
 
-	void ContinuumCrowdsGroup::updateAgents(Pathfinder& pathfinder)
+	/* Reads the group's agent snapshot, not its agents.
+	 *
+	 * This runs on a worker thread, and it used to take a Pathfinder& and walk
+	 * m_agents dereferencing every entry - both of which the main thread is free
+	 * to destroy mid-job when a chunk unloads. See PathfinderGroup::AgentState.
+	 * The result goes into the snapshot entry and PathfinderGroup::
+	 * syncJobSnapshots puts it on the live agent next slot. */
+	void ContinuumCrowdsGroup::updateAgents(AgentState& agent)
 	{
-		Transform* pathfinderTransform = pathfinder.GetTransform();
-		if (pathfinderTransform == nullptr)
-			return;
-
 		// Update min/max velocity
-		m_fMinVelocity = std::max(std::max(m_fMinVelocity, pathfinder.m_fMinVelocity), 0.f);
-		m_fMinGradientVel = std::max(std::max(m_fMinGradientVel, pathfinder.m_fMaxVelocity), 0.f);
+		m_fMinVelocity = std::max(std::max(m_fMinVelocity, agent.m_fMinVelocity), 0.f);
+		m_fMinGradientVel = std::max(std::max(m_fMinGradientVel, agent.m_fMaxVelocity), 0.f);
 		m_fMaxGradientVel = m_fMinVelocity;
 
 		// Seperation
@@ -181,16 +184,12 @@ namespace pathfinding
 		Vector3 cohesionVelocity = Vector3(0);
 		if (m_fMaxSeparationStrength != 0.f)
 		{
-			for (auto& agent : m_agents)
+			for (const AgentState& other : m_agentStates)
 			{
-				if (agent == &pathfinder || agent == nullptr)
+				if (other.m_pAgent == agent.m_pAgent)
 					continue;
 
-				Transform* transform = agent->GetTransform();
-				if (transform == nullptr)
-					continue;
-
-				Vector3 headingVector = pathfinderTransform->GetPosition() - transform->GetPosition();
+				Vector3 headingVector = agent.m_transformPosition - other.m_transformPosition;
 				float distance = glm::length2(headingVector);
 
 				if (distance < m_fSeparationDistance * m_fSeparationDistance)
@@ -202,7 +201,7 @@ namespace pathfinding
 						headingVector /= distance;
 
 					sperationVelocity += headingVector * strength;
-					cohesionVelocity += transform->GetPosition();
+					cohesionVelocity += other.m_transformPosition;
 					agentCount++;
 				}
 			}
@@ -212,15 +211,16 @@ namespace pathfinding
 		{
 			// Set flocking velocities
 			cohesionVelocity /= (float)agentCount;
-			cohesionVelocity -= pathfinderTransform->GetPosition();
+			cohesionVelocity -= agent.m_transformPosition;
 			cohesionVelocity *= m_fCohesionStrength;
-			if (!pathfinder.m_bCohesion)
+			if (!agent.m_bCohesion)
 				cohesionVelocity = Vector3(0);
 
 
 			sperationVelocity /= (float)agentCount;
-			pathfinder.m_flockVelocityX.store(sperationVelocity.x + cohesionVelocity.x);
-			pathfinder.m_flockVelocityY.store(sperationVelocity.z + cohesionVelocity.z);
+			agent.m_flockVelocityX = sperationVelocity.x + cohesionVelocity.x;
+			agent.m_flockVelocityY = sperationVelocity.z + cohesionVelocity.z;
+			agent.m_bHasFlockVelocity = true;
 		}
 	}
 
@@ -369,13 +369,13 @@ namespace pathfinding
 		return lowestCandidate;
 	}
 
-	GroupNode * ContinuumCrowdsGroup::getGoalNode(const PathfinderGoal & goal)
+	GroupNode * ContinuumCrowdsGroup::getGoalNode(const GoalState & goal)
 	{
 		assert(m_pGrid);
 
 		// Get the chunk that contains this goal
-		IVector2 chunkPos = Chunk::getChunkPos(goal.getGoalWorldPos());
-		IVector2 gridPos = ChunkGrid::getGridPos(goal.getGoalWorldPos());
+		IVector2 chunkPos = Chunk::getChunkPos(goal.m_worldPos);
+		IVector2 gridPos = ChunkGrid::getGridPos(goal.m_worldPos);
 		Chunk* chunk = m_pGrid->getChunk(gridPos);
 		if (chunk == nullptr)
 			return nullptr;
@@ -394,7 +394,7 @@ namespace pathfinding
 		// Get the containing nodes
 		for (auto& nodeIdx : container->m_container)
 		{
-			float distance = std::abs((nodeIdx.first + Chunk::g_NODESIZE / 2.f) - goal.getGoalWorldPos().y);
+			float distance = std::abs((nodeIdx.first + Chunk::g_NODESIZE / 2.f) - goal.m_worldPos.y);
 			if (distance <= lowestDistance)
 			{
 				Node& node = chunk->m_nodes[nodeIdx.second];

@@ -48,31 +48,27 @@ namespace
 	}
 }
 
-VOXAGINE_CHECK(Streaming, TheInitialWindowIsResidentBeforeAnythingTicks)
+VOXAGINE_CHECK(Streaming, TheInitialWindowIsResidentOnceItHasStreamed)
 {
 	StreamingCounters::Reset();
 
+	/* The harness settles the initial window in its constructor, because as of
+	   phase 4 ChunkSystem::Start queues an update group rather than loading
+	   nine chunks synchronously - so "resident" is a thing that happens over
+	   frames now, and R1 holds gameplay through them
+	   (Streaming/GameplayIsHeldUntilTheInitialWindowIsResident). */
 	StreamingHarness harness("StreamingGrid5x5");
 
-	/* ChunkSystem::Start loads the initial 3x3 synchronously, so this is true
-	   before a single frame has run. It is also what R1 will lean on in phase
-	   3: holding the first gameplay tick is only cheap because the window is
-	   already there. */
 	CHECK_EQ(harness.ResidentChunkCount(), 9u);
 	CHECK_EQ(harness.Grid().GetWorldOffset(), Vector3(0.f, 0.f, 0.f));
 
-	/* One chunk's ground layer, not nine - and that is master's behaviour, not
-	   the harness's. ChunkSystem::Start pushes a chunk into the window only
-	   where it is a *move*; the eight it loads outright reach the window when
-	   something next republishes them. In the game the gap is covered by
-	   RenderSystem::Start, which writes the whole window's y = 0 row itself
-	   (RenderSystem::SetGroundPlane), and there is no RenderSystem here. Worth
-	   stating as an expectation rather than a puzzle: a slide below turns this
-	   into all nine. */
-	CHECK_EQ(harness.Window().CountOccupiedFront(), 32ull * 32ull);
+	/* All nine chunks' ground layers, where before phase 4 it was one. The
+	   initial window is published by the same render job and the same commit as
+	   every other window now, so the gap ChunkSystem::Start used to leave -
+	   pushing a chunk into the mapping only where it was a *move*, and relying
+	   on RenderSystem::SetGroundPlane to cover the rest - is gone. */
+	CHECK_EQ(harness.Window().CountOccupiedFront(), 9ull * 32ull * 32ull);
 
-	/* The initial load is not a commit - no group published anything. */
-	CHECK_EQ(Commits(), 0u);
 	CheckNoInvariantViolations(ctx);
 }
 

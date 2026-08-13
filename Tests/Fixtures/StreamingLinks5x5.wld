@@ -276,6 +276,55 @@
         }
        ],
        "Children": []
+      },
+      {
+       "EntityType": "StreamingProbeEntity",
+       "ID": 9000,
+       "Name": "Probe_0_0",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "LinkTarget": 1005,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          16.0,
+          2.0,
+          16.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          16.0,
+          2.0,
+          16.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ],
+       "Children": []
       }
      ]
     },
@@ -527,6 +576,55 @@
          "File": "",
          "Round on Axis": false,
          "Limit Rotation Angle": 90
+        }
+       ],
+       "Children": []
+      },
+      {
+       "EntityType": "StreamingProbeEntity",
+       "ID": 9001,
+       "Name": "Probe_0_1",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "LinkTarget": 1009,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          16.0,
+          2.0,
+          48.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          16.0,
+          2.0,
+          48.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
         }
        ],
        "Children": []
@@ -784,6 +882,55 @@
         }
        ],
        "Children": []
+      },
+      {
+       "EntityType": "StreamingProbeEntity",
+       "ID": 9002,
+       "Name": "Probe_0_2",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "LinkTarget": 1013,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          16.0,
+          2.0,
+          80.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          16.0,
+          2.0,
+          80.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ],
+       "Children": []
       }
      ]
     },
@@ -1035,6 +1182,55 @@
          "File": "",
          "Round on Axis": false,
          "Limit Rotation Angle": 90
+        }
+       ],
+       "Children": []
+      },
+      {
+       "EntityType": "StreamingProbeEntity",
+       "ID": 9003,
+       "Name": "Probe_0_3",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "LinkTarget": 1017,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          16.0,
+          2.0,
+          112.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          16.0,
+          2.0,
+          112.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
         }
        ],
        "Children": []
@@ -1292,6 +1488,55 @@
         }
        ],
        "Children": []
+      },
+      {
+       "EntityType": "StreamingProbeEntity",
+       "ID": 9004,
+       "Name": "Orphan_0_4",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "LinkTarget": 999999,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          16.0,
+          2.0,
+          144.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          16.0,
+          2.0,
+          144.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ],
+       "Children": []
       }
      ]
     },
@@ -1543,6 +1788,55 @@
          "File": "",
          "Round on Axis": false,
          "Limit Rotation Angle": 90
+        }
+       ],
+       "Children": []
+      },
+      {
+       "EntityType": "StreamingProbeEntity",
+       "ID": 9005,
+       "Name": "Probe_1_0",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "LinkTarget": 1025,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          48.0,
+          2.0,
+          16.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          48.0,
+          2.0,
+          16.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
         }
        ],
        "Children": []
@@ -1800,6 +2094,55 @@
         }
        ],
        "Children": []
+      },
+      {
+       "EntityType": "StreamingProbeEntity",
+       "ID": 9006,
+       "Name": "Probe_1_1",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "LinkTarget": 1029,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          48.0,
+          2.0,
+          48.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          48.0,
+          2.0,
+          48.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ],
+       "Children": []
       }
      ]
     },
@@ -2051,6 +2394,55 @@
          "File": "",
          "Round on Axis": false,
          "Limit Rotation Angle": 90
+        }
+       ],
+       "Children": []
+      },
+      {
+       "EntityType": "StreamingProbeEntity",
+       "ID": 9007,
+       "Name": "Probe_1_2",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "LinkTarget": 1033,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          48.0,
+          2.0,
+          80.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          48.0,
+          2.0,
+          80.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
         }
        ],
        "Children": []
@@ -2308,6 +2700,55 @@
         }
        ],
        "Children": []
+      },
+      {
+       "EntityType": "StreamingProbeEntity",
+       "ID": 9008,
+       "Name": "Probe_1_3",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "LinkTarget": 1037,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          48.0,
+          2.0,
+          112.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          48.0,
+          2.0,
+          112.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ],
+       "Children": []
       }
      ]
     },
@@ -2559,6 +3000,55 @@
          "File": "",
          "Round on Axis": false,
          "Limit Rotation Angle": 90
+        }
+       ],
+       "Children": []
+      },
+      {
+       "EntityType": "StreamingProbeEntity",
+       "ID": 9009,
+       "Name": "Orphan_1_4",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "LinkTarget": 999999,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          48.0,
+          2.0,
+          144.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          48.0,
+          2.0,
+          144.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
         }
        ],
        "Children": []
@@ -2816,6 +3306,55 @@
         }
        ],
        "Children": []
+      },
+      {
+       "EntityType": "StreamingProbeEntity",
+       "ID": 9010,
+       "Name": "Probe_2_0",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "LinkTarget": 1045,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          80.0,
+          2.0,
+          16.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          80.0,
+          2.0,
+          16.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ],
+       "Children": []
       }
      ]
     },
@@ -3067,6 +3606,55 @@
          "File": "",
          "Round on Axis": false,
          "Limit Rotation Angle": 90
+        }
+       ],
+       "Children": []
+      },
+      {
+       "EntityType": "StreamingProbeEntity",
+       "ID": 9011,
+       "Name": "Probe_2_1",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "LinkTarget": 1049,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          80.0,
+          2.0,
+          48.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          80.0,
+          2.0,
+          48.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
         }
        ],
        "Children": []
@@ -3324,6 +3912,55 @@
         }
        ],
        "Children": []
+      },
+      {
+       "EntityType": "StreamingProbeEntity",
+       "ID": 9012,
+       "Name": "Probe_2_2",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "LinkTarget": 1053,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          80.0,
+          2.0,
+          80.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          80.0,
+          2.0,
+          80.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ],
+       "Children": []
       }
      ]
     },
@@ -3575,6 +4212,55 @@
          "File": "",
          "Round on Axis": false,
          "Limit Rotation Angle": 90
+        }
+       ],
+       "Children": []
+      },
+      {
+       "EntityType": "StreamingProbeEntity",
+       "ID": 9013,
+       "Name": "Probe_2_3",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "LinkTarget": 1057,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          80.0,
+          2.0,
+          112.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          80.0,
+          2.0,
+          112.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
         }
        ],
        "Children": []
@@ -3832,6 +4518,55 @@
         }
        ],
        "Children": []
+      },
+      {
+       "EntityType": "StreamingProbeEntity",
+       "ID": 9014,
+       "Name": "Orphan_2_4",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "LinkTarget": 999999,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          80.0,
+          2.0,
+          144.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          80.0,
+          2.0,
+          144.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ],
+       "Children": []
       }
      ]
     },
@@ -4083,6 +4818,55 @@
          "File": "",
          "Round on Axis": false,
          "Limit Rotation Angle": 90
+        }
+       ],
+       "Children": []
+      },
+      {
+       "EntityType": "StreamingProbeEntity",
+       "ID": 9015,
+       "Name": "Probe_3_0",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "LinkTarget": 1065,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          112.0,
+          2.0,
+          16.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          112.0,
+          2.0,
+          16.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
         }
        ],
        "Children": []
@@ -4340,6 +5124,55 @@
         }
        ],
        "Children": []
+      },
+      {
+       "EntityType": "StreamingProbeEntity",
+       "ID": 9016,
+       "Name": "Probe_3_1",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "LinkTarget": 1069,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          112.0,
+          2.0,
+          48.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          112.0,
+          2.0,
+          48.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ],
+       "Children": []
       }
      ]
     },
@@ -4591,6 +5424,55 @@
          "File": "",
          "Round on Axis": false,
          "Limit Rotation Angle": 90
+        }
+       ],
+       "Children": []
+      },
+      {
+       "EntityType": "StreamingProbeEntity",
+       "ID": 9017,
+       "Name": "Probe_3_2",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "LinkTarget": 1073,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          112.0,
+          2.0,
+          80.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          112.0,
+          2.0,
+          80.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
         }
        ],
        "Children": []
@@ -4848,6 +5730,55 @@
         }
        ],
        "Children": []
+      },
+      {
+       "EntityType": "StreamingProbeEntity",
+       "ID": 9018,
+       "Name": "Probe_3_3",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "LinkTarget": 1077,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          112.0,
+          2.0,
+          112.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          112.0,
+          2.0,
+          112.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ],
+       "Children": []
       }
      ]
     },
@@ -5099,6 +6030,55 @@
          "File": "",
          "Round on Axis": false,
          "Limit Rotation Angle": 90
+        }
+       ],
+       "Children": []
+      },
+      {
+       "EntityType": "StreamingProbeEntity",
+       "ID": 9019,
+       "Name": "Orphan_3_4",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "LinkTarget": 999999,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          112.0,
+          2.0,
+          144.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          112.0,
+          2.0,
+          144.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
         }
        ],
        "Children": []
@@ -5356,6 +6336,55 @@
         }
        ],
        "Children": []
+      },
+      {
+       "EntityType": "StreamingProbeEntity",
+       "ID": 9020,
+       "Name": "Probe_4_0",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "LinkTarget": 1085,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          144.0,
+          2.0,
+          16.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          144.0,
+          2.0,
+          16.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ],
+       "Children": []
       }
      ]
     },
@@ -5607,6 +6636,55 @@
          "File": "",
          "Round on Axis": false,
          "Limit Rotation Angle": 90
+        }
+       ],
+       "Children": []
+      },
+      {
+       "EntityType": "StreamingProbeEntity",
+       "ID": 9021,
+       "Name": "Probe_4_1",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "LinkTarget": 1089,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          144.0,
+          2.0,
+          48.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          144.0,
+          2.0,
+          48.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
         }
        ],
        "Children": []
@@ -5864,6 +6942,55 @@
         }
        ],
        "Children": []
+      },
+      {
+       "EntityType": "StreamingProbeEntity",
+       "ID": 9022,
+       "Name": "Probe_4_2",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "LinkTarget": 1093,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          144.0,
+          2.0,
+          80.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          144.0,
+          2.0,
+          80.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ],
+       "Children": []
       }
      ]
     },
@@ -6118,6 +7245,55 @@
         }
        ],
        "Children": []
+      },
+      {
+       "EntityType": "StreamingProbeEntity",
+       "ID": 9023,
+       "Name": "Probe_4_3",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "LinkTarget": 1097,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          144.0,
+          2.0,
+          112.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          144.0,
+          2.0,
+          112.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ],
+       "Children": []
       }
      ]
     },
@@ -6369,6 +7545,55 @@
          "File": "",
          "Round on Axis": false,
          "Limit Rotation Angle": 90
+        }
+       ],
+       "Children": []
+      },
+      {
+       "EntityType": "StreamingProbeEntity",
+       "ID": 9024,
+       "Name": "Orphan_4_4",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "LinkTarget": 999999,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          144.0,
+          2.0,
+          144.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          144.0,
+          2.0,
+          144.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
         }
        ],
        "Children": []

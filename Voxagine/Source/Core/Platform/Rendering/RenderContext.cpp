@@ -811,6 +811,53 @@ void RenderContext::BuildFarField(World* pWorld)
 
 	FarFieldBaker::Build(pWorld, m_FarField);
 
+	PublishFarField();
+}
+
+void RenderContext::BeginFarFieldBuild(World* pWorld)
+{
+	ChunkSystem* pChunkSystem = pWorld != nullptr ? pWorld->GetChunkSystem() : nullptr;
+	PhysicsSystem* pPhysics = pWorld != nullptr ? pWorld->GetSystem<PhysicsSystem>() : nullptr;
+
+	if (pChunkSystem == nullptr || pPhysics == nullptr)
+		return;
+
+	const UVector2 v2LevelXZ = pChunkSystem->GetWorldSize();
+	const UVector3 v3WindowSize = pPhysics->GetVoxelGrid()->GetDimensions();
+	const UVector3 v3LevelSize(v2LevelXZ.x, v3WindowSize.y, v2LevelXZ.y);
+
+	if (v3LevelSize.x <= v3WindowSize.x && v3LevelSize.z <= v3WindowSize.z)
+	{
+		CancelFarFieldBuild();
+		m_FarField.Resize(UVector3(0, 0, 0));
+		return;
+	}
+
+	m_FarField.Resize(v3LevelSize);
+
+	FarFieldBaker::Begin(pWorld, m_FarField, m_FarFieldBuild);
+}
+
+bool RenderContext::ContinueFarFieldBuild(StreamingBudget::Scope& budget)
+{
+	if (!m_FarFieldBuild.bActive)
+		return true;
+
+	if (!FarFieldBaker::Continue(m_FarFieldBuild, budget))
+		return false;
+
+	PublishFarField();
+
+	return true;
+}
+
+void RenderContext::CancelFarFieldBuild()
+{
+	FarFieldBaker::Cancel(m_FarFieldBuild);
+}
+
+void RenderContext::PublishFarField()
+{
 	if (!m_FarField.IsBuilt())
 		return;
 

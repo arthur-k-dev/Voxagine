@@ -14,6 +14,8 @@
 
 #include "AI/FiniteStateMachine.h"
 
+#include "General/PlayerSlot.h"
+
 #include "UI/Loadout.h"
 
 #include "Humanoids/Enemies/Monster.h"
@@ -90,6 +92,59 @@ RTTR_REGISTRATION
 		.property("UI buttons", &GameManager::vCurrentButtons)(RTTR_PUBLIC);
 }
 
+/* **Player discovery by index, retried until it succeeds.**
+
+   This replaced `FindEntitiesOfType<Player>()` indexed positionally behind an
+   exact `size() == 1` / `size() == 2` test, which had three failure modes and
+   hit all of them under chunk streaming: the vector's order is admission order,
+   so which player became P1 varied between runs of the same level; a count of
+   zero - the normal state while the players' chunk is still admitting - matched
+   neither branch and left both slots null with nothing to try again; and it ran
+   only from Awake, once.
+
+   See PlayerSlot for the measurements. */
+void GameManager::ResolvePlayers()
+{
+	const bool bHadBoth = m_pPlayers[0] != nullptr && m_pPlayers[1] != nullptr;
+
+	for (uint32_t uiIndex = 0; uiIndex < m_pPlayers.size(); ++uiIndex)
+	{
+		if (m_pPlayers[uiIndex] != nullptr)
+			continue;
+
+		Player* pPlayer = FindPlayerByIndex(GetWorld(), static_cast<int32_t>(uiIndex));
+
+		if (pPlayer == nullptr)
+			continue;
+
+		m_pPlayers[uiIndex] = pPlayer;
+		pPlayer->fReturnSpeed = m_fBulletReturnSpeed;
+
+		/* A player is what the resident window is centred on, so it must not be
+		   unloaded out from under the level by the chunk it happens to stand in.
+		   StartGame meant to do this and set player 0 twice, so player 2 was
+		   never pinned - a copy-paste that only shows up as the second player
+		   vanishing mid-level. Done here instead, where it applies to whichever
+		   players actually attached and does not depend on StartGame having run
+		   after they did. */
+		pPlayer->SetPersistent(true);
+
+		pPlayer->Destroyed += Event<Entity*>::Subscriber([this, uiIndex](Entity*)
+		{
+			m_pPlayers[uiIndex] = nullptr;
+		}, this);
+	}
+
+	/* Cross-link only once both are present, and only on the transition - the
+	   old code did it inside the discovery branch, so a level whose second
+	   player arrived a frame late got no link at all. */
+	if (!bHadBoth && m_pPlayers[0] != nullptr && m_pPlayers[1] != nullptr)
+	{
+		m_pPlayers[0]->SetLinkPlayer(m_pPlayers[1]);
+		m_pPlayers[1]->SetLinkPlayer(m_pPlayers[0]);
+	}
+}
+
 void GameManager::SetPlayerPosition(const Vector3& vPosition, uint32_t uiIndex)
 {
 	if (uiIndex < m_pPlayers.size() && m_pPlayers[uiIndex]) m_pPlayers[uiIndex]->GetTransform()->SetPosition(vPosition);
@@ -111,16 +166,9 @@ GameManager::GameManager(World* world) : Entity(world)
 
 void GameManager::StartGame()
 {
-	if (m_pPlayers[0])
-	{
-		m_pPlayers[0]->SetPersistent(true);
-		// m_pPlayers[0]->GetTransform()->SetPosition((m_pPlayers[0] ? m_pPlayers[0]->GetTransform()->GetPosition() : Vector3(0.0f)));
-	}
-	if (m_pPlayers[1])
-	{
-		m_pPlayers[0]->SetPersistent(true);
-		// m_pPlayers[1]->GetTransform()->SetPosition((m_pPlayers[1] ? m_pPlayers[1]->GetTransform()->GetPosition() : Vector3(0.0f)));
-	}
+	/* Pinning the players moved into ResolvePlayers, which is where they are
+	   known - this ran before they had attached and set player 0 twice. */
+	ResolvePlayers();
 
 	m_fHealth = m_fMaxHealth;
 	m_bIsPlaying = true;
@@ -158,23 +206,7 @@ void GameManager::SetPlayState(EGameState state)
 
 void GameManager::Awake()
 {
-	if (!m_pPlayers[0] && !m_pPlayers[1])
-	{
-		auto players = GetWorld()->FindEntitiesOfType<Player>();
-		if (players.size() == 1)
-			m_pPlayers[0] = players[0];
-		if (players.size() == 2)
-		{
-			m_pPlayers[0] = players[0];
-			m_pPlayers[1] = players[1];
-
-			m_pPlayers[0]->SetLinkPlayer(m_pPlayers[1]);
-			m_pPlayers[1]->SetLinkPlayer(m_pPlayers[0]);
-
-			m_pPlayers[0]->fReturnSpeed = m_fBulletReturnSpeed;
-			m_pPlayers[1]->fReturnSpeed = m_fBulletReturnSpeed;
-		}
-	}
+	ResolvePlayers();
 
 	const auto children = GetChildren();
 	if (!children.empty())
@@ -254,6 +286,8 @@ void GameManager::Start()
 void GameManager::Tick(float fDeltaTime)
 {
 	Entity::Tick(fDeltaTime);
+
+	ResolvePlayers();
 
 	if (m_fInvincibilityTimer > 0)
 		m_fInvincibilityTimer -= fDeltaTime;

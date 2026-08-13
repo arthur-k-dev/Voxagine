@@ -107,7 +107,7 @@ uint64_t HarnessVoxelWindow::CountOccupiedFront() const
 	return uiOccupied;
 }
 
-StreamingHarness::StreamingHarness(const std::string& sFixture) :
+StreamingHarness::StreamingHarness(const std::string& sFixture, bool bInitialize) :
 	m_Application(TestApplication())
 {
 	const std::string sPath = std::string(VOXAGINE_TEST_FIXTURE_DIR) + "/" + sFixture + ".wld";
@@ -151,16 +151,62 @@ StreamingHarness::StreamingHarness(const std::string& sFixture) :
 	ChunkSystem* pChunks = m_pWorld->GetChunkSystem();
 	pChunks->SetVoxelWindow(&m_Window);
 
-	/* World::Initialize creates the main camera and starts every system, which
-	   is where ChunkSystem::Start loads the initial 3x3 window synchronously.
-	   The window must already be attached above, or that first load writes
-	   nothing. */
-	m_pWorld->Initialize();
-	m_pWorld->PreTick();
-
 	/* The chunk grid, in voxels per chunk. GetWorldSize is the level; the
 	   window is three chunks across wherever the level is bigger than one. */
 	m_ChunkSize = UVector2(m_v3WindowSize.x / 3, m_v3WindowSize.z / 3);
+
+	if (bInitialize)
+		Initialize();
+}
+
+void StreamingHarness::Initialize(bool bSettleInitialWindow)
+{
+	if (m_bInitialized)
+		return;
+
+	m_bInitialized = true;
+
+	/* World::Initialize creates the main camera and starts every system, which
+	   is where ChunkSystem::Start loads the initial 3x3 window synchronously.
+	   The window must already be attached by the constructor, or that first load
+	   writes nothing. */
+	m_pWorld->Initialize();
+	m_pWorld->PreTick();
+
+	/* The shipped levels' camera is a persistent `CameraMultiplayer`; the
+	   default one World::Initialize creates is not, and a chunk unload
+	   serializes and destroys every non-persistent root standing inside it - so
+	   the window sliding over the camera deletes the thing that decides where
+	   the window goes. That is a real defect and it is guarded now
+	   (World::DeleteEntityFromLists nulls the world's pointer, ChunkSystem
+	   checks it), but leaving it unpinned here would mean the streaming
+	   scenarios were mostly measuring how long it takes to lose the camera.
+	   Same call, and the same reason, as the GPU stress fixture's. */
+	if (Camera* pCamera = m_pWorld->GetMainCamera())
+		pCamera->SetPersistent(true);
+
+	/* **The initial window arrives here rather than inside World::Initialize**,
+	   as of chunk streaming phase 4: ChunkSystem::Start pushes an update group
+	   like any other slide instead of loading nine chunks synchronously, and
+	   gameplay is held (R1) until that group has admitted its roots. So the
+	   harness drives it to completion, which restores the precondition every
+	   check is written against - "you are handed a world whose first window is
+	   resident" - without any of them having to know how it got there.
+
+	   A check that wants to *observe* the hold constructs the harness with
+	   bInitialize = false and calls Initialize(false) itself. */
+	if (!bSettleInitialWindow)
+		return;
+
+	Settle();
+
+	/* And the counters start at zero for the check rather than at whatever the
+	   fixture's own startup cost. Before phase 4 the initial window was built
+	   outside the state machine and contributed nothing to count; it is a
+	   commit and nine chunk regions now, and every check that gates on
+	   "commits == 1" means its own slide. */
+	StreamingCounters::Reset();
+	m_Window.ResetSwapCount();
 }
 
 StreamingHarness::~StreamingHarness()
@@ -200,8 +246,18 @@ void StreamingHarness::Frame()
 
 	m_pWorld->PreTick();
 
-	Chunks().FixedTick(FixedTimer());
-	Chunks().Tick(1.f / 60.f);
+	if (m_bTickWorld)
+	{
+		/* The real thing, including R1's hold: World::Tick decides whether the
+		   entities and the gameplay systems advance at all. */
+		m_pWorld->FixedTick(FixedTimer());
+		m_pWorld->Tick(1.f / 60.f);
+	}
+	else
+	{
+		Chunks().FixedTick(FixedTimer());
+		Chunks().Tick(1.f / 60.f);
+	}
 
 	/* A real frame takes milliseconds and a JobThread that finds no work sleeps
 	   for ten of them, so a test spinning this as fast as it can outruns the
@@ -241,6 +297,17 @@ uint32_t StreamingHarness::ResidentChunkCount() const
 	}
 
 	return uiResident;
+}
+
+Entity* StreamingHarness::FindEntityNamed(const std::string& sName) const
+{
+	for (Entity* pEntity : m_pWorld->GetEntities())
+	{
+		if (pEntity->GetName() == sName)
+			return pEntity;
+	}
+
+	return nullptr;
 }
 
 uint32_t StreamingHarness::CountEntitiesNamed(const std::string& sPrefix) const

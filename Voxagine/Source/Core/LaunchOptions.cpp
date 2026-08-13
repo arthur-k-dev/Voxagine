@@ -49,6 +49,10 @@ bool LaunchOptions::Parse(int argc, char** argv)
 		{
 			m_uiFrames = static_cast<uint32_t>(strtoul(argv[++i], nullptr, 10));
 		}
+		else if (strcmp(argv[i], "--editor-play") == 0 && bHasValue)
+		{
+			m_uiEditorPlayFrame = static_cast<uint32_t>(atoi(argv[++i]));
+		}
 		else if (strcmp(argv[i], "--hidden") == 0)
 		{
 			m_bHidden = true;
@@ -108,7 +112,8 @@ bool LaunchOptions::Parse(int argc, char** argv)
 				"                          (default \"Post Processing\"; try \"Voxel\", \"Sun Shadow\")\n"
 				"  --ui-script <seq>       comma-separated menu presses fed through SDL, one per\n"
 				"                          --ui-script-interval frames: up down left right confirm\n"
-				"                          back wait. Also traces focus and input-map changes\n"
+				"                          back wait fire forward-on/-off backward-on/-off.\n"
+				"                          Also traces focus and input-map changes\n"
 				"  --ui-script-interval <n>  frames between presses (default 30)\n"
 				"  --render-quality <p>    'low' (the mobile defaults) or 'high' (the full suite),\n"
 				"                          instead of whatever the player last chose. Does not\n"

@@ -12,6 +12,7 @@
 #include <Core/Platform/Platform.h>
 #include "Core/ECS/Entity.h"
 #include "Core/ECS/Systems/Chunk/ChunkSystem.h"
+#include "Humanoids/Players/Player.h"
 
 RTTR_REGISTRATION
 {
@@ -59,14 +60,29 @@ CameraMultiplayer::CameraMultiplayer(World * pWorld) :
 	m_fShakeStrength(0.f)
 {
 	SetName("CameraMultiplayerController");
+
+	/* A two-player camera frames players 0 and 1. Levels that assign the links
+	   explicitly override the index through PlayerSlot::Adopt. */
+	m_Player1Slot.SetIndex(0);
+	m_Player2Slot.SetIndex(1);
 }
 
+/* The two setters are the *authoring* path - the serialized "Player 1"/"Player 2"
+   link and the editor's inspector. They are no longer the mechanism: whatever
+   they set, ResolvePlayers re-finds by index if it is ever lost, and it attaches
+   the players with no help from them at all if the link never resolves. That is
+   the whole point, since measurably it often does not. */
 void CameraMultiplayer::SetPlayer1(Entity* pEntity)
 {
 	if (pEntity == nullptr) return;
 
+	m_Player1Slot.Adopt(pEntity);
 	m_pPlayer1 = pEntity;
-	pEntity->Destroyed += Event<Entity*>::Subscriber([this](Entity* pEntity) {
+
+	pEntity->Destroyed += Event<Entity*>::Subscriber([this](Entity*) {
+		/* Detach, do not give up. The next tick re-resolves by index, so a
+		   player destroyed by a chunk unload re-attaches when it comes back. */
+		m_Player1Slot.Detach();
 		m_pPlayer1 = nullptr;
 	}, this);
 }
@@ -75,10 +91,42 @@ void CameraMultiplayer::SetPlayer2(Entity* pEntity)
 {
 	if (pEntity == nullptr) return;
 
+	m_Player2Slot.Adopt(pEntity);
 	m_pPlayer2 = pEntity;
-	pEntity->Destroyed += Event<Entity*>::Subscriber([this](Entity* pEntity) {
+
+	pEntity->Destroyed += Event<Entity*>::Subscriber([this](Entity*) {
+		m_Player2Slot.Detach();
 		m_pPlayer2 = nullptr;
 	}, this);
+}
+
+void CameraMultiplayer::ResolvePlayers()
+{
+	if (m_pPlayer1 == nullptr)
+	{
+		if (Player* pPlayer = m_Player1Slot.Resolve(GetWorld()))
+		{
+			SetPlayer1(pPlayer);
+
+			/* **Seed the recorded position on attach, not just in Start.**
+			   m_player1PrevPosition starts at (-1, -1, -1) and lockPlayersInView
+			   writes it *back onto the player* when the player is outside the
+			   screen bounds - so a player that attached after Start, which is
+			   now the normal case, could be teleported to x = -1 on its first
+			   frame off-centre. Start seeded this only because it assumed the
+			   players were already here. */
+			m_player1PrevPosition = pPlayer->GetTransform()->GetPosition();
+		}
+	}
+
+	if (m_pPlayer2 == nullptr)
+	{
+		if (Player* pPlayer = m_Player2Slot.Resolve(GetWorld()))
+		{
+			SetPlayer2(pPlayer);
+			m_player2PrevPosition = pPlayer->GetTransform()->GetPosition();
+		}
+	}
 }
 
 void CameraMultiplayer::Awake()
@@ -95,6 +143,12 @@ void CameraMultiplayer::Start()
 	m_fPlayerMovementBound = Vector2(0.05f, 0.2f);
 	m_fMaxShakeAngle = Vector3(0.9f);
 	m_fShakeFalloff = 0.8f;
+
+	/* Start no longer *depends* on the players being here - it runs on the
+	   entity's first Tick, which under streaming is routinely before the
+	   players' chunk has admitted anything. It takes them if they are available
+	   and the per-tick resolution picks them up if they are not. */
+	ResolvePlayers();
 
 	if (m_pPlayer1 != nullptr) m_player1PrevPosition = m_pPlayer1->GetTransform()->GetPosition();
 	if (m_pPlayer2 != nullptr) m_player2PrevPosition = m_pPlayer2->GetTransform()->GetPosition();
@@ -125,6 +179,8 @@ void CameraMultiplayer::Start()
 void CameraMultiplayer::PreTick()
 {
 	Entity::PreTick();
+
+	ResolvePlayers();
 
 	// Get player positions
 	Vector3 player1Position = Vector3(-1);
@@ -161,8 +217,27 @@ void CameraMultiplayer::PreTick()
 void CameraMultiplayer::PostFixedTick(const GameTimer& timer)
 {
 	Entity::PostFixedTick(timer);
+
+	ResolvePlayers();
+
+	/* Re-acquire rather than give up for good. m_pMainCamera is captured once
+	   in Start(), so anything that runs Start() before the world has a main
+	   camera - or that destroys the one it found - disables this controller
+	   permanently and silently. Belt to World::Initialize's braces: that stops
+	   the camera being destroyed, this stops a single unlucky ordering being
+	   fatal. */
 	if (m_pMainCamera == nullptr)
-		return;
+	{
+		m_pMainCamera = GetWorld()->GetMainCamera();
+
+		if (m_pMainCamera == nullptr)
+			return;
+
+		m_pMainCamera->Destroyed += Event<Entity*>::Subscriber([this](Entity*)
+		{
+			m_pMainCamera = nullptr;
+		}, this);
+	}
 	Vector3 currentRotation = m_pMainCamera->GetTransform()->GetEulerAngles();
 	Vector3 currentPosition = m_pMainCamera->GetTransform()->GetPosition();
 
@@ -310,14 +385,15 @@ void CameraMultiplayer::lockPlayersInView(const Vector2& screenPosPlayer1, const
 		if (m_pPlayer1 != nullptr)
 		{
 			Vector3 playerPosition = m_pPlayer1->GetTransform()->GetPosition();
-			if (screenPosPlayer1.x + m_fPlayerBoundOffset.x < movementMinBound.x && m_player1PrevPosition.x > playerPosition.x) 
+			if (screenPosPlayer1.x + m_fPlayerBoundOffset.x < movementMinBound.x && m_player1PrevPosition.x > playerPosition.x)
 				playerPosition.x = m_player1PrevPosition.x;
 			if (screenPosPlayer1.x + m_fPlayerBoundOffset.x > movementMaxBound.x && m_player1PrevPosition.x < playerPosition.x)
 				playerPosition.x = m_player1PrevPosition.x;
-			if (screenPosPlayer1.y + m_fPlayerBoundOffset.y < movementMinBound.y && m_player1PrevPosition.z < playerPosition.z) 
+			if (screenPosPlayer1.y + m_fPlayerBoundOffset.y < movementMinBound.y && m_player1PrevPosition.z < playerPosition.z)
 				playerPosition.z = m_player1PrevPosition.z;
-			if (screenPosPlayer1.y + m_fPlayerBoundOffset.y > movementMaxBound.y && m_player1PrevPosition.z > playerPosition.z)  
+			if (screenPosPlayer1.y + m_fPlayerBoundOffset.y > movementMaxBound.y && m_player1PrevPosition.z > playerPosition.z)
 				playerPosition.z = m_player1PrevPosition.z;
+
 			m_pPlayer1->GetTransform()->SetPosition(playerPosition);
 		}
 		if (m_pPlayer2 != nullptr)

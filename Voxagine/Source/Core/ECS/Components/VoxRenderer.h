@@ -203,10 +203,60 @@ public:
 	   this renderer - see BakeData::StampKey, which folds it in for exactly that
 	   reason. */
 	bool IsEmissive() const { return m_bEmissive; }
-	void SetEmissive(bool bEmissive) { m_bEmissive = bEmissive; RequestUpdate(); }
+
+	void SetEmissive(bool bEmissive)
+	{
+		/* Only on a change. Deserialization drives every reflected setter with
+		   whatever was stored, so an unconditional request here means every
+		   VoxRenderer that comes back out of JSON asks to be re-stamped - which
+		   is one half of M7 (CHUNK_STREAMING_PLAN.md). The other half is fixed
+		   below; this one is fixed here because "set it to what it already is"
+		   should not be work in the first place. */
+		if (m_bEmissive == bEmissive)
+			return;
+
+		m_bEmissive = bEmissive;
+		RequestUpdate();
+	}
 
 	bool IsChunkInstanceLoaded() const { return m_bIsChunkInstanceLoaded; }
-	void SetChunkInstanceLoaded(bool bChunkLoaded) { m_bIsChunkInstanceLoaded = bChunkLoaded; }
+
+	/* Set by Chunk::LoadEntities for every renderer of a chunk that is coming
+	   *back*, never on a first load. It means: the voxels this renderer would
+	   stamp are already in the chunk's decoded volume, damage and all, and
+	   re-stamping would replace them with the pristine model.
+
+	   Clearing the two "something changed" flags is the fix for M7. The chunk's
+	   roots are re-serialized from the live reflection registration on unload,
+	   so the JSON a chunk carries in memory has every property this build knows
+	   about even when the level on disk predates them - and a reflected setter
+	   that requests an update makes a restored renderer look freshly edited.
+	   VoxelBaker::Bake consults IsChunkInstanceLoaded only as
+	   `(!Updated || bIsStaticChunkLoaded)`, **anded** with `!UpdateRequested()`,
+	   so a request walks straight past the guard and the pristine model lands on
+	   top of the decoded voxels. Suppressing the request at the one point that
+	   knows the decoded voxels are authoritative closes the whole class rather
+	   than the one setter that happened to reach it. A later editor edit
+	   requests an update explicitly and is unaffected. */
+	void SetChunkInstanceLoaded(bool bChunkLoaded)
+	{
+		m_bIsChunkInstanceLoaded = bChunkLoaded;
+
+		if (!bChunkLoaded)
+			return;
+
+		m_bUpdateRequested = false;
+		m_bIsFrameChanged = false;
+	}
+
+	/* Set immediately before Chunk::PrepareUnloadBatch destroys an entity whose
+	   chunk has already left the published window. The renderer's colours are in
+	   that chunk's own voxels and are about to be encoded with them; what its
+	   BakeData records is a set of addresses in a window that has since moved,
+	   so the ordinary destroy-time Clear would erase whatever slid in underneath.
+	   RenderSystem::OnComponentDestroyed forgets the stamp instead. */
+	void MarkChunkUnloading() { m_bChunkUnloading = true; }
+	bool IsChunkUnloading() const { return m_bChunkUnloading; }
 
 private:
 	void ResetModel();
@@ -232,6 +282,7 @@ private:
 	bool m_bUpdateRequested = false;
 	bool m_bIsFrameChanged = false;
 	bool m_bIsChunkInstanceLoaded = false;
+	bool m_bChunkUnloading = false;
 
 	RTTR_ENABLE(Component)
 };

@@ -6,12 +6,14 @@
 #include <vector>
 
 #include "Core/Application.h"
+#include "Core/ECS/Systems/Chunk/StreamingBudgets.h"
 #include "Core/Math.h"
 #include "Core/Platform/Rendering/VoxelBrickGrid.h"
 #include "Core/Voxels/VoxelWindow.h"
 
 class Camera;
 class ChunkSystem;
+class Entity;
 class VoxelGrid;
 class World;
 
@@ -71,6 +73,11 @@ public:
 	   defects and this is what tells them apart. */
 	uint32_t SwapCount() const { return m_uiSwaps; }
 
+	/* The initial window is a commit and a swap like any other since phase 4,
+	   so a check counting *its own* slides starts from zero here the same way
+	   it does with StreamingCounters::Reset. */
+	void ResetSwapCount() { m_uiSwaps = 0; }
+
 	const std::vector<uint32_t>& FrontWords() const { return m_Words[m_uiFront]; }
 	const std::vector<uint32_t>& BackWords() const { return m_Words[m_uiFront ^ 1u]; }
 
@@ -88,11 +95,36 @@ private:
 	uint32_t m_uiSwaps = 0;
 };
 
+/* Replaces the whole budget set for as long as it is in scope. T2: wall clock is
+   the right runtime behaviour and the wrong test behaviour, so every scenario
+   states its budgets in *units* and gets the same number of slices on any
+   machine - and `Units(1)` sweeps every resumption point rather than the ones a
+   fast machine happens to land on. Scoped rather than set-and-forget because the
+   budgets are process-global and the next check must not inherit them. */
+class StreamingBudgetOverride
+{
+public:
+	explicit StreamingBudgetOverride(const StreamingBudgets& budgets)
+	{
+		StreamingBudgets::Set(budgets);
+	}
+
+	~StreamingBudgetOverride() { StreamingBudgets::Reset(); }
+
+	StreamingBudgetOverride(const StreamingBudgetOverride&) = delete;
+	StreamingBudgetOverride& operator=(const StreamingBudgetOverride&) = delete;
+};
+
 class StreamingHarness
 {
 public:
-	/* Names a file under Tests/Fixtures, without the extension. */
-	explicit StreamingHarness(const std::string& sFixture);
+	/* Names a file under Tests/Fixtures, without the extension.
+
+	   bInitialize is false only for a check that needs to observe the world
+	   *before* its systems start - which is the one state in which R1's
+	   gameplay hold is live, because ChunkSystem::Start builds the initial
+	   window synchronously. Call Initialize() when the check is ready. */
+	explicit StreamingHarness(const std::string& sFixture, bool bInitialize = true);
 	~StreamingHarness();
 
 	World& GetWorld() { return *m_pWorld; }
@@ -105,6 +137,16 @@ public:
 
 	UVector2 ChunkSize() const { return m_ChunkSize; }
 	UVector3 WindowSize() const { return m_v3WindowSize; }
+
+	/* Starts the world's systems, which is where the initial 3x3 window is
+	   loaded. Called by the constructor unless it was told not to. */
+	void Initialize(bool bSettleInitialWindow = true);
+
+	/* Drive World::Tick/FixedTick rather than the chunk system's directly, so
+	   that entities, gameplay systems and R1's hold are all in the loop. Off by
+	   default: most streaming checks are about the state machine and a world
+	   full of ticking entities only adds noise to them. */
+	void SetTickWorld(bool bTickWorld) { m_bTickWorld = bTickWorld; }
 
 	/* Where the camera is, which is the only input the chunk system has. */
 	void PlaceCamera(const Vector3& v3Position);
@@ -125,6 +167,11 @@ public:
 	   roots were admitted and an outgoing chunk's were taken away. */
 	uint32_t CountEntitiesNamed(const std::string& sPrefix) const;
 
+	/* One entity by exact name, or null. Streaming deletes and rebuilds the
+	   entity, so a test must re-ask after every transition rather than holding
+	   the pointer across one (R4). */
+	Entity* FindEntityNamed(const std::string& sName) const;
+
 private:
 	/* One Application per process, not per harness: PlayerPrefs asserts on a
 	   second instance, and the job manager's worker pool is worth starting once.
@@ -138,4 +185,6 @@ private:
 
 	UVector2 m_ChunkSize = UVector2(0, 0);
 	UVector3 m_v3WindowSize = UVector3(0, 0, 0);
+	bool m_bTickWorld = false;
+	bool m_bInitialized = false;
 };

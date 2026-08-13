@@ -497,6 +497,20 @@ is meshed once and never again. Wired unconditionally into
 not, since meshing is idempotent and the store is where phase 2's GPU upload
 reads from regardless of which renderers end up using it.
 
+> **The `SetFrame` hook was removed on 2026-08-13** (chunk streaming phase 3,
+> keep-list item K10). The reasoning above is all true and the conclusion was
+> still wrong, because of *where* `SetFrame` runs: deserializing a chunk's
+> roots. Measured on a `Fishing_Village_Beat2` window transition, **one
+> `VoxRenderer` construction took 44.65 ms** greedy-meshing a river-bed model
+> that no model pass will ever draw — `RenderSystem::Render` submits only
+> non-static renderers. Nothing is lost: that consumer already calls
+> `EnsureMeshed` itself and the result is still cached on the frame, so a
+> dynamic model is meshed once for the whole game on the first frame it is
+> actually drawn. Phase 2's upload reads the store exactly as before; it just
+> grows lazily. If a dynamic model's *first draw* ever hitches, the other half
+> of K10 — `PrepareModelMeshes` during world load, for the frames a level
+> actually animates — is the answer, and it is unbuilt.
+
 Ran clean against real content: every frame `Fishing_Village_Beat2` loads
 meshes without a crash, one `[mesh]` log line per distinct frame. No validation
 change, because this phase touches no GPU state — see what is missing, below.

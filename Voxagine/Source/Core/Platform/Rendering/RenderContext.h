@@ -36,6 +36,7 @@
 #include "Core/Platform/Rendering/RenderAlignment.h"
 #include "Core/Platform/Rendering/VoxelBrickGrid.h"
 #include "Core/Platform/Rendering/FarFieldVolume.h"
+#include "Core/ECS/Systems/Chunk/FarFieldBaker.h"
 #include "Core/Voxels/VoxelWindow.h"
 
 class Platform;
@@ -358,7 +359,29 @@ public:
 	   with the voxel mapper already - see the BufferSwapped subscriber in
 	   Initialize, which exists so that the four cannot get out of lockstep from
 	   a call site. So this really is just the one call. */
-	void Swap() override { m_pVoxelMapper->SwapBuffer(); }
+	/* **A swap bumps the voxel generation, and leaving that out cost a level
+	   8% of its geometry.** The generation means exactly one thing - "the
+	   buffer no longer holds what you stamped" (see GetVoxelGeneration) - and
+	   reversing the two buffers is the purest possible instance of it: every
+	   renderer stamped into the old front buffer now has its voxels in the
+	   buffer nothing draws.
+
+	   It went unnoticed because on a window *slide* the world offset changes in
+	   the same transaction, and VoxelBaker::Bake's bBakeCurrent test fails on
+	   the offset before it ever looks at the generation. The initial window is
+	   the one commit that swaps with the offset *unchanged* - so the chunk the
+	   camera starts in, whose renderers JsonSerializer::DeserializeWorld
+	   admitted and the first PreTick stamped, kept bBakeCurrent true forever and
+	   was never re-stamped. Measured on Fishing_Village_Beat1: 2,706,535 active
+	   voxels before chunk streaming phase 4, 2,493,640 after.
+
+	   This costs nothing on a slide, where every renderer is re-examined
+	   already. */
+	void Swap() override
+	{
+		m_pVoxelMapper->SwapBuffer();
+		++m_uiVoxelGeneration;
+	}
 
 	/* Coarse occupancy over the same window, for the marcher's outer walk.
 	   Kept current by ModifyVoxel/ModifyVoxelFast above and, in bulk, by
@@ -414,6 +437,26 @@ public:
 	/* Rebuilds the volume for pWorld's level and pushes it to the GPU. Sizes
 	   the mappers, so it must run before anything samples them. */
 	void BuildFarField(class World* pWorld);
+
+	/* The same build in budgeted slices - CHUNK_STREAMING_PLAN.md phase 4.
+	   `BuildFarField` is 447 ms for Beat2 and it ran inside World::Initialize,
+	   off the frame loop, where a loading screen cannot animate over it.
+	   ChunkSystem::Tick drives these; the volume reports itself unbuilt (and so
+	   is never sampled) until Continue returns true. */
+	void BeginFarFieldBuild(class World* pWorld);
+	bool ContinueFarFieldBuild(StreamingBudget::Scope& budget);
+	void CancelFarFieldBuild();
+	bool IsFarFieldBuilding() const { return m_FarFieldBuild.bActive; }
+
+private:
+	/* Everything after the stamping: resize the brick grid, grow the two
+	   mappers, flush the volume into them and build its pyramid once. Shared by
+	   the one-shot and the incremental build so the two cannot diverge on the
+	   order, which matters - the grid drops its mirror before the mapper
+	   reallocates and is re-supplied after. */
+	void PublishFarField();
+
+public:
 
 	/* The cell grid the shader marches, or (0,0,0) when there is no far field -
 	   which is what a level whose window already covers it reports, and what
@@ -601,6 +644,7 @@ protected:
 	Mapper* m_pFarFieldMapper = nullptr;
 	Mapper* m_pFarFieldBrickMapper = nullptr;
 	FarFieldVolume m_FarField;
+	FarFieldBaker::Progress m_FarFieldBuild;
 	VoxelBrickGrid m_FarFieldBricks;
 
 	bool m_bFaderUpdated = false;

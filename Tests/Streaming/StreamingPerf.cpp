@@ -12,17 +12,39 @@
  * The timings are printed because a streaming slice's wall clock is the whole
  * question at 60 Hz - but only against a recording from the same machine.
  *
- * The counter that matters most is `roots-per-entity-pass`. It is the number of
- * root entities the main thread deserializes in a single uninterrupted pass,
- * and it is *unbounded* after phase 1: this phase moved that work to after the
- * commit and changed nothing about how much of it there is. Phases 2 and 3 make
- * it resumable against StreamingBudgets::EntityWork, at which point this
- * baseline entry ratchets down to the budget. Recording the unbounded value now
- * is what turns "bounded work per tick" from a comment into a number CI holds.
+ * The counters that matter most are `roots-per-staging-slice` and
+ * `roots-per-admission-slice`. Deserializing an incoming chunk's roots was one
+ * uninterrupted main-thread pass through phase 2 - 44 ms per chunk, and by then
+ * the whole of what was left of the transition hitch. Phase 3 split it into
+ * budgeted staging and budgeted admission, and these two numbers are what say
+ * the budgets are real rather than commented.
+ *
+ * `gameplay-roots-per-admission` is the opposite kind of number: it is
+ * deliberately *not* bounded, and a drop in it is the regression. Every
+ * non-static root of the incoming window enters together so that two gameplay
+ * entities referencing each other are never half-present (ledger E3).
+ *
+ * **The budgets here are unit budgets, and they have to be.** A wall-clock
+ * budget makes "roots serialized in one slice" a function of how fast the
+ * machine is, which is exactly the kind of number this file refuses to gate on.
+ * Stated in units, the two phase-2 bounds become exact: a chunk carries three
+ * roots and the budget is two, so a slice must serialize exactly two; the
+ * encode budget is sixty-four runs against a volume that needs a hundred and
+ * twenty-eight, so a slice must write exactly sixty-four. Either number moving
+ * means a budgeted loop stopped honouring its budget. The timings below are
+ * therefore the cost of *slicing*, not the cost of the shipping defaults.
  */
 VOXAGINE_BENCHMARK(Streaming, WindowSlideAndReturn)
 {
 	StreamingCounters::Reset();
+
+	StreamingBudgets budgets;
+	budgets.EntityStaging = StreamingBudget::Units(2);
+	budgets.EntityAdmission = StreamingBudget::Units(2);
+	budgets.UnloadSerialization = StreamingBudget::Units(2);
+	budgets.VoxelEncoding = StreamingBudget::Units(64);
+
+	const StreamingBudgetOverride override(budgets);
 
 	StreamingHarness harness("StreamingGrid5x5");
 
@@ -58,12 +80,61 @@ VOXAGINE_BENCHMARK(Streaming, WindowSlideAndReturn)
 	result.AddWork("chunk-regions-written", static_cast<double>(counters.ChunkRegionsWritten.load()));
 	result.AddWork("voxel-words-written", static_cast<double>(counters.VoxelWordsWritten.load()));
 
-	/* Unbounded today - see the file comment. */
-	result.AddWork("roots-per-entity-pass", static_cast<double>(counters.MaxRootsPerEntityPass.load()));
+	/* Phase 3's two halves of loading a chunk's entities. Staging is bounded by
+	   a budget stated in units above, so a slice must construct exactly two
+	   roots; static admission is bounded the same way, and the fixture's one
+	   static root per chunk is what keeps it below its budget rather than at
+	   it. Either exceeding its budget means a loop stopped honouring one. */
+	result.AddWork("roots-per-staging-slice", static_cast<double>(counters.MaxRootsPerStagingSlice.load()));
+	result.AddWork("roots-per-admission-slice", static_cast<double>(counters.MaxRootsPerAdmissionSlice.load()));
 
-	/* T5, as baseline entries: both must stay at zero forever. */
+	/* The contract number (ledger E3): every non-static root of the incoming
+	   window enters in one frame, deliberately unbudgeted. Two chunk columns of
+	   three chunks each arrive over the two transitions, two gameplay roots
+	   apiece, so a transition admits six together. If this ever reads less than
+	   the incoming window's gameplay roots, the admission was split and a
+	   cross-link between two of them can be transiently null. */
+	result.AddWork("gameplay-roots-per-admission", static_cast<double>(counters.MaxGameplayRootsPerAdmission.load()));
+
+	/* What staging is holding at its peak - roots constructed and not yet in the
+	   world. The high-water mark of the one place this phase holds raw Entity*s
+	   across a frame boundary. */
+	result.AddWork("staged-roots-high-water", static_cast<double>(counters.MaxStagedRoots.load()));
+
+	/* Serialized entity references still waiting for both ends to be in the
+	   world (K6), and the ones given up on. The fixture has no links at all, so
+	   both are zero here and the numbers are carried by the link checks - but a
+	   phase that starts leaking retries should have to change a checked-in
+	   number rather than a comment. */
+	result.AddWork("pending-world-links", static_cast<double>(counters.MaxPendingWorldLinks.load()));
+	result.AddWork("world-links-abandoned", static_cast<double>(counters.WorldLinksAbandoned.load()));
+	result.AddWork("world-links-source-lost", static_cast<double>(counters.WorldLinksSourceLost.load()));
+
+	/* T7: a root of a type this binary does not have. None in this fixture. */
+	result.AddWork("staged-roots-rejected", static_cast<double>(counters.StagedRootsRejected.load()));
+
+	/* Phase 2's two bounds, and the whole point of the unit budgets above: these
+	   are the budget values, exactly, or a loop is not honouring its budget. */
+	result.AddWork("roots-per-unload-slice", static_cast<double>(counters.MaxRootsPerUnloadSlice.load()));
+	result.AddWork("encode-runs-per-slice", static_cast<double>(counters.MaxEncodeRunsPerSlice.load()));
+
+	/* Six chunks leave over the two transitions and six arrive. The first three
+	   arrivals cannot be served from an empty pool, so three allocations and
+	   three reuses is the shape of a settled slide - and a rising allocation
+	   count with a flat reuse count is the pool quietly not working. */
+	result.AddWork("chunk-storage-reused", static_cast<double>(counters.ChunkStorageReused.load()));
+	result.AddWork("chunk-storage-allocated", static_cast<double>(counters.ChunkStorageAllocated.load()));
+
+	/* T5, as baseline entries: all of these must stay at zero forever. */
 	result.AddWork("back-buffer-flush-races", static_cast<double>(counters.BackBufferFlushRaces.load()));
 	result.AddWork("publishes-outside-commit", static_cast<double>(counters.PublishesOutsideCommit.load()));
+
+	/* M7. A static renderer re-stamped over voxels that were decoded with their
+	   damage in them is exactly "destroyed terrain comes back". There is no
+	   RenderSystem here so this is zero by construction; it is in the baseline
+	   because the same counter is what the game reports, and a phase that
+	   reintroduces the re-stamp should have to change a checked-in number. */
+	result.AddWork("chunk-instance-restamps", static_cast<double>(counters.ChunkInstanceRestamps.load()));
 
 	/* The terminal state, so a benchmark that stopped streaming for the wrong
 	   reason cannot report cheap numbers. */

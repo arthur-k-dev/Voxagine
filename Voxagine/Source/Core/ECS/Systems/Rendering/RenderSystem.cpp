@@ -698,9 +698,21 @@ void RenderSystem::Render(const GameTimer& fixedTimer)
 
 	m_bShouldUpdateVoxelWorld = bShouldUpdateVoxelWorld || pCamera->IsUpdated();
 
-	m_VoxelBaker.Bake();
+	/* Budgeted since phase 5, so this returns false while renderers are still
+	   waiting for a stamp.
 
-	m_bForcedUpdate = false;
+	   **The force is cleared only when the pass actually reached the end of the
+	   list**, and getting that wrong cost an hour: a force means "re-examine
+	   every renderer", the budgeted pass stops part-way, and clearing it anyway
+	   means every renderer past the stopping point is never examined at all. It
+	   has no UpdateRequested flag of its own - the force *was* its trigger - so
+	   it is simply never stamped. On Beat2 that left a third of the level's
+	   voxels unwritten and no error anywhere: the image is missing geometry,
+	   which reads as content. */
+	m_bVoxelBakesPending = !m_VoxelBaker.Bake();
+
+	if (!m_bVoxelBakesPending)
+		m_bForcedUpdate = false;
 
 	/* DESTRUCTION_PLAN.md P16: Render runs once per rendered frame and only on
 	   one that actually ran a fixed tick (Application.cpp gates the call on
@@ -780,44 +792,35 @@ void RenderSystem::OnComponentAdded(Component* pComponent)
 		   LastLocation/Rotation/Scale, IsEnabled) since CheckRendererChange
 		   still reads some of those fields regardless of IsStatic; only the
 		   voxel write is skipped. */
+		/* **This used to stamp, inline, right here** - 587 renderers and 3.1 M
+		   voxels in one PreTick at a world load, and 34.3 ms of the PreTick a
+		   window transition lands in (CHUNK_STREAMING_PLAN.md phase 5). A
+		   component registering is not a good moment to write three million
+		   voxels: it happens inside World::PreTick, once per admitted renderer,
+		   with no way to stop.
+
+		   It asks for a stamp instead, and VoxelBaker::Bake does it under
+		   StreamingBudgets::VoxelBaking. The condition is unchanged and every
+		   clause of it still matters:
+
+		     - **m_bStarted**, because Start() wipes the voxel buffer and every
+		       entity is added before it - the stamp was thrown away a moment
+		       later and the forced first bake redid all of it.
+		     - **!IsChunkInstanceLoaded()**, because a chunk that came back was
+		       restored from its encoded voxels, damage included, and stamping
+		       the pristine model over them is M7 exactly.
+		     - **IsEnabled()**, because the bake would only clear it again.
+		     - **IsStatic()**, because a dynamic renderer is never stamped at
+		       all - it renders through VoxelModelPass
+		       (DYNAMIC_MODELS_PLAN.md phase 3).
+
+		   bakeData above is still recorded either way (WorldOffset,
+		   LastLocation/Rotation/Scale, IsEnabled), since CheckRendererChange
+		   reads some of those regardless of IsStatic; only the voxel write
+		   moved. */
 		if (m_bStarted && !pRenderer->IsChunkInstanceLoaded() && pRenderer->IsEnabled() && pRenderer->GetOwner()->IsStatic())
 		{
-			/* Reported separately because it is *not* inside VoxelBaker::Bake,
-			   and that gap is misleading: this is where a world load's stamping
-			   actually happens - 587 renderers and 3.1 M voxels in 399.5 ms on
-			   Valley_Path_To_Castle_Beat1 - while the Bake timer next to it
-			   reads microseconds. Quoting Bake alone makes the load look free
-			   when two thirds of the cost simply never passed through it.
-			   RENDERING_PLAN.md phase 4c. */
-			const bool bProfiling = FrameProfiler::Get().IsEnabled();
-			const std::chrono::steady_clock::time_point start =
-				bProfiling ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
-
-			uint32_t* voxels = m_VoxelBaker.Occupy(pRenderer, &pRenderer->m_BakeData);
-			pRenderer->m_BakeData.Positions = voxels;
-
-			if (bProfiling)
-			{
-				const double fMs =
-					std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
-
-				FrameProfiler::Get().Report("CPU VoxelBaker::Occupy (added)", fMs);
-
-				/* Split by IsStatic for DYNAMIC_MODELS_PLAN.md phase 0, same as
-				   VoxelBaker::Bake. This one is almost entirely static - it is
-				   the world-load stamp - so the interest here is the *dynamic*
-				   line staying near zero, which is what says the per-frame cost
-				   of a moving character is in Bake and not spread across two
-				   counters. */
-				const bool bRendererStatic = pRenderer->GetOwner()->IsStatic();
-
-				FrameProfiler::Get().Report(
-					bRendererStatic ? "CPU Occupy added (static)" : "CPU Occupy added (dynamic)", fMs);
-
-				FrameProfiler::Get().ReportCount(
-					bRendererStatic ? "Added voxels (static)" : "Added voxels (dynamic)",
-					pRenderer->m_BakeData.Size);
-			}
+			pRenderer->RequestUpdate();
 		}
 	}
 	else if (VoxAnimator* pAnimator = dynamic_cast<VoxAnimator*>(pComponent))
@@ -844,8 +847,20 @@ void RenderSystem::OnComponentDestroyed(Component* pComponent)
 
 		if (iter != m_VoxRenderers.end())
 		{
-			/* Remove old voxels if array is valid */
-			m_VoxelBaker.Clear(*iter);
+			/* A chunk unload is the one destruction that must not erase
+			   anything. It happens *after* the replacement window has been
+			   published (CHUNK_STREAMING_PLAN.md phase 1's US_COMMIT), so this
+			   renderer's recorded positions name addresses that now hold the
+			   geometry the window slid over. Clear shifts them by the offset
+			   delta and declines to erase a cell another renderer owns - which
+			   covers models, and covers neither the ground row nor settled
+			   debris, since neither has an owner. Its colours are safe in the
+			   departing chunk's own voxels; drop the stamp and touch nothing. */
+			if ((*iter)->IsChunkUnloading())
+				m_VoxelBaker.ForgetChunkStamp(*iter);
+			else
+				m_VoxelBaker.Clear(*iter);
+
 			m_VoxRenderers.erase(iter);
 		}
 	}

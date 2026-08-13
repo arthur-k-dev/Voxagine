@@ -203,6 +203,12 @@ void EditorWorld::PostFixedTick(const GameTimer& fixedTimer)
 
 void EditorWorld::PrepareSerialization()
 {
+	/* Remembered so UnPrepareSerialization can put it back. Serializing
+	   temporarily makes the *player* camera the main one so the saved world
+	   names it; that swap has to be undone whoever the main camera was, and
+	   there is no other record of it. */
+	m_pMainCameraBeforeSerialization = GetMainCamera();
+
 	Camera* PlayerCamera = GetPlayerCamera();
 
 	if (PlayerCamera == nullptr)
@@ -216,12 +222,17 @@ void EditorWorld::PrepareSerialization()
 
 void EditorWorld::UnPrepareSerialization()
 {
+	Camera* pRemoved = nullptr;
+
 	if (m_bSpawnDefaultCamera)
 	{
 		Camera* PlayerCamera = GetPlayerCamera();
 
 		if (PlayerCamera != nullptr)
+		{
+			pRemoved = PlayerCamera;
 			RemoveEntity(PlayerCamera);
+		}
 
 		m_bSpawnDefaultCamera = false;
 	}
@@ -230,6 +241,29 @@ void EditorWorld::UnPrepareSerialization()
 	{
 		SetMainCamera(GetEditorCamera());
 	}
+	else if (m_pMainCameraBeforeSerialization != nullptr &&
+		m_pMainCameraBeforeSerialization != pRemoved)
+	{
+		/* **In play mode there is no editor camera to fall back to**, so this
+		   used to return leaving the world's main camera pointing at the
+		   throwaway one it had just queued for deletion. The deletion then left
+		   the world with no camera at all - and Editor::AutoSaveWorld runs this
+		   whole pair every five seconds, including while you are playing, so a
+		   session lost its camera within seconds of starting and anything
+		   holding it (CameraMultiplayer caches it in Start) was disabled for
+		   good.
+
+		   The symptom was a camera that stops following the player,
+		   intermittently, which reads as a streaming bug and is not one: the
+		   stack is AutoSaveWorld -> UnPrepareSerialization -> RemoveEntity.
+		   It only became *visible* when World::DeleteEntityFromLists started
+		   nulling the world's camera pointer (chunk streaming phase 2); before
+		   that the pointer dangled and the camera kept working by reading
+		   freed memory. */
+		SetMainCamera(m_pMainCameraBeforeSerialization);
+	}
+
+	m_pMainCameraBeforeSerialization = nullptr;
 }
 
 Camera* EditorWorld::SpawnDefaultPlayerCamera()

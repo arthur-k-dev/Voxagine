@@ -624,6 +624,42 @@ if(VOXAGINE_BUILD_ENGINE)
             RUN_SERIAL TRUE
             TIMEOUT 180)
 
+        # **The gate that would have caught a level losing 8% of its geometry.**
+        #
+        # Every other audit in this tree checks *self-consistency* - the CPU voxel
+        # against the mapping, the bricks against the bitmap, the pyramid against
+        # its mirror, the codec against itself. A world that is uniformly missing
+        # one chunk's models satisfies all of them, which is exactly what
+        # happened: chunk streaming phase 4 dropped the camera chunk's large
+        # renderers and every suite stayed green.
+        #
+        # Occupied voxels is an *absolute* count, and it is an exact integer -
+        # machine-independent, identical in Debug and Release, reproducible run to
+        # run (verified twice). So it can be a hard equality gate, and a checked-in
+        # number is the only instrument here that can say "geometry went missing"
+        # rather than "the pieces agree with each other".
+        #
+        # No --ui-script: gameplay has randomness, and the initial window is what
+        # this is about. If the number legitimately changes - a level edit, a
+        # placement fix - update it here and say why in the commit, exactly like
+        # Tests/Baselines/perf.txt.
+        add_test(NAME gpu_world_occupancy
+            COMMAND BitBuster
+                --hidden --size 320x180 --frames 1200
+                --map Content/Worlds/Fishing_Village/Fishing_Village_Beat1.wld)
+        set_tests_properties(gpu_world_occupancy PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/Game
+            # A two-second audit interval against a twenty-second run, because
+            # the audit fires on wall clock: at five seconds the first
+            # attempt raced a 5.5 s run and the gate failed for having measured
+            # nothing at all. A gate that depends on which side of a timer the
+            # process exits on is worse than no gate.
+            ENVIRONMENT "VOXAGINE_VOXEL_AUDIT=2;VOXAGINE_AUDIO_NULL_DEVICE=1"
+            PASS_REGULAR_EXPRESSION "2706535 active of 75497472"
+            LABELS "gpu;integration;streaming"
+            RUN_SERIAL TRUE
+            TIMEOUT 180)
+
         # The same fixture in its VOXAGINE_GPU_STREAMING_ONLY mode: it walks the
         # player across a Beat2 chunk boundary through --ui-script and times the
         # window transition against a 16.7 ms per-frame ceiling.

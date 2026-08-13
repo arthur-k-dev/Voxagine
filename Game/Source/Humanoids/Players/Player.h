@@ -32,6 +32,19 @@ public:
 
 	bool IsAlive() const;
 
+	/* **Which player this is, and the only stable answer to that question.**
+	   Serialized as "Player Index"; 0 is player one, 1 is player two, -1 is
+	   "not indexed yet" and is resolved in Awake.
+
+	   Everything that refers to a player refers to it by this - see PlayerSlot.
+	   The two things it replaces were both unreliable: a serialized entity-id
+	   link that chunk streaming could run past its retry deadline, and
+	   `GetName() == "Player"` / `"Player1"`, which decided a player's *role and
+	   animation set* from its name and so broke the moment a level renamed one
+	   or a second copy was spawned. */
+	int32_t GetPlayerIndex() const { return m_iPlayerIndex; }
+	void SetPlayerIndex(int32_t iIndex) { m_iPlayerIndex = iIndex; }
+
 protected:
 	GameManager* m_pGameManager = nullptr;
 	Camera* m_pCamera = nullptr;
@@ -122,6 +135,8 @@ private:
 
 	bool m_bIsAltPlayer = false;
 	bool m_bGamePaused = false;
+
+	int32_t m_iPlayerIndex = -1;
 
 	Player* m_pReferencePlayer = nullptr;
 

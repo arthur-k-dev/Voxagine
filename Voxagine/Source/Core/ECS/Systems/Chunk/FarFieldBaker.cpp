@@ -115,100 +115,158 @@ namespace
 
 }
 
-void FarFieldBaker::Build(World* pWorld, FarFieldVolume& volume)
+void FarFieldBaker::Begin(World* pWorld, FarFieldVolume& volume, Progress& progress)
 {
+	Cancel(progress);
+
 	volume.Clear();
+	volume.SetBuilt(false);
 
 	ChunkSystem* pChunkSystem = pWorld != nullptr ? pWorld->GetChunkSystem() : nullptr;
 
 	if (pChunkSystem == nullptr || volume.GetCellCount() == 0)
 		return;
 
-	const std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+	progress.pWorld = pWorld;
+	progress.pVolume = &volume;
+	progress.Start = std::chrono::steady_clock::now();
+	progress.bActive = true;
 
-	const UVector3 v3LevelSize = volume.GetLevelSize();
-
-	JsonSerializer& serializer = pWorld->GetApplication()->GetSerializer();
-
-	uint32_t uiRenderers = 0;
-	uint32_t uiEntities = 0;
+	/* Flattened here so the walk is stable across frames: the chunk map is
+	   unordered and this build now spans many of them. */
+	for (const std::pair<const uint32_t, Chunk*>& chunkEntry : pChunkSystem->GetChunks())
+	{
+		if (chunkEntry.second != nullptr)
+			progress.Chunks.push_back(chunkEntry.second);
+	}
 
 	/* Pin every model the level names before building anything.
 	   ResourceManager caches by path and frees at zero references, and each
 	   throwaway entity releases its model when it is deleted - so without this,
 	   a model shared by fifty entities is read off disk fifty times. Released
-	   at the end, leaving the resident chunks' own references to decide what
-	   stays loaded. */
-	std::vector<VoxModel*> pinned;
+	   on completion *and* on cancellation, leaving the resident chunks' own
+	   references to decide what stays loaded. */
+	std::set<std::string> paths;
 
+	for (Chunk* pChunk : progress.Chunks)
 	{
-		std::set<std::string> paths;
-
-		for (const std::pair<const uint32_t, Chunk*>& chunkEntry : pChunkSystem->GetChunks())
-		{
-			if (chunkEntry.second == nullptr)
-				continue;
-
-			for (const Value& rootEntity : chunkEntry.second->GetRootEntities())
-				CollectModelPaths(rootEntity, paths);
-		}
-
-		ResourceManager& resources = pWorld->GetApplication()->GetResourceManager();
-
-		for (const std::string& path : paths)
-			pinned.push_back(resources.LoadVox(path));
+		for (const Value& rootEntity : pChunk->GetRootEntities())
+			CollectModelPaths(rootEntity, paths);
 	}
 
-	for (const std::pair<const uint32_t, Chunk*>& chunkEntry : pChunkSystem->GetChunks())
-	{
-		Chunk* pChunk = chunkEntry.second;
+	ResourceManager& resources = pWorld->GetApplication()->GetResourceManager();
 
-		if (pChunk == nullptr)
+	for (const std::string& path : paths)
+		progress.Pinned.push_back(resources.LoadVox(path));
+}
+
+bool FarFieldBaker::Continue(Progress& progress, StreamingBudget::Scope& budget)
+{
+	if (!progress.bActive)
+		return true;
+
+	JsonSerializer& serializer = progress.pWorld->GetApplication()->GetSerializer();
+	const UVector3 v3LevelSize = progress.pVolume->GetLevelSize();
+
+	while (progress.uiChunk < progress.Chunks.size())
+	{
+		Chunk* pChunk = progress.Chunks[progress.uiChunk];
+		const std::vector<Value>& roots = pChunk->GetRootEntities();
+
+		if (progress.uiRoot >= roots.size())
+		{
+			++progress.uiChunk;
+			progress.uiRoot = 0;
+			continue;
+		}
+
+		const Value& rootEntity = roots[progress.uiRoot++];
+
+		/* Only static geometry. A monster or a projectile baked into a volume
+		   that is never rebuilt would leave a ghost of wherever it happened to
+		   be when the level loaded. Read off the value rather than the
+		   constructed entity so that a Player or a spawner is never constructed
+		   at all - some of those have side effects that a throwaway copy has no
+		   business triggering. */
+		if (!rootEntity.HasMember("Static") || !rootEntity["Static"].GetBool())
 			continue;
 
-		for (const Value& rootEntity : pChunk->GetRootEntities())
-		{
-			/* Only static geometry. A monster or a projectile baked into a
-			   volume that is never rebuilt would leave a ghost of wherever it
-			   happened to be when the level loaded. Read off the value rather
-			   than the constructed entity so that a Player or a spawner is
-			   never constructed at all - some of those have side effects that
-			   a throwaway copy has no business triggering. */
-			if (!rootEntity.HasMember("Static") || !rootEntity["Static"].GetBool())
-				continue;
+		/* ValueToEntity needs a mutable Value but does not modify it for the
+		   default bGenerateNewId of false; Chunk::GetRootEntities hands out
+		   const because nothing else has reason to write. */
+		Entity* pEntity = serializer.ValueToEntity(
+			const_cast<Value&>(rootEntity), *progress.pWorld);
 
-			/* ValueToEntity needs a mutable Value but does not modify it for
-			   the default bGenerateNewId of false; Chunk::GetRootEntities
-			   hands out const because nothing else has reason to write. */
-			Entity* pEntity = serializer.ValueToEntity(const_cast<Value&>(rootEntity), *pWorld);
+		if (pEntity == nullptr)
+			continue;
 
-			if (pEntity == nullptr)
-				continue;
+		++progress.uiEntities;
 
-			++uiEntities;
+		StampEntity(pEntity, *progress.pVolume, v3LevelSize, progress.uiRenderers);
 
-			StampEntity(pEntity, volume, v3LevelSize, uiRenderers);
+		/* Never added to the world, so this is the only owner. */
+		DeleteEntity(pEntity);
 
-			/* Never added to the world, so this is the only owner. */
-			DeleteEntity(pEntity);
-		}
+		budget.Consume();
+
+		if (budget.Exhausted())
+			return false;
 	}
 
-	for (VoxModel* pModel : pinned)
+	const uint32_t uiRenderers = progress.uiRenderers;
+	const uint32_t uiEntities = progress.uiEntities;
+	FarFieldVolume& volume = *progress.pVolume;
+
+	const double fMilliseconds = std::chrono::duration<double, std::milli>(
+		std::chrono::steady_clock::now() - progress.Start).count();
+
+	Cancel(progress);
+
+	volume.SetBuilt(uiRenderers > 0);
+
+	/* Wall clock is the whole build's, spread over however many frames it took
+	   - which is the number that matters now that it is not a stall. */
+	fprintf(stderr, "[farfield] built %u x %u x %u cells from %u renderers on %u static entities in %.1f ms "
+	                "(%u cells occupied)\n",
+	        volume.GetGridSize().x, volume.GetGridSize().y, volume.GetGridSize().z,
+	        uiRenderers, uiEntities, fMilliseconds, volume.GetOccupiedCellCount());
+
+	return true;
+}
+
+void FarFieldBaker::Cancel(Progress& progress)
+{
+	for (VoxModel* pModel : progress.Pinned)
 	{
 		if (pModel != nullptr)
 			pModel->Release();
 	}
 
-	volume.SetBuilt(uiRenderers > 0);
+	progress.Pinned.clear();
+	progress.Chunks.clear();
+	progress.pWorld = nullptr;
+	progress.pVolume = nullptr;
+	progress.uiChunk = 0;
+	progress.uiRoot = 0;
+	progress.uiRenderers = 0;
+	progress.uiEntities = 0;
+	progress.bActive = false;
+}
 
-	const double fMilliseconds =
-		std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+void FarFieldBaker::Build(World* pWorld, FarFieldVolume& volume)
+{
+	/* The unbounded form, for callers that are not the frame loop: the editor's
+	   validation pass and anything that wants the volume complete on return. */
+	Progress progress;
 
-	fprintf(stderr, "[farfield] built %u x %u x %u cells from %u renderers on %u static entities in %.1f ms "
-	                "(%u cells occupied)\n",
-	        volume.GetGridSize().x, volume.GetGridSize().y, volume.GetGridSize().z,
-	        uiRenderers, uiEntities, fMilliseconds, volume.GetOccupiedCellCount());
+	Begin(pWorld, volume, progress);
+
+	StreamingBudget unbounded = StreamingBudget::Unbounded();
+	StreamingBudget::Scope scope(unbounded);
+
+	while (!Continue(progress, scope))
+	{
+	}
 }
 
 uint32_t FarFieldBaker::Validate(World* pWorld, const FarFieldVolume& volume)

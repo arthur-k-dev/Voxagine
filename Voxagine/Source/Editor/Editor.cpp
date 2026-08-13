@@ -1,4 +1,5 @@
 #include "pch.h"
+#include "Core/LaunchOptions.h"
 #include "Editor.h"
 
 #include "Core/Application.h"
@@ -137,6 +138,21 @@ void Editor::WorldPostTick(World* pActiveWorld, float fDeltaTime)
 	pActiveWorld->PostTick(fDeltaTime);
 
 	UpdateAutoSaveWorld(fDeltaTime);
+
+	/* --editor-play <frame>: press Play, headlessly, on the frame asked for.
+	   See LaunchOptions::GetEditorPlayFrame for why this exists. */
+	const LaunchOptions& options = LaunchOptions::Get();
+
+	if (options.HasEditorPlay() && GetEditorModus() == EM_EDITOR)
+	{
+		if (++m_uiEditorPlayCountdown >= options.GetEditorPlayFrame())
+		{
+			fprintf(stderr, "[editor] --editor-play: entering play mode on frame %u\n",
+				m_uiEditorPlayCountdown);
+
+			OnPlay(false);
+		}
+	}
 }
 
 void Editor::WorldFixedTick(World* pActiveWorld, const GameTimer& fixedTimer)

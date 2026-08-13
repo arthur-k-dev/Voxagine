@@ -28,6 +28,112 @@
     {
      "RootEntities": [
       {
+       "EntityType": "AnEntityTypeThatDoesNotExist",
+       "ID": 3001,
+       "Name": "Hostile_Unknown_0_0",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          20.0,
+          2.0,
+          20.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          20.0,
+          2.0,
+          20.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ],
+       "Children": []
+      },
+      {
+       "EntityType": "Entity",
+       "ID": 3002,
+       "Name": "Hostile_NoChildren_0_0",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          22.0,
+          2.0,
+          20.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          22.0,
+          2.0,
+          20.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ]
+      },
+      {
+       "EntityType": "Entity",
+       "ID": 3003,
+       "Name": "Hostile_Bare_0_0",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Children": []
+      },
+      {
        "EntityType": "Entity",
        "ID": 1001,
        "Name": "Marker_0_0",
@@ -281,6 +387,112 @@
     },
     {
      "RootEntities": [
+      {
+       "EntityType": "AnEntityTypeThatDoesNotExist",
+       "ID": 3004,
+       "Name": "Hostile_Unknown_0_1",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          20.0,
+          2.0,
+          52.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          20.0,
+          2.0,
+          52.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ],
+       "Children": []
+      },
+      {
+       "EntityType": "Entity",
+       "ID": 3005,
+       "Name": "Hostile_NoChildren_0_1",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          22.0,
+          2.0,
+          52.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          22.0,
+          2.0,
+          52.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ]
+      },
+      {
+       "EntityType": "Entity",
+       "ID": 3006,
+       "Name": "Hostile_Bare_0_1",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Children": []
+      },
       {
        "EntityType": "Entity",
        "ID": 1005,
@@ -536,6 +748,112 @@
     {
      "RootEntities": [
       {
+       "EntityType": "AnEntityTypeThatDoesNotExist",
+       "ID": 3007,
+       "Name": "Hostile_Unknown_0_2",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          20.0,
+          2.0,
+          84.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          20.0,
+          2.0,
+          84.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ],
+       "Children": []
+      },
+      {
+       "EntityType": "Entity",
+       "ID": 3008,
+       "Name": "Hostile_NoChildren_0_2",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          22.0,
+          2.0,
+          84.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          22.0,
+          2.0,
+          84.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ]
+      },
+      {
+       "EntityType": "Entity",
+       "ID": 3009,
+       "Name": "Hostile_Bare_0_2",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Children": []
+      },
+      {
        "EntityType": "Entity",
        "ID": 1009,
        "Name": "Marker_0_2",
@@ -789,6 +1107,112 @@
     },
     {
      "RootEntities": [
+      {
+       "EntityType": "AnEntityTypeThatDoesNotExist",
+       "ID": 3010,
+       "Name": "Hostile_Unknown_0_3",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          20.0,
+          2.0,
+          116.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          20.0,
+          2.0,
+          116.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ],
+       "Children": []
+      },
+      {
+       "EntityType": "Entity",
+       "ID": 3011,
+       "Name": "Hostile_NoChildren_0_3",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          22.0,
+          2.0,
+          116.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          22.0,
+          2.0,
+          116.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ]
+      },
+      {
+       "EntityType": "Entity",
+       "ID": 3012,
+       "Name": "Hostile_Bare_0_3",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Children": []
+      },
       {
        "EntityType": "Entity",
        "ID": 1013,
@@ -1044,6 +1468,112 @@
     {
      "RootEntities": [
       {
+       "EntityType": "AnEntityTypeThatDoesNotExist",
+       "ID": 3013,
+       "Name": "Hostile_Unknown_0_4",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          20.0,
+          2.0,
+          148.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          20.0,
+          2.0,
+          148.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ],
+       "Children": []
+      },
+      {
+       "EntityType": "Entity",
+       "ID": 3014,
+       "Name": "Hostile_NoChildren_0_4",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          22.0,
+          2.0,
+          148.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          22.0,
+          2.0,
+          148.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ]
+      },
+      {
+       "EntityType": "Entity",
+       "ID": 3015,
+       "Name": "Hostile_Bare_0_4",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Children": []
+      },
+      {
        "EntityType": "Entity",
        "ID": 1017,
        "Name": "Marker_0_4",
@@ -1297,6 +1827,112 @@
     },
     {
      "RootEntities": [
+      {
+       "EntityType": "AnEntityTypeThatDoesNotExist",
+       "ID": 3016,
+       "Name": "Hostile_Unknown_1_0",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          52.0,
+          2.0,
+          20.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          52.0,
+          2.0,
+          20.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ],
+       "Children": []
+      },
+      {
+       "EntityType": "Entity",
+       "ID": 3017,
+       "Name": "Hostile_NoChildren_1_0",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          54.0,
+          2.0,
+          20.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          54.0,
+          2.0,
+          20.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ]
+      },
+      {
+       "EntityType": "Entity",
+       "ID": 3018,
+       "Name": "Hostile_Bare_1_0",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Children": []
+      },
       {
        "EntityType": "Entity",
        "ID": 1021,
@@ -1552,6 +2188,112 @@
     {
      "RootEntities": [
       {
+       "EntityType": "AnEntityTypeThatDoesNotExist",
+       "ID": 3019,
+       "Name": "Hostile_Unknown_1_1",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          52.0,
+          2.0,
+          52.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          52.0,
+          2.0,
+          52.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ],
+       "Children": []
+      },
+      {
+       "EntityType": "Entity",
+       "ID": 3020,
+       "Name": "Hostile_NoChildren_1_1",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          54.0,
+          2.0,
+          52.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          54.0,
+          2.0,
+          52.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ]
+      },
+      {
+       "EntityType": "Entity",
+       "ID": 3021,
+       "Name": "Hostile_Bare_1_1",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Children": []
+      },
+      {
        "EntityType": "Entity",
        "ID": 1025,
        "Name": "Marker_1_1",
@@ -1805,6 +2547,112 @@
     },
     {
      "RootEntities": [
+      {
+       "EntityType": "AnEntityTypeThatDoesNotExist",
+       "ID": 3022,
+       "Name": "Hostile_Unknown_1_2",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          52.0,
+          2.0,
+          84.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          52.0,
+          2.0,
+          84.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ],
+       "Children": []
+      },
+      {
+       "EntityType": "Entity",
+       "ID": 3023,
+       "Name": "Hostile_NoChildren_1_2",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          54.0,
+          2.0,
+          84.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          54.0,
+          2.0,
+          84.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ]
+      },
+      {
+       "EntityType": "Entity",
+       "ID": 3024,
+       "Name": "Hostile_Bare_1_2",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Children": []
+      },
       {
        "EntityType": "Entity",
        "ID": 1029,
@@ -2060,6 +2908,112 @@
     {
      "RootEntities": [
       {
+       "EntityType": "AnEntityTypeThatDoesNotExist",
+       "ID": 3025,
+       "Name": "Hostile_Unknown_1_3",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          52.0,
+          2.0,
+          116.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          52.0,
+          2.0,
+          116.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ],
+       "Children": []
+      },
+      {
+       "EntityType": "Entity",
+       "ID": 3026,
+       "Name": "Hostile_NoChildren_1_3",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          54.0,
+          2.0,
+          116.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          54.0,
+          2.0,
+          116.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ]
+      },
+      {
+       "EntityType": "Entity",
+       "ID": 3027,
+       "Name": "Hostile_Bare_1_3",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Children": []
+      },
+      {
        "EntityType": "Entity",
        "ID": 1033,
        "Name": "Marker_1_3",
@@ -2313,6 +3267,112 @@
     },
     {
      "RootEntities": [
+      {
+       "EntityType": "AnEntityTypeThatDoesNotExist",
+       "ID": 3028,
+       "Name": "Hostile_Unknown_1_4",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          52.0,
+          2.0,
+          148.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          52.0,
+          2.0,
+          148.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ],
+       "Children": []
+      },
+      {
+       "EntityType": "Entity",
+       "ID": 3029,
+       "Name": "Hostile_NoChildren_1_4",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          54.0,
+          2.0,
+          148.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          54.0,
+          2.0,
+          148.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ]
+      },
+      {
+       "EntityType": "Entity",
+       "ID": 3030,
+       "Name": "Hostile_Bare_1_4",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Children": []
+      },
       {
        "EntityType": "Entity",
        "ID": 1037,
@@ -2568,6 +3628,112 @@
     {
      "RootEntities": [
       {
+       "EntityType": "AnEntityTypeThatDoesNotExist",
+       "ID": 3031,
+       "Name": "Hostile_Unknown_2_0",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          84.0,
+          2.0,
+          20.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          84.0,
+          2.0,
+          20.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ],
+       "Children": []
+      },
+      {
+       "EntityType": "Entity",
+       "ID": 3032,
+       "Name": "Hostile_NoChildren_2_0",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          86.0,
+          2.0,
+          20.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          86.0,
+          2.0,
+          20.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ]
+      },
+      {
+       "EntityType": "Entity",
+       "ID": 3033,
+       "Name": "Hostile_Bare_2_0",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Children": []
+      },
+      {
        "EntityType": "Entity",
        "ID": 1041,
        "Name": "Marker_2_0",
@@ -2821,6 +3987,112 @@
     },
     {
      "RootEntities": [
+      {
+       "EntityType": "AnEntityTypeThatDoesNotExist",
+       "ID": 3034,
+       "Name": "Hostile_Unknown_2_1",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          84.0,
+          2.0,
+          52.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          84.0,
+          2.0,
+          52.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ],
+       "Children": []
+      },
+      {
+       "EntityType": "Entity",
+       "ID": 3035,
+       "Name": "Hostile_NoChildren_2_1",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          86.0,
+          2.0,
+          52.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          86.0,
+          2.0,
+          52.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ]
+      },
+      {
+       "EntityType": "Entity",
+       "ID": 3036,
+       "Name": "Hostile_Bare_2_1",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Children": []
+      },
       {
        "EntityType": "Entity",
        "ID": 1045,
@@ -3076,6 +4348,112 @@
     {
      "RootEntities": [
       {
+       "EntityType": "AnEntityTypeThatDoesNotExist",
+       "ID": 3037,
+       "Name": "Hostile_Unknown_2_2",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          84.0,
+          2.0,
+          84.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          84.0,
+          2.0,
+          84.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ],
+       "Children": []
+      },
+      {
+       "EntityType": "Entity",
+       "ID": 3038,
+       "Name": "Hostile_NoChildren_2_2",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          86.0,
+          2.0,
+          84.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          86.0,
+          2.0,
+          84.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ]
+      },
+      {
+       "EntityType": "Entity",
+       "ID": 3039,
+       "Name": "Hostile_Bare_2_2",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Children": []
+      },
+      {
        "EntityType": "Entity",
        "ID": 1049,
        "Name": "Marker_2_2",
@@ -3329,6 +4707,112 @@
     },
     {
      "RootEntities": [
+      {
+       "EntityType": "AnEntityTypeThatDoesNotExist",
+       "ID": 3040,
+       "Name": "Hostile_Unknown_2_3",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          84.0,
+          2.0,
+          116.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          84.0,
+          2.0,
+          116.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ],
+       "Children": []
+      },
+      {
+       "EntityType": "Entity",
+       "ID": 3041,
+       "Name": "Hostile_NoChildren_2_3",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          86.0,
+          2.0,
+          116.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          86.0,
+          2.0,
+          116.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ]
+      },
+      {
+       "EntityType": "Entity",
+       "ID": 3042,
+       "Name": "Hostile_Bare_2_3",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Children": []
+      },
       {
        "EntityType": "Entity",
        "ID": 1053,
@@ -3584,6 +5068,112 @@
     {
      "RootEntities": [
       {
+       "EntityType": "AnEntityTypeThatDoesNotExist",
+       "ID": 3043,
+       "Name": "Hostile_Unknown_2_4",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          84.0,
+          2.0,
+          148.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          84.0,
+          2.0,
+          148.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ],
+       "Children": []
+      },
+      {
+       "EntityType": "Entity",
+       "ID": 3044,
+       "Name": "Hostile_NoChildren_2_4",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          86.0,
+          2.0,
+          148.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          86.0,
+          2.0,
+          148.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ]
+      },
+      {
+       "EntityType": "Entity",
+       "ID": 3045,
+       "Name": "Hostile_Bare_2_4",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Children": []
+      },
+      {
        "EntityType": "Entity",
        "ID": 1057,
        "Name": "Marker_2_4",
@@ -3837,6 +5427,112 @@
     },
     {
      "RootEntities": [
+      {
+       "EntityType": "AnEntityTypeThatDoesNotExist",
+       "ID": 3046,
+       "Name": "Hostile_Unknown_3_0",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          116.0,
+          2.0,
+          20.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          116.0,
+          2.0,
+          20.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ],
+       "Children": []
+      },
+      {
+       "EntityType": "Entity",
+       "ID": 3047,
+       "Name": "Hostile_NoChildren_3_0",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          118.0,
+          2.0,
+          20.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          118.0,
+          2.0,
+          20.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ]
+      },
+      {
+       "EntityType": "Entity",
+       "ID": 3048,
+       "Name": "Hostile_Bare_3_0",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Children": []
+      },
       {
        "EntityType": "Entity",
        "ID": 1061,
@@ -4092,6 +5788,112 @@
     {
      "RootEntities": [
       {
+       "EntityType": "AnEntityTypeThatDoesNotExist",
+       "ID": 3049,
+       "Name": "Hostile_Unknown_3_1",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          116.0,
+          2.0,
+          52.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          116.0,
+          2.0,
+          52.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ],
+       "Children": []
+      },
+      {
+       "EntityType": "Entity",
+       "ID": 3050,
+       "Name": "Hostile_NoChildren_3_1",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          118.0,
+          2.0,
+          52.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          118.0,
+          2.0,
+          52.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ]
+      },
+      {
+       "EntityType": "Entity",
+       "ID": 3051,
+       "Name": "Hostile_Bare_3_1",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Children": []
+      },
+      {
        "EntityType": "Entity",
        "ID": 1065,
        "Name": "Marker_3_1",
@@ -4345,6 +6147,112 @@
     },
     {
      "RootEntities": [
+      {
+       "EntityType": "AnEntityTypeThatDoesNotExist",
+       "ID": 3052,
+       "Name": "Hostile_Unknown_3_2",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          116.0,
+          2.0,
+          84.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          116.0,
+          2.0,
+          84.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ],
+       "Children": []
+      },
+      {
+       "EntityType": "Entity",
+       "ID": 3053,
+       "Name": "Hostile_NoChildren_3_2",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          118.0,
+          2.0,
+          84.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          118.0,
+          2.0,
+          84.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ]
+      },
+      {
+       "EntityType": "Entity",
+       "ID": 3054,
+       "Name": "Hostile_Bare_3_2",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Children": []
+      },
       {
        "EntityType": "Entity",
        "ID": 1069,
@@ -4600,6 +6508,112 @@
     {
      "RootEntities": [
       {
+       "EntityType": "AnEntityTypeThatDoesNotExist",
+       "ID": 3055,
+       "Name": "Hostile_Unknown_3_3",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          116.0,
+          2.0,
+          116.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          116.0,
+          2.0,
+          116.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ],
+       "Children": []
+      },
+      {
+       "EntityType": "Entity",
+       "ID": 3056,
+       "Name": "Hostile_NoChildren_3_3",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          118.0,
+          2.0,
+          116.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          118.0,
+          2.0,
+          116.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ]
+      },
+      {
+       "EntityType": "Entity",
+       "ID": 3057,
+       "Name": "Hostile_Bare_3_3",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Children": []
+      },
+      {
        "EntityType": "Entity",
        "ID": 1073,
        "Name": "Marker_3_3",
@@ -4853,6 +6867,112 @@
     },
     {
      "RootEntities": [
+      {
+       "EntityType": "AnEntityTypeThatDoesNotExist",
+       "ID": 3058,
+       "Name": "Hostile_Unknown_3_4",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          116.0,
+          2.0,
+          148.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          116.0,
+          2.0,
+          148.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ],
+       "Children": []
+      },
+      {
+       "EntityType": "Entity",
+       "ID": 3059,
+       "Name": "Hostile_NoChildren_3_4",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          118.0,
+          2.0,
+          148.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          118.0,
+          2.0,
+          148.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ]
+      },
+      {
+       "EntityType": "Entity",
+       "ID": 3060,
+       "Name": "Hostile_Bare_3_4",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Children": []
+      },
       {
        "EntityType": "Entity",
        "ID": 1077,
@@ -5108,6 +7228,112 @@
     {
      "RootEntities": [
       {
+       "EntityType": "AnEntityTypeThatDoesNotExist",
+       "ID": 3061,
+       "Name": "Hostile_Unknown_4_0",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          148.0,
+          2.0,
+          20.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          148.0,
+          2.0,
+          20.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ],
+       "Children": []
+      },
+      {
+       "EntityType": "Entity",
+       "ID": 3062,
+       "Name": "Hostile_NoChildren_4_0",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          150.0,
+          2.0,
+          20.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          150.0,
+          2.0,
+          20.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ]
+      },
+      {
+       "EntityType": "Entity",
+       "ID": 3063,
+       "Name": "Hostile_Bare_4_0",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Children": []
+      },
+      {
        "EntityType": "Entity",
        "ID": 1081,
        "Name": "Marker_4_0",
@@ -5361,6 +7587,112 @@
     },
     {
      "RootEntities": [
+      {
+       "EntityType": "AnEntityTypeThatDoesNotExist",
+       "ID": 3064,
+       "Name": "Hostile_Unknown_4_1",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          148.0,
+          2.0,
+          52.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          148.0,
+          2.0,
+          52.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ],
+       "Children": []
+      },
+      {
+       "EntityType": "Entity",
+       "ID": 3065,
+       "Name": "Hostile_NoChildren_4_1",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          150.0,
+          2.0,
+          52.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          150.0,
+          2.0,
+          52.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ]
+      },
+      {
+       "EntityType": "Entity",
+       "ID": 3066,
+       "Name": "Hostile_Bare_4_1",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Children": []
+      },
       {
        "EntityType": "Entity",
        "ID": 1085,
@@ -5616,6 +7948,112 @@
     {
      "RootEntities": [
       {
+       "EntityType": "AnEntityTypeThatDoesNotExist",
+       "ID": 3067,
+       "Name": "Hostile_Unknown_4_2",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          148.0,
+          2.0,
+          84.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          148.0,
+          2.0,
+          84.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ],
+       "Children": []
+      },
+      {
+       "EntityType": "Entity",
+       "ID": 3068,
+       "Name": "Hostile_NoChildren_4_2",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          150.0,
+          2.0,
+          84.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          150.0,
+          2.0,
+          84.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ]
+      },
+      {
+       "EntityType": "Entity",
+       "ID": 3069,
+       "Name": "Hostile_Bare_4_2",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Children": []
+      },
+      {
        "EntityType": "Entity",
        "ID": 1089,
        "Name": "Marker_4_2",
@@ -5870,6 +8308,112 @@
     {
      "RootEntities": [
       {
+       "EntityType": "AnEntityTypeThatDoesNotExist",
+       "ID": 3070,
+       "Name": "Hostile_Unknown_4_3",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          148.0,
+          2.0,
+          116.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          148.0,
+          2.0,
+          116.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ],
+       "Children": []
+      },
+      {
+       "EntityType": "Entity",
+       "ID": 3071,
+       "Name": "Hostile_NoChildren_4_3",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          150.0,
+          2.0,
+          116.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          150.0,
+          2.0,
+          116.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ]
+      },
+      {
+       "EntityType": "Entity",
+       "ID": 3072,
+       "Name": "Hostile_Bare_4_3",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Children": []
+      },
+      {
        "EntityType": "Entity",
        "ID": 1093,
        "Name": "Marker_4_3",
@@ -6123,6 +8667,112 @@
     },
     {
      "RootEntities": [
+      {
+       "EntityType": "AnEntityTypeThatDoesNotExist",
+       "ID": 3073,
+       "Name": "Hostile_Unknown_4_4",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          148.0,
+          2.0,
+          148.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          148.0,
+          2.0,
+          148.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ],
+       "Children": []
+      },
+      {
+       "EntityType": "Entity",
+       "ID": 3074,
+       "Name": "Hostile_NoChildren_4_4",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Components": [
+        {
+         "ComponentType": "Transform",
+         "Enabled": true,
+         "Component Tags": [],
+         "World Position": [
+          150.0,
+          2.0,
+          148.0
+         ],
+         "World Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "World Scale": [
+          1.0,
+          1.0,
+          1.0
+         ],
+         "Local Position": [
+          150.0,
+          2.0,
+          148.0
+         ],
+         "Local Rotation": [
+          0.0,
+          0.0,
+          0.0
+         ],
+         "Local Scale": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        }
+       ]
+      },
+      {
+       "EntityType": "Entity",
+       "ID": 3075,
+       "Name": "Hostile_Bare_4_4",
+       "Enabled": true,
+       "Static": false,
+       "Destructible": false,
+       "Tags": [],
+       "Persistent": false,
+       "Children": []
+      },
       {
        "EntityType": "Entity",
        "ID": 1097,

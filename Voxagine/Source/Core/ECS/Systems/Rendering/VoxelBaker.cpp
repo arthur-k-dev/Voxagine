@@ -5,7 +5,9 @@
 #include "Core/ECS/Systems/Physics/PhysicsSystem.h"
 
 #include "Core/ECS/Components/VoxRenderer.h"
+#include "Core/ECS/Systems/Chunk/StreamingCounters.h"
 #include "Core/ECS/Systems/Rendering/VoxelStamp.h"
+#include "Core/ECS/Systems/Chunk/StreamingBudgets.h"
 #include "Core/Resources/Formats/VoxModel.h"
 #include "Core/Application.h"
 #include "Core/Platform/Rendering/FrameProfiler.h"
@@ -27,7 +29,7 @@ void VoxelBaker::Init(RenderSystem* pRenderSystem, PhysicsSystem* pPhysicsSystem
 	m_pRenderContext = m_pRenderSystem->m_pRenderContext;
 }
 
-void VoxelBaker::Bake()
+bool VoxelBaker::Bake()
 {
 	/* RENDERING_PLAN.md Phase 0: the known main-thread cost this pass
 	   measures. Guarded so a disabled profiler pays nothing but this one
@@ -57,6 +59,13 @@ void VoxelBaker::Bake()
 	uint32_t uiStaticVoxels = 0;
 	uint32_t uiDynamicVoxels = 0;
 
+	/* Phase 5. Whatever this pass does not reach keeps its flags and is picked
+	   up by the next one - see StreamingBudgets::VoxelBaking for why that is
+	   the resumption mechanism rather than a cursor. */
+	StreamingBudget::Scope budget(StreamingBudgets::Get().VoxelBaking);
+
+	bool bPending = false;
+
 	for (VoxRenderer* pRenderer : m_pRenderSystem->m_VoxRenderers)
 	{
 		/* DYNAMIC_MODELS_PLAN.md phase 3. A dynamic renderer is never stamped -
@@ -76,6 +85,7 @@ void VoxelBaker::Bake()
 		}
 
 		bool bEnabled = pRenderer->IsEnabled();
+
 
 		bool bIsStaticChunkLoaded = pRenderer->IsChunkInstanceLoaded() && pRenderer->GetOwner()->IsStatic();
 
@@ -143,11 +153,46 @@ void VoxelBaker::Bake()
 		}
 
 
-		/* Past every skip above, so this renderer is genuinely being re-baked
-		   and its cost belongs to one side of the split. Recorded at both exits
+		/* Past every skip above, so this renderer genuinely wants re-stamping -
+		   which is exactly the point at which the budget is worth consulting.
+		   Everything before here is comparisons; everything after is voxel
+		   writes, and conflating the two is what made this pass unbounded.
+
+		   Nothing is recorded: the flags that got us here are still set, so the
+		   next frame's scan finds this renderer and every one behind it. That is
+		   the whole resumption mechanism. */
+		if (budget.Exhausted())
+		{
+			bPending = true;
+			break;
+		}
+
+		/* Its cost belongs to one side of the split. Recorded at both exits
 		   below - a disabled renderer clears without stamping, which is real
 		   work and would otherwise vanish from the count. */
 		const bool bRendererStatic = pRenderer->GetOwner()->IsStatic();
+
+		/* M7 (CHUNK_STREAMING_PLAN.md). A chunk that comes back is restored from
+		   its encoded voxels, which are what it looked like when it left - damage
+		   included. Re-stamping the pristine model over them is precisely
+		   "destroyed terrain comes back", and nothing said so until this counter
+		   existed. Counted here rather than asserted because it has to be
+		   visible to a Release headless run and to the perf gate. */
+		if (bRendererStatic && pRenderer->IsChunkInstanceLoaded())
+		{
+			StreamingCounters::Get().ChunkInstanceRestamps.fetch_add(1, std::memory_order_relaxed);
+
+			static const bool s_bAudit = std::getenv("VOXAGINE_CHUNK_IO_TIMINGS") != nullptr;
+
+			if (s_bAudit)
+			{
+				fprintf(stderr, "[chunk] re-stamping reloaded '%s' (updateRequested %d, updated %d, forced %d)\n",
+					pRenderer->GetOwner()->GetName().c_str(),
+					pRenderer->UpdateRequested() ? 1 : 0,
+					pRenderer->m_BakeData.Updated ? 1 : 0,
+					bForced ? 1 : 0);
+			}
+		}
 
 		const std::chrono::steady_clock::time_point rendererStart =
 			bProfiling ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
@@ -164,10 +209,25 @@ void VoxelBaker::Bake()
 				std::chrono::steady_clock::now() - rendererStart).count();
 
 			(bRendererStatic ? fStaticMs : fDynamicMs) += fMs;
+
+			/* One renderer's stamp is the *atom* of the bake budget, so its
+			   worst case is the floor on any frame the bake touches. Naming the
+			   renderer is what says whether the remaining hitch is "too many
+			   renderers in a frame" (a budget problem, solved) or "one model is
+			   too big" (which needs a resumable Occupy - phase 5's notes). */
+			static const bool s_bReportSlow = std::getenv("VOXAGINE_CHUNK_IO_TIMINGS") != nullptr;
+
+			if (s_bReportSlow && fMs >= 5.0)
+			{
+				fprintf(stderr, "[bake] '%s' stamped %u voxels in %.2f ms\n",
+					pRenderer->GetOwner()->GetName().c_str(), uiVoxels, fMs);
+			}
 		};
 
 		/* Remove old voxels. A bake that is itself a repair does not start
-		   another one - see NotifyClearedRegion. */
+		   another one - see NotifyClearedRegion.
+
+		   */
 		const bool bRepairOnly = pRenderer->m_BakeData.RepairOnly;
 		pRenderer->m_BakeData.RepairOnly = false;
 
@@ -204,6 +264,8 @@ void VoxelBaker::Bake()
 		Occupy(pRenderer, &pRenderer->m_BakeData);
 
 		fAccount(pRenderer->m_BakeData.Size);
+
+		budget.Consume();
 	}
 
 	if (bProfiling)
@@ -236,6 +298,8 @@ void VoxelBaker::Bake()
 		   quietly with the level. */
 		FrameProfiler::Get().Report("CPU VoxelBaker::Bake (repair scan)", m_fRepairMilliseconds);
 	}
+
+	return !bPending;
 }
 
 namespace
@@ -563,6 +627,24 @@ void VoxelBaker::NotifyClearedRegion(VoxRenderer* pCleared, const Vector3& v3Gri
 	if (bProfiling)
 		m_fRepairMilliseconds +=
 			std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+}
+
+void VoxelBaker::ForgetChunkStamp(VoxRenderer* pRenderer)
+{
+	if (pRenderer == nullptr)
+		return;
+
+	VoxRenderer::BakeData& data = pRenderer->m_BakeData;
+
+	delete[] data.Positions;
+
+	data.Positions = nullptr;
+	data.Size = 0;
+	data.IsStatic = false;
+	data.Generation = 0;
+	data.Stamp = VoxRenderer::BakeData::StampKey();
+	data.StampMin = Vector3(1.f);
+	data.StampMax = Vector3(0.f);
 }
 
 void VoxelBaker::Clear(VoxRenderer* pRenderer, VoxRenderer::BakeData* pBakeData, bool bNotify)

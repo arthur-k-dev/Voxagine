@@ -36,6 +36,10 @@ set(VOXAGINE_TEST_SOURCES
     # as two vectors behind IVoxelWindow.
     ${VOXAGINE_TEST_DIR}/Harness/StreamingHarness.cpp
 
+    # A reflected entity that exists only here, so a cross-chunk link and
+    # "did gameplay tick" are expressible at all - see StreamingProbe.h.
+    ${VOXAGINE_TEST_DIR}/Harness/StreamingProbe.cpp
+
     # Voxel storage: the grid, the brick grid, the harness that models both.
     ${VOXAGINE_TEST_DIR}/VoxelStorage/VoxelGridChecks.cpp
     ${VOXAGINE_TEST_DIR}/VoxelStorage/VoxelBrickGridChecks.cpp
@@ -68,6 +72,9 @@ set(VOXAGINE_TEST_SOURCES
 
     # Chunk streaming: the window commit transaction and what survives a slide.
     ${VOXAGINE_TEST_DIR}/Streaming/WindowCommitChecks.cpp
+    ${VOXAGINE_TEST_DIR}/Streaming/ChunkReloadChecks.cpp
+    ${VOXAGINE_TEST_DIR}/Streaming/ChunkUnloadChecks.cpp
+    ${VOXAGINE_TEST_DIR}/Streaming/EntityStreamingChecks.cpp
     ${VOXAGINE_TEST_DIR}/Streaming/StreamingPerf.cpp
 
     # Connectivity: which geometry is still holding itself up.

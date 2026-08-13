@@ -18,9 +18,11 @@
 #include "ECS/Entities/Camera.h"
 
 #include <chrono>
+#include "Core/Platform/Rendering/FrameProfiler.h"
 #include <iostream>
 #include <thread>
 #include <SDL3/SDL_messagebox.h>
+#include "Core/Platform/Rendering/RenderDocCapture.h"
 #include "Core/GameTimer.h"
 #include "ECS/WorldManager.h"
 #include "ECS/Systems/Physics/PhysicsSystem.h"
@@ -40,6 +42,47 @@ Application::Application() :
 Application::~Application()
 {
 
+}
+
+/* Main-loop stage timing, so "the transition frame took 94 ms" can be answered
+   with *which stage*. Every named cost this tree profiles is inside one system
+   or one function; before this there was nothing that said whether a frame's
+   time was in gameplay, in the render submission or in Present, and the answer
+   for a chunk transition turned out not to be any of the streaming timers.
+
+   Guarded on the profiler being enabled (VOXAGINE_PROFILE=1, or a Debug build),
+   so a shipping frame pays one predictable branch per stage. */
+namespace
+{
+	class StageTimer
+	{
+	public:
+		explicit StageTimer(const char* pName) :
+			m_pName(pName),
+			m_bEnabled(FrameProfiler::Get().IsEnabled()),
+			m_Start(m_bEnabled ? std::chrono::steady_clock::now()
+				: std::chrono::steady_clock::time_point())
+		{
+		}
+
+		~StageTimer()
+		{
+			if (!m_bEnabled)
+				return;
+
+			FrameProfiler::Get().Report(m_pName,
+				std::chrono::duration<double, std::milli>(
+					std::chrono::steady_clock::now() - m_Start).count());
+		}
+
+		StageTimer(const StageTimer&) = delete;
+		StageTimer& operator=(const StageTimer&) = delete;
+
+	private:
+		const char* m_pName;
+		bool m_bEnabled;
+		std::chrono::steady_clock::time_point m_Start;
+	};
 }
 
 void Application::Run()
@@ -84,6 +127,14 @@ void Application::Run()
 #endif
 
 	m_JobManager.Initialize();
+
+	/* Before Platform::Initialize, and that is the whole constraint: RenderDoc
+	   hooks Vulkan through the loader, so its library has to be in the process
+	   before VKRenderContext::InitializeBackend calls volkInitialize and creates
+	   the instance. A no-op when RenderDoc is neither injected nor asked for,
+	   which is every ordinary run. See RenderDocCapture.h. */
+	RenderDocCapture::Get().Initialize();
+
 	m_Platform.Initialize();
 
 	/* A window/input platform may initialize while its renderer rejects the
@@ -170,9 +221,15 @@ void Application::Run()
 
 			m_Platform.GetRenderContext()->Clear();
 
-			OnUpdate();
+			{
+				StageTimer stage("CPU Frame OnUpdate");
+				OnUpdate();
+			}
 
-			m_JobManager.ProcessFinishedJobs();
+			{
+				StageTimer stage("CPU Frame JobCallbacks");
+				m_JobManager.ProcessFinishedJobs();
+			}
 
 			/* Update loop for world */
 			World* activeWorld = m_WorldManager.GetTopWorld();
@@ -242,7 +299,12 @@ void Application::Run()
 #else
 			if (activeWorld)
 			{
-				activeWorld->PreTick();
+				{
+					StageTimer stage("CPU Frame World PreTick");
+					activeWorld->PreTick();
+				}
+
+				StageTimer stage("CPU Frame World Tick");
 				activeWorld->Tick(fElapsed);
 			}
 
@@ -254,13 +316,17 @@ void Application::Run()
 
 				if (activeWorld)
 				{
+					StageTimer stage("CPU Frame World FixedTick");
 					activeWorld->FixedTick(*m_Platform.m_pFixedGameTimer);
 					activeWorld->PostFixedTick(*m_Platform.m_pFixedGameTimer);
 				}
 			});
 
 			if (activeWorld)
+			{
+				StageTimer stage("CPU Frame World PostTick");
 				activeWorld->PostTick(fElapsed);
+			}
 
 			Camera* pCamera = nullptr;
 			if (activeWorld) {
@@ -293,6 +359,8 @@ void Application::Run()
 
 			if (activeWorld)
 			{
+				StageTimer stage("CPU Frame World Render");
+
 				if (bFixedStep)
 				{
 					activeWorld->Render(*m_Platform.m_pFixedGameTimer);
@@ -302,7 +370,10 @@ void Application::Run()
 			}
 #endif
 
-			OnDraw();
+			{
+				StageTimer stage("CPU Frame OnDraw");
+				OnDraw();
+			}
 
 			/* --frames / --screenshot (LaunchOptions.h). Counted here rather
 			   than in the outer while loop because that one spins on the game
@@ -332,7 +403,10 @@ void Application::Run()
 				}
 			}
 
-			m_Platform.GetRenderContext()->Present();
+			{
+				StageTimer stage("CPU Frame Present");
+				m_Platform.GetRenderContext()->Present();
+			}
 
 #ifdef _ORBIS
 			uint32_t uiFPS = GetTimer().GetFramesPerSecond();

@@ -84,9 +84,12 @@ namespace
 	   press and others on release, and a key that stayed down would fire the
 	   repeat handlers instead.
 
-	   forward-on/forward-off are the exception and use Held deliberately:
-	   walking a player across a chunk boundary is what the streaming gates
-	   script, and that takes many frames of one key being down. */
+	   forward-on/forward-off and backward-on/backward-off are the exception and
+	   use Held deliberately: walking a player across a chunk boundary is what
+	   the streaming gates script, and that takes many frames of one key being
+	   down. Walking *back* is what makes a chunk unload and then reload, which
+	   is the only way a script reaches the reload path at all - see
+	   CHUNK_STREAMING_PLAN.md M7. */
 	SDL_Scancode StepUIScript()
 	{
 		if (!LaunchOptions::Get().HasUIScript())
@@ -113,7 +116,13 @@ namespace
 			return SDL_SCANCODE_UNKNOWN;
 		}
 
-		if (token == "forward-off")
+		if (token == "backward-on")
+		{
+			g_UIScript.Held = SDL_SCANCODE_S;
+			return SDL_SCANCODE_UNKNOWN;
+		}
+
+		if (token == "forward-off" || token == "backward-off")
 		{
 			g_UIScript.Held = SDL_SCANCODE_UNKNOWN;
 			return SDL_SCANCODE_UNKNOWN;
@@ -305,6 +314,11 @@ Keyboard::State Keyboard::GetState() const
 		case SDL_SCANCODE_ESCAPE: state.Escape = true; break;
 		case SDL_SCANCODE_P:      state.P = true; break;
 		case SDL_SCANCODE_W:      state.W = true; break;
+		case SDL_SCANCODE_S:      state.S = true; break;
+		/* A token whose scancode is not listed here does nothing at all, in
+		   silence, and the run still looks healthy - backward-on was added and
+		   spent ninety scripted seconds not moving the player before that was
+		   noticed. Add the case with the token. */
 		default: break;
 		}
 	};

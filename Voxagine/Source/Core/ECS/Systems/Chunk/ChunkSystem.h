@@ -1,6 +1,9 @@
 #pragma once
 #include "Core/ECS/ComponentSystem.h"
 #include "Core/ECS/Systems/Chunk/ChunkUpdateGroup.h"
+#include "Core/ECS/Systems/Physics/VoxelGrid.h"
+
+#include <vector>
 
 #define GRID_SIZE 3
 #define GRID_CENTER_OFFSET 1
@@ -31,7 +34,25 @@ public:
 	   Docs/CHUNK_STREAMING_PLAN.md give it more to answer for - a far-field
 	   build in progress, renderers whose stamps have not been baked yet - so
 	   callers should ask this rather than the group list. */
-	bool IsStreaming() const { return !m_UpdateGroups.empty(); }
+	bool IsStreaming() const;
+
+	/* R1: gameplay never ticks against a missing initial window. True once the
+	   world's first 3x3 resident window is committed and its roots are admitted;
+	   World::Tick and World::FixedTick hold every entity and every gameplay
+	   system until it is.
+
+	   It is inert today and that is deliberate. ChunkSystem::Start still builds
+	   the initial window synchronously, so this is true the moment Start
+	   returns - the gate exists so that phase 4 can make the initial window
+	   stream through the same machine as every other one and put the loading
+	   screen over the wait, instead of discovering at that point that gameplay
+	   has been running against a world that is not there. That is precisely the
+	   experiment's E12/E3/E7/E8: it made every step resumable and never made
+	   anything wait for the result, then patched the consequences per manager.
+
+	   True with no camera as well, because a world with no camera has no window
+	   to wait for and holding it forever would be worse than any hitch. */
+	bool IsInitialWindowReady() const { return m_bInitialWindowReady; }
 
 	void SetCameraLoadOffset(Vector3 offset) { m_CameraLoadOffset = offset; }
 	Vector3 GetCameraLoadOffset() const { return m_CameraLoadOffset; }
@@ -62,6 +83,12 @@ protected:
 	   assert about, and one place a future phase can add to. */
 	void CommitWindow(ChunkUpdateGroup& group);
 
+	/* Construct the incoming chunks' entity trees, detached from the world,
+	   under StreamingBudgets::EntityStaging. Called opportunistically from
+	   US_RENDERING while the worker builds the back buffer, and again from
+	   US_ADMITTING_GAMEPLAY until it returns true. */
+	bool StageIncomingEntities(ChunkUpdateGroup& group);
+
 	/* bBackBuffer says which of the voxel mapper's two buffers viewPortData
 	   points at. The occupancy bricks are per-buffer, so writing voxels into
 	   one while updating the other's counts silently loses geometry a swap
@@ -72,19 +99,50 @@ protected:
 	void OnChunkLoaded(ChunkUpdateGroup::Item* pUpdateItem);
 	void OnChunkUnloaded(ChunkUpdateGroup::Item* pUpdateItem);
 
+	/* The 48 MiB a resident chunk's voxels and owner slots occupy, moved from
+	   the chunk that just left to the chunk that is arriving instead of going
+	   back to the allocator and coming out of it again. Ledger E10, simplified:
+	   one block size per world, a hard cap, no re-sorting. */
+	void AcquireChunkStorage(Chunk& chunk);
+	void RecycleChunkStorage(Chunk& chunk);
+
+	static size_t ChunkVoxelCount(const Chunk& chunk);
+
 	void OnWorldResumed(World* pWorld);
 
 private:
+	struct ChunkStorage
+	{
+		std::vector<Voxel> Voxels;
+		VoxelOwnerVolume Owners;
+	};
+
+	/* Six: a straight slide turns over three chunks and a second group can be
+	   queued behind the first, so six is the most that can be in the air at
+	   once. Anything past that is a block the pool would hold indefinitely,
+	   which is what E10 objects to - those go back to the allocator. */
+	static constexpr size_t k_uiMaxPooledChunkStorage = 6;
+
 	VoxelGrid* m_pVoxelGrid;
 	IVoxelWindow* m_pVoxelWindow = nullptr;
 	std::unordered_map<uint32_t, Chunk*> m_Chunks;
 
 	std::vector<ChunkUpdateGroup> m_UpdateGroups;
+	std::vector<ChunkStorage> m_ChunkStoragePool;
 
 	UVector2 m_WorldSize;
 	UVector2 m_ChunkSize;
 	uint32_t m_uiNumChunkY;
 	uint32_t m_uiNumChunkX;
+	bool m_bInitialWindowReady = false;
+
+	/* The initial group has admitted its roots. Not the same as the window
+	   being ready: the roots are in the world but their geometry may still be
+	   arriving, because phase 5 made the stamp budgeted too. Gameplay waits for
+	   both - a player who starts walking before the river bed has been stamped
+	   walks into a hole, which is exactly what the first run of phase 5 did. */
+	bool m_bInitialRootsAdmitted = false;
+
 	UVector2 m_ClampedCameraPosition;
 	Vector3 m_CameraLoadOffset = Vector3(0);
 };

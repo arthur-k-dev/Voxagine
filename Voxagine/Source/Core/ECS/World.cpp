@@ -4,11 +4,16 @@
 #include "Core/Application.h"
 #include "Core/ECS/Systems/Physics/PhysicsSystem.h"
 #include "Core/ECS/Systems/Rendering/RenderSystem.h"
+#include "Core/Platform/Rendering/RenderContext.h"
 #include "Core/ECS/Systems/Chunk/ChunkSystem.h"
+#include "Core/ECS/Systems/Chunk/StreamingCounters.h"
 #include "Core/ECS/Systems/ScriptSystem.h"
 #include "Core/ECS/Entities/Camera.h"
 #include "Core/ECS/Components/VoxRenderer.h"
 
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <typeinfo>
 #include <typeindex>
 #include "Core/ECS/Components/Transform.h"
@@ -72,16 +77,46 @@ void World::Initialize()
 	{
 		Camera* MainCamera = new Camera(this);
 		MainCamera->SetName("Main Camera");
+
 		AddEntity(MainCamera);
 
 		SetMainCamera(MainCamera);
 	}
 
+	/* Split by system, because `[world-switch] initialize` is the single largest
+	   stall the game has and it happens off the frame loop where the frame
+	   profiler cannot see it - so "which Start" was a guess until this line
+	   existed. Off unless asked for; it is one clock read per system. */
+	const bool bReportStarts = std::getenv("VOXAGINE_CHUNK_IO_TIMINGS") != nullptr;
+
 	for (ComponentSystem* pSystem : m_Systems)
+	{
+		const auto begin = std::chrono::steady_clock::now();
+
 		pSystem->Start();
 
+		if (bReportStarts)
+		{
+			fprintf(stderr, "[world-switch]   %s::Start %.1f ms\n",
+				typeid(*pSystem).name(),
+				std::chrono::duration<double, std::milli>(
+					std::chrono::steady_clock::now() - begin).count());
+		}
+	}
+
 	if (m_pRenderSystem != nullptr)
+	{
+		const auto begin = std::chrono::steady_clock::now();
+
 		m_pRenderSystem->Start();
+
+		if (bReportStarts)
+		{
+			fprintf(stderr, "[world-switch]   RenderSystem::Start %.1f ms\n",
+				std::chrono::duration<double, std::milli>(
+					std::chrono::steady_clock::now() - begin).count());
+		}
+	}
 
 	if (!m_GroundTexturePath.empty())
 		SetGroundTexturePath(m_GroundTexturePath);
@@ -129,6 +164,13 @@ void World::Unload()
 {
 	OPTICK_EVENT();
 	m_pApplication->GetJobManager().DiscardJobQueue(m_JobQueueHandle);
+
+	/* An outstanding far-field build holds this world's chunks and a pin on
+	   every model the level names, so it has to be abandoned before either goes
+	   away. Releasing the pins is the half that would otherwise be silent: they
+	   would keep the whole level's models loaded for the rest of the session. */
+	if (RenderContext* pRenderContext = GetRenderContext())
+		pRenderContext->CancelFarFieldBuild();
 
 	for (Entity* pEntity : m_Entities)
 	{
@@ -199,6 +241,11 @@ void World::PreTick()
 	}
 	m_AddedEntities.clear();
 
+	/* The frame's answer to "is gameplay held", decided once, here, before
+	   anything in this frame asks. See IsGameplayHeld. */
+	m_bGameplayHeldThisFrame =
+		m_pChunkSystem != nullptr && !m_pChunkSystem->IsInitialWindowReady();
+
 	/* Update already existing entities if any new components have been added on runtime */
 	for (Entity* pEntity : m_Entities)
 		pEntity->PreTick();
@@ -207,49 +254,111 @@ void World::PreTick()
 	GetApplication()->GetSerializer().ResolveWorldLinks(*this);
 }
 
+bool World::IsGameplayHeld() const
+{
+	/* **Latched at PreTick, not evaluated per callback, and that is the whole
+	   point.** The condition changes *inside* World::Tick - ChunkSystem::Tick is
+	   what advances the initial window to residency - so asking again in
+	   PostFixedTick later in the same frame can give a different answer. When it
+	   does, an entity's PostFixedTick runs before its first Tick, which is where
+	   Entity::Start is called from: CameraMultiplayer::PostFixedTick then runs
+	   with m_pMainCamera still null, gives up, and never follows anything again.
+
+	   Intermittent, because it depends on which frame the window happens to
+	   become resident in. Holding the answer steady for a whole frame is what
+	   makes the lifecycle order (Tick before PostFixedTick) mean anything. */
+	return m_bGameplayHeldThisFrame;
+}
+
 void World::Tick(float fDeltaTime)
 {
+	/* R1. The chunk system still advances - it is what ends the hold - and the
+	   render system still runs, so the frame presents whatever the window holds
+	   rather than freezing on the last one. Everything else waits. */
+	const bool bHeld = IsGameplayHeld();
+
+	if (bHeld)
+		StreamingCounters::Get().GameplayTicksHeld.fetch_add(1, std::memory_order_relaxed);
+
 	/* Tick the entities and systems */
-	for (Entity* pEntity : m_Entities)
-		pEntity->Tick(fDeltaTime);
+	if (!bHeld)
+	{
+		for (Entity* pEntity : m_Entities)
+			pEntity->Tick(fDeltaTime);
+	}
 
 	for (ComponentSystem* pSystem : m_Systems)
-		pSystem->Tick(fDeltaTime);
+	{
+		if (bHeld && pSystem != static_cast<ComponentSystem*>(m_pChunkSystem))
+			continue;
 
-	m_pRenderSystem->Tick(fDeltaTime);
+		pSystem->Tick(fDeltaTime);
+	}
+
+	/* Null for a world built with no render context - the streaming harness.
+	   Same shape as RegisterComponent's guard. */
+	if (m_pRenderSystem != nullptr)
+		m_pRenderSystem->Tick(fDeltaTime);
 }
 
 void World::FixedTick(const GameTimer& fixedTimer)
 {
-	for (Entity* pEntity : m_Entities)
-		pEntity->FixedTick(fixedTimer);
+	const bool bHeld = IsGameplayHeld();
+
+	if (!bHeld)
+	{
+		for (Entity* pEntity : m_Entities)
+			pEntity->FixedTick(fixedTimer);
+	}
 
 	for (ComponentSystem* pSystem : m_Systems)
-		pSystem->FixedTick(fixedTimer);
+	{
+		if (bHeld && pSystem != static_cast<ComponentSystem*>(m_pChunkSystem))
+			continue;
 
-	m_pRenderSystem->FixedTick(fixedTimer);
+		pSystem->FixedTick(fixedTimer);
+	}
+
+	if (m_pRenderSystem != nullptr)
+		m_pRenderSystem->FixedTick(fixedTimer);
 }
 
 void World::PostFixedTick(const GameTimer& fixedTimer)
 {
-	for (Entity* pEntity : m_Entities)
-		pEntity->PostFixedTick(fixedTimer);
+	const bool bHeld = IsGameplayHeld();
 
-	for (ComponentSystem* pSystem : m_Systems)
-		pSystem->PostFixedTick(fixedTimer);
+	if (!bHeld)
+	{
+		for (Entity* pEntity : m_Entities)
+			pEntity->PostFixedTick(fixedTimer);
 
-	m_pRenderSystem->PostFixedTick(fixedTimer);
+		for (ComponentSystem* pSystem : m_Systems)
+			pSystem->PostFixedTick(fixedTimer);
+	}
+
+	if (m_pRenderSystem != nullptr)
+		m_pRenderSystem->PostFixedTick(fixedTimer);
 }
 
 void World::PostTick(float fDeltaTime)
 {
-	for (Entity* pEntity : m_Entities)
-		pEntity->PostTick(fDeltaTime);
+	const bool bHeld = IsGameplayHeld();
 
-	for (ComponentSystem* pSystem : m_Systems)
-		pSystem->PostTick(fDeltaTime);
+	if (!bHeld)
+	{
+		for (Entity* pEntity : m_Entities)
+			pEntity->PostTick(fDeltaTime);
 
-	m_pRenderSystem->PostTick(fDeltaTime);
+		for (ComponentSystem* pSystem : m_Systems)
+			pSystem->PostTick(fDeltaTime);
+	}
+	else if (m_pChunkSystem != nullptr)
+	{
+		m_pChunkSystem->PostTick(fDeltaTime);
+	}
+
+	if (m_pRenderSystem != nullptr)
+		m_pRenderSystem->PostTick(fDeltaTime);
 }
 
 void World::OnDrawGizmos(float fDeltaTime)
@@ -262,7 +371,8 @@ void World::OnDrawGizmos(float fDeltaTime)
 	for (ComponentSystem* pSystem : m_Systems)
 		pSystem->OnDrawGizmos(fDeltaTime);
 
-	m_pRenderSystem->OnDrawGizmos(fDeltaTime);
+	if (m_pRenderSystem != nullptr)
+		m_pRenderSystem->OnDrawGizmos(fDeltaTime);
 #endif
 }
 
@@ -270,7 +380,8 @@ void World::Render(const GameTimer& fixedTimer)
 {
 	OPTICK_CATEGORY("Rendering", Optick::Category::Rendering);
 	OPTICK_EVENT();
-	m_pRenderSystem->Render(fixedTimer);
+	if (m_pRenderSystem != nullptr)
+		m_pRenderSystem->Render(fixedTimer);
 }
 
 void World::RegisterComponent(Component* pComponent)
@@ -638,6 +749,32 @@ void World::DeleteEntityFromLists(Entity * pEntity)
 
 	if (iterToAdd != m_AddedEntities.end())
 		m_AddedEntities.erase(iterToAdd);
+
+	/* A world that keeps a raw pointer to a deleted entity is CLAUDE.md's "raw
+	   pointers to resources outlive the resources" with the world as the owner,
+	   and the main camera is the instance that bites: a chunk unload serializes
+	   and destroys every non-persistent root whose position is inside it, and
+	   the camera stands in exactly the chunk that is about to leave. The next
+	   ChunkSystem::FixedTick then reads a freed Camera to decide where the
+	   window goes - found by the seeded walk in
+	   Tests/Streaming/ChunkUnloadChecks.cpp under ASan, and pre-existing: the
+	   GPU stress fixture works around it by pinning its camera persistent and
+	   says so in a comment.
+
+	   Nulling it here does not conjure a camera, but it turns a use-after-free
+	   into a state every reader can check for, which is the same move
+	   World::GetRenderContext made in phase 1. */
+	if (m_pCameraEntity == pEntity)
+		m_pCameraEntity = nullptr;
+
+	/* M8, and the same move one paragraph larger: every *reflected* Entity*
+	   pointing at this entity is nulled here, because nothing else knows those
+	   pointers exist. Chunk streaming makes it routine - the two ends of a
+	   cross-chunk reference are in different chunks and one of them leaves
+	   first - and the reader that bites is the serializer itself, which
+	   dereferences an Entity* property to write its id when the *holder's*
+	   chunk unloads in turn. See World::EntityLinkRecord. */
+	GetApplication()->GetSerializer().ClearEntityLinks(*this, pEntity);
 
 	EntityRemoved(pEntity);
 }

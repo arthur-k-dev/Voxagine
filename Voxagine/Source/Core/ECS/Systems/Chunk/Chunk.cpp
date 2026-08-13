@@ -3,12 +3,17 @@
 #include "Core/Application.h"
 
 #include "Core/ECS/Components/VoxRenderer.h"
+#include "Core/ECS/Entities/Camera.h"
 #include "Core/ECS/Systems/Physics/Box.h"
 #include "Core/ECS/Systems/Chunk/ChunkSystem.h"
+#include "Core/ECS/Systems/Chunk/StreamingCounters.h"
 #include "Core/Platform/Rendering/RenderContext.h"
 #include "Core/Platform/Rendering/FrameProfiler.h"
 
 #include "External/optick/optick.h"
+
+#include <algorithm>
+#include <cassert>
 
 /* Encode and decode used to print a line to stderr unconditionally, from a job
    thread, once per chunk. That is noise in every headless capture and a lock on
@@ -48,6 +53,15 @@ Chunk::Chunk(Application* pApp, World* pWorld, UVector2 chunkIndex /*= Vector2(0
 
 Chunk::~Chunk()
 {
+	/* Staged roots are this chunk's own - nothing in the world knows they
+	   exist - so a chunk that dies mid-load is the one place they can be
+	   leaked. A world unload does exactly that. */
+	for (Entity* pRoot : m_StagedRoots)
+	{
+		if (pRoot != nullptr)
+			DeleteEntity(pRoot);
+	}
+
 	delete m_pTextureReadData;
 }
 
@@ -103,19 +117,9 @@ void Chunk::LoadAsync(ChunkUpdateGroup::Item* pItem, std::function<void(ChunkUpd
 	}
 }
 
-void Chunk::UnloadAsync(ChunkUpdateGroup::Item* pItem, std::function<void(ChunkUpdateGroup::Item*)> callback)
+bool Chunk::PrepareUnloadBatch(StreamingBudget::Scope& budget)
 {
-	if (m_bIsUnloading) return;
-	m_bIsUnloading = true;
-
-	/* Everything down to the Enqueue below is on the *main thread*, despite the
-	   name - only EncodeVoxels is a job. Measured in two halves because they
-	   are different costs: the search walks every entity in the world against
-	   this chunk's neighbours, while the save is full RTTR serialization of
-	   each entity it found into JSON. */
 	const bool bProfiling = FrameProfiler::Get().IsEnabled();
-	std::chrono::steady_clock::time_point phase =
-		bProfiling ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
 
 	auto since = [](const std::chrono::steady_clock::time_point& start)
 	{
@@ -123,9 +127,34 @@ void Chunk::UnloadAsync(ChunkUpdateGroup::Item* pItem, std::function<void(ChunkU
 			std::chrono::steady_clock::now() - start).count();
 	};
 
+	if (!m_bUnloadPrepared)
+	{
+		m_bIsUnloading = true;
+		m_bUnloadPrepared = true;
+		m_RootEntities.clear();
+		m_SerializedUnloadIds.clear();
+
+		/* And the arena the cleared Values came out of. rapidjson's pool
+		   allocator never reuses anything until the Document owning it is
+		   destroyed, so every unload of this chunk was adding a fresh copy of
+		   its whole root hierarchy to a pool that only grew - for the life of
+		   the level, once per transition. Safe here and nowhere else: the only
+		   Values it owns are the ones just cleared, and the next lines are what
+		   refill it. */
+		m_CopyDoc = Document();
+	}
+
+	std::chrono::steady_clock::time_point phase =
+		bProfiling ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
+
+	/* Re-discovered every slice rather than snapshotted once - the whole of the
+	   E1 defense, and cheap enough to be the obvious choice (0.04 ms against a
+	   2 ms slice). GetAddedEntities is included because an entity spawned this
+	   frame is in this chunk too and would otherwise be left behind in a world
+	   whose chunk no longer exists. */
 	const std::vector<Entity*>& entities = m_pWorld->GetEntities();
 	const std::vector<Entity*>& addedEntities = m_pWorld->GetAddedEntities();
-	std::vector<Entity*> combinedEntities = std::vector<Entity*>(entities);
+	std::vector<Entity*> combinedEntities(entities);
 	combinedEntities.insert(combinedEntities.end(), addedEntities.begin(), addedEntities.end());
 
 	std::vector<std::pair<Entity*, bool>> foundEntities;
@@ -137,41 +166,91 @@ void Chunk::UnloadAsync(ChunkUpdateGroup::Item* pItem, std::function<void(ChunkU
 		phase = std::chrono::steady_clock::now();
 	}
 
-	SaveAndDeleteEntities(foundEntities);
+	uint32_t uiRoots = 0;
 
-	if (bProfiling)
+	for (std::pair<Entity*, bool>& found : foundEntities)
+	{
+		const uint64_t uiId = found.first->GetId();
+
+		if (std::find(m_SerializedUnloadIds.begin(), m_SerializedUnloadIds.end(), uiId) !=
+			m_SerializedUnloadIds.end())
+			continue;
+
+		/* Destroyed by gameplay since the last slice, or by this pass. Nothing
+		   to write: an entity that is going away does not belong in the chunk
+		   the player will find when they come back. */
+		if (found.first->IsDestroyed())
+		{
+			m_SerializedUnloadIds.push_back(uiId);
+			continue;
+		}
+
+		SaveAndDeleteEntity(found.first, found.second);
+		m_SerializedUnloadIds.push_back(uiId);
+
+		++uiRoots;
+		budget.Consume();
+
+		if (budget.Exhausted())
+			break;
+	}
+
+	if (bProfiling && uiRoots > 0)
 		FrameProfiler::Get().Report("CPU Chunk SaveAndDeleteEntities", since(phase));
 
-	JobQueue* pJobQueue = m_pWorld->GetJobQueue();
-	if (pJobQueue)
-	{
-		pJobQueue->Enqueue<bool>([this, combinedEntities]()
-		{
-			EncodeVoxels();
-			return true;
-		}, [this, pItem, callback](bool ret)
-		{
-			callback(pItem);
-			m_bIsLoaded = false;
-			m_bIsUnloading = false;
-		});
-	}
+	StreamingCounters::RaiseMax(
+		StreamingCounters::Get().MaxRootsPerUnloadSlice, uiRoots);
+	StreamingCounters::Get().UnloadRootsSerialized.fetch_add(uiRoots, std::memory_order_relaxed);
+
+	/* Done when a whole re-discovery pass found nothing new. That is one extra
+	   pass over the world's entities per chunk, and it is what makes "nothing
+	   was left behind" an observation rather than an assumption. */
+	if (uiRoots != 0)
+		return false;
+
+	/* Cleared here rather than only in ResetStreamingState, and the difference
+	   is not academic: the ids are what stop re-discovery serializing a root
+	   twice *within* one unload, and entity ids are restored from the stored
+	   JSON, so the same chunk unloading a second time meets exactly the same
+	   ids. Left behind, the second unload skips every root it already knows -
+	   writing an empty chunk and leaving its entities in a world that no longer
+	   has anywhere to put them. Found by the seeded walk in
+	   Tests/Streaming/ChunkUnloadChecks.cpp, which is the argument for having
+	   one. */
+	m_bUnloadPrepared = false;
+	m_SerializedUnloadIds.clear();
+
+	return true;
 }
 
-void Chunk::EncodeVoxels()
+void Chunk::BeginVoxelEncoding()
 {
-	const bool bReportTiming = ChunkIoTimingsEnabled();
-	const std::chrono::steady_clock::time_point start = bReportTiming
-		? std::chrono::steady_clock::now()
-		: std::chrono::steady_clock::time_point();
-
 	m_pEncodedVoxelData.clear();
 
 	/* One byte per source voxel, rather than a flat 10 MB that is both too much
 	   for a small chunk and not obviously enough for a large one. A run costs
 	   seven bytes and covers at least one voxel, so this over-reserves for every
-	   world that compresses at all and never reallocates for one that doesn't. */
+	   world that compresses at all and never reallocates for one that doesn't.
+
+	   Reserved here rather than inside the batch: it is the one allocation the
+	   encode makes, and a budgeted loop should not be able to yield in the
+	   middle of deciding whether to make it. */
 	m_pEncodedVoxelData.reserve(m_VoxelData.size());
+
+	m_uiEncodeCursor = 0;
+	m_uiEncodeOccupied = 0;
+	m_bEncodePrepared = true;
+	m_EncodeStart = std::chrono::steady_clock::now();
+}
+
+bool Chunk::EncodeVoxelBatch(StreamingBudget::Scope& budget)
+{
+	if (!m_bEncodePrepared)
+		BeginVoxelEncoding();
+
+	const bool bReportTiming = ChunkIoTimingsEnabled();
+
+	uint32_t uiRuns = 0;
 
 	/* A run is a colour and an owner slot, seven bytes rather than the
 	   eighteen the old (bool, colour, uintptr_t, ';', count) record cost - and
@@ -183,10 +262,13 @@ void Chunk::EncodeVoxels()
 	   the old format was restoring dangling pointers; a chunk far enough away
 	   to unload has no debris worth preserving. */
 	const uint32_t compressedVoxelSize = sizeof(uint32_t) + sizeof(uint16_t) + sizeof(uint8_t);
-	for (size_t i = 0; i < m_VoxelData.size(); ++i)
+
+	while (m_uiEncodeCursor < m_VoxelData.size())
 	{
+		size_t i = m_uiEncodeCursor;
 		uint8_t repeatCount = 0;
 		const uint32_t uiColor = m_VoxelData[i].Color;
+
 		uint16_t uiSlot = m_OwnerVolume.GetSlot(static_cast<uint32_t>(i));
 
 		/* The reserved slot is never written since phase 3 deleted particle
@@ -205,6 +287,11 @@ void Chunk::EncodeVoxels()
 			++i;
 		}
 
+		m_uiEncodeCursor = i + 1;
+
+		if (bReportTiming && (uiColor >> 24) != 0)
+			m_uiEncodeOccupied += static_cast<uint64_t>(repeatCount) + 1;
+
 		/* Append. The old insert-at-byteOffset always addressed end() anyway, so
 		   this says what it does and skips the generic insert's move machinery. */
 		size_t writeOffset = m_pEncodedVoxelData.size();
@@ -217,19 +304,131 @@ void Chunk::EncodeVoxels()
 		writeOffset += sizeof(uint16_t);
 
 		memcpy(&m_pEncodedVoxelData[writeOffset], &repeatCount, sizeof(uint8_t));
+
+		++uiRuns;
+		budget.Consume();
+
+		/* Checked after the run, never before: a budget of one unit must still
+		   make progress or the state machine wedges rather than slows. */
+		if (budget.Exhausted())
+			break;
 	}
 
+	StreamingCounters::RaiseMax(StreamingCounters::Get().MaxEncodeRunsPerSlice, uiRuns);
+
+	if (m_uiEncodeCursor < m_VoxelData.size())
+		return false;
+
 	m_pEncodedVoxelData.shrink_to_fit();
-	m_VoxelData.resize(0);
-	m_VoxelData.shrink_to_fit();
-	m_OwnerVolume.Release();
+
+	/* Logical size only. The storage itself moves into ChunkSystem's small pool
+	   (E10) and is handed to the next chunk that loads, so a 48 MiB free and a
+	   48 MiB allocation are both removed from a window slide rather than being
+	   moved somewhere quieter. */
+	m_VoxelData.clear();
+	m_OwnerVolume.Clear();
+
+	m_bEncodePrepared = false;
 
 	if (bReportTiming)
 	{
 		const auto execTime = std::chrono::duration_cast<std::chrono::milliseconds>(
-			std::chrono::steady_clock::now() - start);
-		fprintf(stderr, "Chunk encode (ms): %lld\n", static_cast<long long>(execTime.count()));
+			std::chrono::steady_clock::now() - m_EncodeStart);
+
+		/* The occupied count either side of the codec is the instrument for M7
+		   (CHUNK_STREAMING_PLAN.md): a chunk that took damage must encode fewer
+		   occupied voxels than it decoded, and decode back exactly what it
+		   encoded. It settled the question - the codec is innocent and the
+		   re-stamp on reload was the cause - and it stays because it is the only
+		   view of what a chunk actually carried away with it. Wall clock is the
+		   whole transition's, not one slice's. */
+		fprintf(stderr, "[chunk] (%u,%u) encode %lld ms, %llu occupied\n",
+			m_ChunkIndex.x, m_ChunkIndex.y, static_cast<long long>(execTime.count()),
+			static_cast<unsigned long long>(m_uiEncodeOccupied));
 	}
+
+	return true;
+}
+
+void Chunk::EncodeVoxels()
+{
+	/* The unbounded form, for the callers that are not the state machine:
+	   VerifyVoxelCodecRoundTrip's audit and the editor. */
+	StreamingBudget unbounded = StreamingBudget::Unbounded();
+	StreamingBudget::Scope scope(unbounded);
+
+	BeginVoxelEncoding();
+
+	while (!EncodeVoxelBatch(scope))
+	{
+	}
+}
+
+void Chunk::ResetStreamingState()
+{
+	/* Nothing in flight. Deliberately an early return rather than an
+	   unconditional wipe: a chunk that finished unloading holds its whole volume
+	   in m_pEncodedVoxelData, and clearing that here would delete the level. */
+	if (!m_bUnloadPrepared && !m_bEncodePrepared && !m_bStagingPrepared)
+		return;
+
+	if (m_bStagingPrepared)
+	{
+		/* Roots constructed but never admitted. They are this chunk's to delete
+		   precisely because nothing was ever told about them - the same
+		   ownership argument the header makes for holding the pointers at all.
+		   m_RootEntities is untouched, so the next attempt re-stages from the
+		   same JSON. */
+		for (Entity* pRoot : m_StagedRoots)
+		{
+			if (pRoot != nullptr)
+				DeleteEntity(pRoot);
+		}
+
+		StreamingCounters::Get().CancelledStagings.fetch_add(1, std::memory_order_relaxed);
+	}
+
+	m_StagedRoots.clear();
+	m_StagedRoots.shrink_to_fit();
+	m_uiNextStagedRoot = 0;
+	m_uiNextRootToStage = 0;
+	m_uiStagedGameplayCount = 0;
+	m_bStagedRootsOrdered = false;
+	m_bStagingPrepared = false;
+
+	if (m_bEncodePrepared)
+	{
+		/* A cancelled encode costs nothing to undo, and that is a property of
+		   the order rather than of any cleanup here: EncodeVoxelBatch never
+		   touches m_VoxelData until its last run, so a chunk whose encode was
+		   interrupted is simply still resident with all of its voxels. */
+		StreamingCounters::Get().CancelledEncodes.fetch_add(1, std::memory_order_relaxed);
+
+		m_pEncodedVoxelData.clear();
+		m_pEncodedVoxelData.shrink_to_fit();
+	}
+
+	m_uiEncodeCursor = 0;
+	m_uiEncodeOccupied = 0;
+	m_bEncodePrepared = false;
+
+	m_bUnloadPrepared = false;
+	m_SerializedUnloadIds.clear();
+	m_SerializedUnloadIds.shrink_to_fit();
+
+	m_bIsUnloading = false;
+
+	/* T5: the reset is complete or it is not a reset. Every field the unload
+	   states write is named here, so the next phase's staging cursors have an
+	   obvious place to be added - and a failure names the reset rather than the
+	   group that inherited the leftovers. */
+	assert(!m_bEncodePrepared && !m_bUnloadPrepared && !m_bIsUnloading &&
+		m_uiEncodeCursor == 0 && m_uiEncodeOccupied == 0 &&
+		m_SerializedUnloadIds.empty() &&
+		!m_bStagingPrepared && !m_bStagedRootsOrdered && m_StagedRoots.empty() &&
+		m_uiNextStagedRoot == 0 && m_uiNextRootToStage == 0 &&
+		m_uiStagedGameplayCount == 0 &&
+		"Chunk::ResetStreamingState left streaming state behind");
 }
 
 void Chunk::DecodeVoxels()
@@ -244,6 +443,7 @@ void Chunk::DecodeVoxels()
 
 	uint32_t byteOffset = 0;
 	uint32_t voxelsWritten = 0;
+	uint64_t uiOccupied = 0;
 	while (byteOffset < m_pEncodedVoxelData.size())
 	{
 		uint32_t color;
@@ -256,6 +456,9 @@ void Chunk::DecodeVoxels()
 
 		uint8_t repeatCount = m_pEncodedVoxelData[byteOffset];
 		byteOffset += sizeof(uint8_t);
+
+		if (bReportTiming && (color >> 24) != 0)
+			uiOccupied += static_cast<uint64_t>(repeatCount) + 1;
 
 		for (uint32_t i = 0; i < static_cast<uint32_t>(repeatCount) + 1; ++i)
 		{
@@ -278,7 +481,10 @@ void Chunk::DecodeVoxels()
 	{
 		const auto execTime = std::chrono::duration_cast<std::chrono::milliseconds>(
 			std::chrono::steady_clock::now() - start);
-		fprintf(stderr, "Chunk decode (ms): %lld\n", static_cast<long long>(execTime.count()));
+
+		fprintf(stderr, "[chunk] (%u,%u) decode %lld ms, %llu occupied\n",
+			m_ChunkIndex.x, m_ChunkIndex.y, static_cast<long long>(execTime.count()),
+			static_cast<unsigned long long>(uiOccupied));
 	}
 }
 
@@ -347,64 +553,250 @@ void Chunk::UpdateRenderer(Entity* pEntity, bool bFirstLoad)
 void Chunk::LoadEntities()
 {
 	OPTICK_EVENT();
-	for (SizeType i = 0; i < m_RootEntities.size(); i++)
+
+	/* The unbounded form. Same two halves the state machine runs, so there is
+	   one description of what loading a chunk means rather than two that drift
+	   apart on the persistent/static arbitration - which is exactly how the two
+	   copies of the destruction tick loop diverged before Tests/ was unified. */
+	StreamingBudget unbounded = StreamingBudget::Unbounded();
+	StreamingBudget::Scope scope(unbounded);
+
+	while (!StageEntityBatch(scope))
 	{
-		Entity* pEntity = m_pJsonSerializer->ValueToEntity(m_RootEntities[i], *m_pWorld);
+	}
 
-		if (!pEntity) continue;
+	AdmitStagedGameplay();
 
-		//Don't spawn a persistent entity after the first load
-		if (pEntity->IsPersistent() && !m_bFirstLoad)
+	while (!AdmitStagedStatic(scope))
+	{
+	}
+}
+
+bool Chunk::StageEntityBatch(StreamingBudget::Scope& budget)
+{
+	OPTICK_EVENT();
+
+	if (!m_bStagingPrepared)
+	{
+		m_bStagingPrepared = true;
+		m_uiNextRootToStage = 0;
+		m_uiNextStagedRoot = 0;
+		m_uiStagedGameplayCount = 0;
+		m_bStagedRootsOrdered = false;
+		m_StagedRoots.reserve(m_RootEntities.size());
+	}
+
+	const bool bProfiling = FrameProfiler::Get().IsEnabled();
+	const std::chrono::steady_clock::time_point start =
+		bProfiling ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
+
+	uint32_t uiStaged = 0;
+
+	while (m_uiNextRootToStage < m_RootEntities.size())
+	{
+		/* Whole, recursively, inside this slice - see the header. Nothing is
+		   told about it: the entity and its components exist and the world's
+		   lists are untouched, so no system has seen it, no Awake has run and
+		   no renderer has been stamped. That is what "detached" buys, and it is
+		   why this may run before the window commits. */
+		const std::chrono::steady_clock::time_point rootStart =
+			bProfiling ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
+
+		Entity* pEntity = m_pJsonSerializer->ValueToEntity(
+			m_RootEntities[m_uiNextRootToStage], *m_pWorld);
+
+		/* Per *root*, because the budget cannot bound anything smaller and this
+		   is therefore the granularity of the worst case. A root that pulls a
+		   model or a texture in through the resource stack costs a GPU round
+		   trip (CLAUDE.md, "Chunk loading stalls the frame"), which is orders of
+		   above what the reflection walk costs - so this is the number that says
+		   whether a slide's staging cost is deserialization or resource I/O. */
+		if (bProfiling)
 		{
-			if (!pEntity->IsStatic())
-			{
-				Entity* pFoundEntity = m_pWorld->FindEntity(pEntity->GetId());
-				if (pFoundEntity != nullptr)
-					UpdateRenderer(pFoundEntity, true);
-			}
-			continue;
+			FrameProfiler::Get().Report("CPU Chunk StageRoot",
+				std::chrono::duration<double, std::milli>(
+					std::chrono::steady_clock::now() - rootStart).count());
 		}
 
-		if (pEntity->IsStatic())
+		++m_uiNextRootToStage;
+		++uiStaged;
+
+		/* An unknown EntityType, or a root the serializer refused. Skipped and
+		   counted rather than crashed on: streamed content is data (T7). */
+		if (pEntity == nullptr)
 		{
-			Entity* pFoundEntity = m_pWorld->FindEntityAll(pEntity->GetId());
-			if (pFoundEntity == nullptr)
-			{
-				m_pJsonSerializer->AddRootEntityToWorld(*m_pWorld, pEntity);
-			}
-			else
-			{
-				UpdateRenderer(pFoundEntity, m_bFirstLoad);
-				DeleteEntity(pEntity);
-				continue;
-			}
+			StreamingCounters::Get().StagedRootsRejected.fetch_add(1, std::memory_order_relaxed);
 		}
 		else
 		{
-			m_pJsonSerializer->AddRootEntityToWorld(*m_pWorld, pEntity);
-			UpdateRenderer(pEntity, true);
+			m_StagedRoots.push_back(pEntity);
 		}
 
-		if (!m_bFirstLoad)
+		budget.Consume();
+
+		if (budget.Exhausted())
+			break;
+	}
+
+	if (bProfiling && uiStaged > 0)
+	{
+		FrameProfiler::Get().Report("CPU Chunk StageEntities",
+			std::chrono::duration<double, std::milli>(
+				std::chrono::steady_clock::now() - start).count());
+	}
+
+	/* Only a *budgeted* slice says anything about the budget - see
+	   Scope::IsUnbounded. The high-water mark of staged roots is recorded
+	   either way, because that one is about how much this chunk is holding
+	   rather than about how it was sliced. */
+	if (!budget.IsUnbounded())
+		StreamingCounters::RaiseMax(StreamingCounters::Get().MaxRootsPerStagingSlice, uiStaged);
+
+	StreamingCounters::RaiseMax(StreamingCounters::Get().MaxStagedRoots, m_StagedRoots.size());
+
+	return m_uiNextRootToStage >= m_RootEntities.size();
+}
+
+void Chunk::OrderStagedRoots()
+{
+	if (m_bStagedRootsOrdered)
+		return;
+
+	/* Stable, so a level's own order still decides ties and a replay is
+	   reproducible. Only valid before anything has been admitted, which the
+	   caller guarantees by ordering on the first admission call. */
+	const auto gameplayEnd = std::stable_partition(
+		m_StagedRoots.begin(), m_StagedRoots.end(),
+		[](Entity* pEntity) { return pEntity != nullptr && !pEntity->IsStatic(); });
+
+	m_uiStagedGameplayCount =
+		static_cast<size_t>(std::distance(m_StagedRoots.begin(), gameplayEnd));
+
+	m_bStagedRootsOrdered = true;
+}
+
+uint32_t Chunk::AdmitStagedGameplay()
+{
+	OrderStagedRoots();
+
+	uint32_t uiAdmitted = 0;
+
+	while (m_uiNextStagedRoot < m_uiStagedGameplayCount)
+	{
+		AdmitStagedRoot(m_StagedRoots[m_uiNextStagedRoot++]);
+		++uiAdmitted;
+	}
+
+	return uiAdmitted;
+}
+
+bool Chunk::AdmitStagedStatic(StreamingBudget::Scope& budget)
+{
+	OrderStagedRoots();
+
+	uint32_t uiAdmitted = 0;
+
+	while (m_uiNextStagedRoot < m_StagedRoots.size())
+	{
+		AdmitStagedRoot(m_StagedRoots[m_uiNextStagedRoot++]);
+		++uiAdmitted;
+
+		budget.Consume();
+
+		if (budget.Exhausted())
+			break;
+	}
+
+	if (!budget.IsUnbounded())
+		StreamingCounters::RaiseMax(StreamingCounters::Get().MaxRootsPerAdmissionSlice, uiAdmitted);
+
+	if (m_uiNextStagedRoot < m_StagedRoots.size())
+		return false;
+
+	m_StagedRoots.clear();
+	m_StagedRoots.shrink_to_fit();
+	m_uiNextStagedRoot = 0;
+	m_uiNextRootToStage = 0;
+	m_uiStagedGameplayCount = 0;
+	m_bStagedRootsOrdered = false;
+	m_bStagingPrepared = false;
+
+	return true;
+}
+
+void Chunk::AdmitStagedRoot(Entity*& pRoot)
+{
+	Entity* pEntity = pRoot;
+
+	/* Consumed either way. Every branch below either hands the root to the
+	   world or deletes it, so leaving the slot set is the one way a staged root
+	   gets admitted or freed twice. */
+	pRoot = nullptr;
+
+	if (pEntity == nullptr)
+		return;
+
+	//Don't spawn a persistent entity after the first load
+	if (pEntity->IsPersistent() && !m_bFirstLoad)
+	{
+		if (!pEntity->IsStatic())
 		{
-			auto updateInstanceLoaded = [this](Entity* pEntity, const auto& updateInstanceLoadedRef) -> void
-			{
-				for (Component* pComp : pEntity->GetAddedComponents())
-				{
-					if (pComp->get_type() == rttr::type::get<VoxRenderer>())
-					{
-						VoxRenderer* pRenderer = static_cast<VoxRenderer*>(pComp);
-						pRenderer->SetChunkInstanceLoaded(true);
-						break;
-					}
-				}
-
-				for (Entity* pChild : pEntity->GetChildren())
-					updateInstanceLoadedRef(pChild, updateInstanceLoadedRef);
-			};
-
-			updateInstanceLoaded(pEntity, updateInstanceLoaded);
+			Entity* pFoundEntity = m_pWorld->FindEntity(pEntity->GetId());
+			if (pFoundEntity != nullptr)
+				UpdateRenderer(pFoundEntity, true);
 		}
+
+		/* The staged copy is not the one in the world, and nothing else holds
+		   it. Master constructed and abandoned it here, once per persistent root
+		   per chunk load. */
+		DeleteEntity(pEntity);
+		return;
+	}
+
+	if (pEntity->IsStatic())
+	{
+		Entity* pFoundEntity = m_pWorld->FindEntityAll(pEntity->GetId());
+		if (pFoundEntity == nullptr)
+		{
+			m_pJsonSerializer->AddRootEntityToWorld(*m_pWorld, pEntity);
+		}
+		else
+		{
+			UpdateRenderer(pFoundEntity, m_bFirstLoad);
+			DeleteEntity(pEntity);
+			return;
+		}
+	}
+	else
+	{
+		m_pJsonSerializer->AddRootEntityToWorld(*m_pWorld, pEntity);
+		UpdateRenderer(pEntity, true);
+	}
+
+	if (!m_bFirstLoad)
+	{
+		/* M7. The decoded voxels this chunk came back with are what it looked
+		   like when it left, damage included; telling every restored renderer
+		   so is what stops the pristine model being stamped over them. It also
+		   clears the update request deserialization itself produced - see the
+		   phase 2 notes. */
+		auto updateInstanceLoaded = [](Entity* pCurrent, const auto& updateInstanceLoadedRef) -> void
+		{
+			for (Component* pComp : pCurrent->GetAddedComponents())
+			{
+				if (pComp->get_type() == rttr::type::get<VoxRenderer>())
+				{
+					VoxRenderer* pRenderer = static_cast<VoxRenderer*>(pComp);
+					pRenderer->SetChunkInstanceLoaded(true);
+					break;
+				}
+			}
+
+			for (Entity* pChild : pCurrent->GetChildren())
+				updateInstanceLoadedRef(pChild, updateInstanceLoadedRef);
+		};
+
+		updateInstanceLoaded(pEntity, updateInstanceLoaded);
 	}
 }
 
@@ -512,26 +904,65 @@ void Chunk::FindEntitiesInChunk(const std::vector<Entity*>& allEntities, std::ve
 	}
 }
 
-void Chunk::SaveAndDeleteEntities(std::vector<std::pair<Entity*, bool>>& entities)
+void Chunk::SaveAndDeleteEntity(Entity* pEntity, bool bDelete)
 {
 	OPTICK_EVENT();
-	m_RootEntities.clear();
-	m_RootEntities.resize(entities.size());
 
-	for (size_t i = 0; i < entities.size(); ++i)
+	Value entityVal(kObjectType);
+	m_pJsonSerializer->EntityToValue(pEntity, entityVal, m_CopyDoc.GetAllocator());
+
+	m_RootEntities.emplace_back();
+	m_RootEntities.back().CopyFrom(entityVal, m_CopyDoc.GetAllocator());
+
+	/* **The camera is never destroyed by a chunk unload, whoever it is.**
+	   The main camera is the one entity this system *reads* to decide where the
+	   resident window goes, so unloading it is the window destroying the thing
+	   that positions it: the world is left with no camera at all, and anything
+	   holding it - CameraMultiplayer caches it in Start() - is disabled for the
+	   rest of the level.
+
+	   CLAUDE.md has described this since chunk streaming phase 2 ("a window
+	   sliding over the main camera serialized and destroyed it"), and until now
+	   the answer was per-caller: the GPU stress fixture pins its camera
+	   persistent and says so in a comment, and the streaming harness does the
+	   same. Both are working around this line. Phase 4 made it routine rather
+	   than occasional - gameplay is held until the initial window is resident,
+	   so the camera snaps to the players *after* the window has been built
+	   around its starting position, which slides the window straight off the
+	   chunk it is standing in.
+
+	   It is still *serialized* above, so it comes back with the chunk; it is
+	   only not destroyed. Deliberately not solved by marking it persistent,
+	   which would change how the chunk saves and reloads it.
+
+	   Delete entity only when it needs to be done by this chunk and is not
+	   destroyed already and isn't persistent. */
+	if (!bDelete || pEntity->IsDestroyed() || pEntity->IsPersistent() ||
+		pEntity == static_cast<Entity*>(m_pWorld->GetMainCamera()))
+		return;
+
+	/* The window this chunk was drawn in has already been replaced (US_COMMIT
+	   runs two states earlier), so a departing renderer's recorded voxel
+	   positions no longer name its own voxels - they name whatever slid in
+	   underneath. VoxelBaker::Clear shifts them by the offset delta and declines
+	   to erase a cell some *other* renderer owns, which covers models but not
+	   the ground row or settled debris: neither has an owner, so both would be
+	   erased out of the freshly published window. Tell each renderer in the
+	   departing hierarchy that its destruction is an unload, so the stamp is
+	   forgotten rather than replayed. Its colours are in this chunk's own voxels
+	   and are about to be encoded with them. */
+	auto markChunkUnloading = [](Entity* pCurrent, const auto& markRef) -> void
 	{
-		std::pair<Entity*, bool>& entityPair = entities[i];
+		if (VoxRenderer* pRenderer = pCurrent->GetComponentAll<VoxRenderer>())
+			pRenderer->MarkChunkUnloading();
 
-		Value entityVal(kObjectType);
-		m_pJsonSerializer->EntityToValue(entityPair.first, entityVal, m_CopyDoc.GetAllocator());
-		m_RootEntities[i].CopyFrom(entityVal, m_CopyDoc.GetAllocator());
+		for (Entity* pChild : pCurrent->GetChildren())
+			markRef(pChild, markRef);
+	};
 
-		//Delete entity only when it needs to be done by this chunk and is not destroyed already and isn't persistent
-		if (entityPair.second && !entityPair.first->IsDestroyed() && !entityPair.first->IsPersistent())
-		{
-			entityPair.first->Destroy();
-		}
-	}
+	markChunkUnloading(pEntity, markChunkUnloading);
+
+	pEntity->Destroy();
 }
 
 void Chunk::DeleteEntity(Entity* pEntity)

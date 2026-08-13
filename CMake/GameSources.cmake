@@ -23,6 +23,7 @@ set(VOXAGINE_GAME_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/Game/Source/General/KillTrigger.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Game/Source/General/Managers/GameManager.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Game/Source/General/Managers/GameStateManager.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Game/Source/General/PlayerSlot.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Game/Source/General/Managers/WeaponManager.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Game/Source/General/OpenLevelTrigger.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Game/Source/Humanoids/Enemies/AutoMoveMonster.cpp

@@ -61,6 +61,13 @@ public:
 
 	void EnableDebugLines(bool bEnabled);
 
+	/* Is any admitted renderer still waiting to be stamped into the voxel
+	   window? CHUNK_STREAMING_PLAN.md phase 5: the stamp is budgeted now, so a
+	   world can be fully admitted and still not fully *drawn*, and anything
+	   asking "is this world settled" has to mean both.
+	   ChunkSystem::IsStreaming folds this in. */
+	bool HasPendingVoxelBakes() const { return m_bVoxelBakesPending; }
+
 	void SetFadeTime(float fFadeTime);
 
 	UVector2 GetRenderResolution() const { return m_pRenderContext->GetRenderResolution(); }
@@ -209,6 +216,12 @@ private:
 	bool m_bStarted = false;
 
 	bool m_bForcedUpdate = true;
+
+	/* Renderers still waiting for a stamp because VoxelBaker::Bake ran out of
+	   budget. CHUNK_STREAMING_PLAN.md phase 5 - HasPendingVoxelBakes is what
+	   ChunkSystem::IsStreaming folds in, so "is this world settled" accounts
+	   for geometry that has been admitted but not yet written. */
+	bool m_bVoxelBakesPending = false;
 	bool m_bShouldUpdateVoxelWorld = true;
 	
 	UVector3 m_v3WorldSize = UVector3(0, 0, 0);

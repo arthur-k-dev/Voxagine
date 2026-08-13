@@ -60,10 +60,14 @@ last section for the device measurements and what is still owed.
 8, 9, 11 and 12 are done and phase 6 is closed as *not taken*.** A window transition's
 worst frame is **150.2 -> 10.3 ms** across them - the hitch gate passes and its
 `WILL_FAIL` is off - and `[world-switch] initialize` is **876 -> 317 ms**.
-**Two things remain, in the order to fix them**: 13, a lifetime handle (id
-+ generation, resolved on use) for the raw pointers game code holds into
-streamed content, which is four of the phase 9 play session's ten defects and
-ledger M8; then 10, the editor session, which needs Joey at the machine, deletes
+**Three things remain, and they are ordered by criticality**: **14**, the only
+open item that kills the process - the asynchronous level switch dies
+intermittently under load (ledger M9), plus the pre-existing unsynchronised read
+of a chunk's CPU voxels by the render job; then **13**, a lifetime handle (id +
+generation, resolved on use) for the raw pointers game code holds into streamed
+content, which is four of the phase 9 play session's ten defects and ledger M8 -
+severity without a live symptom, since every instance it prevents is already
+fixed; then **10**, the editor session, which needs Joey at the machine, deletes
 `progressive-chunk-experiment`, and owns the one thing phase 9 left open -
 **pop-in has not been judged on screen**. The table in that plan is in
 execution order, not numeric order.

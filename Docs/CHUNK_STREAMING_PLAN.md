@@ -56,16 +56,23 @@ world switch, and the loading screen.
 | 9 — Splitting one renderer's stamp | DONE | `chunk-streaming-phase-9` | **The hitch gate flips: peak 27.9 → 9.82 / 10.15 / 10.31 ms against 16.67, and the `WILL_FAIL` is off.** The walk turned out not to be what lost the 580 k voxels — it is resume-identical at every budget from 1 up, checked against two real models — so the fixes are the two *interactions*: `Bake` no longer clears a half-written renderer, and the bake bookkeeping is written at the start of a stamp rather than the end. Occupancy identical at four slice sizes over eight runs; coverage, sync and pyramid audits clean during streaming — **not** with combat, whatever this row said before: the `fire` token does not work and phase 11 owns it. Costs **728–779 → 910–1,071 held ticks** before gameplay starts. Left open: **Joey has not judged pop-in on screen**. (`gpu_destruction_sync_stress` was broken *on master* and is repaired in phase 12 — see its notes.) |
 | 11 — `--ui-script fire`, and the first headless run that destroys a voxel | DONE | `chunk-streaming-phase-11` | **The token was never broken; the script's clock was.** It counted display frames from process start, so a level whose hold ran long spent every token before `Player::Start` had bound anything — 621 held ticks in one Release run and **2,930** in the next, same binary, same command line, which is the whole of why it read as intermittent. The clock now stops while `World::IsGameplayHeld()`. A scripted run destroys **25,062 voxels over 32 bursts** where it destroyed 0, ever; `[destruction]` is printed by every run. **Both prior diagnoses were wrong** — see the notes. The acceptance run reproduces phase 12 headlessly (228 CPU-only voxels), which is the point of doing 11 first. |
 | 12 — The CPU/GPU voxel disagreement during play | DONE | `chunk-streaming-phase-12` | **The window commit was throwing writes away.** A slide rebuilds the whole incoming window into the back buffer from the chunks' CPU voxels and then swaps, so every voxel the main thread writes while that build is in flight lands in the buffer the swap retires — the CPU keeps it, the image loses it. Destruction is what writes voxels during play, which is why it needed phase 11 to be reproducible at all. Those writes are journalled and republished inside the same commit transaction: `VOXAGINE_SYNC_AUDIT` **106–188 → 0 of 75,497,472**, on a run that destroys 23–38 k voxels, slides the window and switches world. **The first hypothesis — `VoxelBaker::Clear` erasing an unowned voxel — was wrong and its counter says so**, which is why that counter stayed. |
+| 14 — The two streaming races phase 12 left standing | OPEN — **next, and the most critical thing left: it is the only open item that kills the process** | | M9: the asynchronous `Beat1 -> Beat2` switch dies intermittently under the destruction stress route — once `SIGSEGV`, once an abort in about twenty runs, always at the switch, never under `gdb`. Plus the pre-existing unsynchronised read of a chunk's CPU voxels by the render job, whose *result* phase 12 made correct without making the read safe. Both engine-side, both surfaced by phase 12, neither caused by it — and whether M9 predates phase 12 is one build away and has not been checked. |
 | 13 — A lifetime handle for streamed content | OPEN | | Four of the ten defects the phase 9 play session found are one shape, and so is ledger M8: a raw pointer to streamed content, held across a frame, with nothing to say the target died. More guards is not the answer — two of them crashed *inside* the guard. `PlayerSlot` generalised into a handle (id + generation, resolved on use). |
-| 10 — Editor session and closing the plan | OPEN — **last** | | Needs Joey at the machine. Runs after 11–13: it deletes `progressive-chunk-experiment` and its acceptance is the whole suite green, so it cannot honestly precede work that is still landing. **No longer owns `gpu_destruction_sync_stress`** — phase 12 repaired it and gave it a representation audit, so `-L gpu` is three green. What is left here is the pop-in judgement. |
+| 10 — Editor session and closing the plan | OPEN — **last** | | Needs Joey at the machine. Runs after 11, 12, 14 and 13: it deletes `progressive-chunk-experiment` and its acceptance is the whole suite green, so it cannot honestly precede work that is still landing. **No longer owns `gpu_destruction_sync_stress`** — phase 12 repaired it and gave it a representation audit, so `-L gpu` is three green. What is left here is the pop-in judgement. |
 
 **The order to fix, and why it is this one.** 11 first because it is small and
 because 12 cannot be *measured* without it. 12 second because it is a live
 correctness defect the player can see, and because the instrument that finds it
 (`VOXAGINE_SYNC_AUDIT` over a run that destroys geometry) is exactly what 11
-delivers. 13 third because it is the largest and the least urgent — the crashes
-it prevents are known and individually fixed — and because it will touch code
-11 and 12 are editing. 10 last, unchanged.
+delivers. **What is left is ordered by criticality**, which after 12 is no longer
+the same as size: **14** first because it is the only open
+item that *kills the process*, and it does it at a level switch, which every
+player crosses; **13** second because it prevents a *class* of crashes whose
+known instances are each already fixed, so it is severity without a live symptom;
+**10** last because what remains in it is a judgement call and housekeeping, and
+because its acceptance is the whole suite green — which it cannot honestly claim
+while 14 is open. Size argues the same way here and that is a coincidence, not
+the reason.
 
 ---
 
@@ -180,7 +187,8 @@ Release at phase 0).
   `EncodeVoxels`; `FindEntitiesInChunk` + `SaveAndDeleteEntities` (full RTTR
   serialization) run on the main thread first. CLAUDE.md's "Chunk loading
   stalls the frame" ledger entry is this.
-- **M9 — OPEN (found by phase 12's repair of `gpu_destruction_sync_stress`).**
+- **M9 — OPEN (found by phase 12's repair of `gpu_destruction_sync_stress`;
+  owned by phase 14).**
   **The asynchronous level switch dies intermittently**, in Release, under a
   route that has been destroying geometry and sliding the window for minutes:
   `Beat1 -> Beat2` through `World::OpenWorldAsync`, always at the switch and
@@ -2590,8 +2598,8 @@ gameplay reaches `Game_Over_Screen` before the eight phases finish.
 - **The CPU voxels themselves are still read by the worker while the main
   thread writes them.** The replay makes the *result* correct — it re-reads the
   CPU voxel after the build — but `RenderChunk` is still an unsynchronised read
-  of storage gameplay is writing. It has been that way since master; it is worth
-  a phase, and it is not this one's.
+  of storage gameplay is writing. It has been that way since master. **Phase 14
+  owns it**, as the second and less critical half of that phase.
 - **Nothing was done about how long a build takes.** The window it opens is what
   makes the loss likely; shortening it is phase 5/9 territory and the repair is
   exact regardless of its length.
@@ -2599,11 +2607,104 @@ gameplay reaches `Game_Over_Screen` before the eight phases finish.
   only explained. The mechanism produces them and the repair covers them, but no
   run in this session saw a non-zero GPU-only count.
 
+### Phase 14 — The two streaming races phase 12 left standing
+
+*Next, on criticality and nothing else: **this is the only thing left in this
+plan that kills the process**, and it does it on a path every player crosses —
+the level switch at the end of a beat. Everything else open is a class of crash
+whose known instances are already fixed (13), undefined behaviour with no
+observed symptom (the second half of this phase), or a judgement call (10). A
+defect that is failing *now* outranks one that might; that is the whole of why
+this goes before 13 despite 13 being the bigger piece of work.*
+
+**The two halves of this phase are not equally critical, and it can close with
+only the first one fixed.** M9 is a crash. The `RenderChunk` read is a data race
+whose result phase 12 already made correct — it is here because it is in the same
+subsystem and the same session's evidence, not because it is urgent, and
+"adjudicated and recorded" is an acceptable outcome for it where it is not for
+M9.
+
+Two defects, both of them concurrency around the same subsystem, both surfaced
+by phase 12 and neither caused by it.
+
+**M9 — the asynchronous level switch dies intermittently.** `Beat1 -> Beat2`
+through `World::OpenWorldAsync`, under a route that has been destroying geometry
+and sliding the window for minutes: once `SIGSEGV`, once an abort, out of about
+twenty runs of `gpu_destruction_sync_stress`, **always at the switch and never
+before it**, and not once in the twelve runs since — six of those under `gdb`,
+which never reproduced it at all.
+
+**The shape to check first, and it is one ordering question**: `OpenWorldAsync`
+enqueues its load onto the ***old* world's** job queue, and the completion of
+that job destroys that same world (`WorldManager::LoadWorld` -> `World::Unload`
+-> `delete`). Meanwhile `ChunkSystem`'s render job captures `this` and a
+reference into `m_UpdateGroups`, and `World::Unload` starts with
+`JobManager::DiscardJobQueue`, which cancels and waits for that queue's running
+job and then calls `ProcessFinishedJobs()` — from inside a completion callback
+of the same queue. Read those three in one sitting before theorising: the
+question is whether a completion callback can run against a world whose systems
+are being deleted, and whether a reference into `m_UpdateGroups` can outlive the
+`erase` in `RemoveUpdateGroup`.
+
+**Establish first whether it predates phase 12, and it is one build.** The
+fixture has measured nothing since phase 4, so this route has not run on any
+master in a year; the crash may be years old. Check out `e71cafe` (master
+immediately before phase 12), apply this phase's fixture as a patch, and run the
+loop. *Do not assume either answer* — phase 12's own first hypothesis was wrong
+and its counter is what said so.
+
+**The instrument, and `gdb -ex run` is not it.** A debugger's slowdown closes
+this race — six runs, no reproduction. Run the fixture in a loop keeping each
+run's stderr (an abort names its own reason and that reason is most of the
+diagnosis), or arrange a core dump and open it afterwards. **ASan on the game
+build is the other half** and has never been pointed at this route: it is what
+found M8's use-after-free on its first run.
+
+**The second defect: `ChunkSystem::RenderChunk` reads a chunk's CPU voxels on a
+worker while the main thread writes them.** Phase 12 made the *result* correct —
+the commit republishes every voxel written during the build, out of the CPU
+voxel, so a torn read heals — but the read itself is still unsynchronised, and
+"the answer comes out right" is not the same as "there is no data race". It is
+pre-existing and it is exactly what a TSan run should find. Two honest outcomes:
+make the ordering explicit (the chunk's storage is not written while a build
+reads it), or document why a benign torn read of a 4-byte colour is acceptable
+here and put the argument next to the code rather than in a plan.
+
+**Deliberately not in this phase**: the GPU-only direction of phase 12's
+disagreement was explained and covered but never reproduced headlessly. It needs
+a burst issued *while* a window builds, which the stress fixture refuses to do
+by design (it waits for a stable window before bursting). That is a fixture
+change with its own acceptance, not a race fix.
+
+**Criticality, stated so a later session does not re-litigate the order.** M9 is
+a process death on a path the game takes between beats, and its rate is unknown
+in ordinary play — the stress route is far harsher than playing (minutes of
+continuous destruction and six window slides before the switch), so "twice in
+twenty stress runs" is an upper bound on how bad it is, not a measurement of how
+often a player sees it. **Measuring that rate is not worth a session**; fixing
+the ordering is cheaper than characterising it. The `RenderChunk` read is
+undefined behaviour with no observed symptom and a self-healing result: real,
+worth adjudicating, and not worth blocking a crash fix on.
+
+**Acceptance:** M9 named and demonstrated rather than inferred — what it was,
+with the message or the stack it dies with, and whether it predates phase 12
+said out loud; `gpu_destruction_sync_stress` green **twenty consecutive runs**
+in Release (it is an intermittent defect, so a single green run proves nothing);
+the level-switch path covered by a check in `Tests/` if the mechanism can be
+expressed without a GPU — `StreamingHarness` already drives `WorldManager`'s
+pending-world state machine; a TSan verdict on `RenderChunk` recorded either
+way; and whichever exact counter would have caught it added to
+`StreamingCounters` and gated in `Tests/Baselines/perf.txt`, on phase 12's rule
+that a fix with no counter behind it leaves the next instance to be found by
+crashing.
+
 ### Phase 13 — A lifetime handle for streamed content
 
-*Third: the largest of the four, the least urgent — every crash it prevents has
-already been fixed individually — and the one most likely to touch code phases
-11 and 12 are editing, which is why it is not first.*
+*After 14, on criticality: this prevents a **class** of crash whose known
+instances are each already fixed, where 14 is one that is failing now. It is
+also the largest of what is left and the one most likely to touch code the
+phases before it are editing — but severity-without-a-live-symptom is the reason
+it is not first, and size is only why that is comfortable.*
 
 **The class.** Four of the ten defects the phase 9 play session found, and
 ledger M8, are one sentence: *a raw pointer to streamed content, held across a
@@ -2650,9 +2751,11 @@ destroyed under load, clean; CPU suites green in Debug and Release.
 
 ### Phase 10 — Editor session and closing the plan
 
-*Last of all four remaining phases — see the order note under Progress — and the
-only one that cannot be done headless. Everything it asks for needs the editor
-open in front of somebody.*
+*Last of the three remaining phases — see the criticality note under Progress —
+and the only one that cannot be done headless. What is left in it is a judgement
+call and housekeeping, which is why it is last on criticality as well as on
+practicality: everything it asks for needs the editor open in front of
+somebody.*
 
 - Guard the remaining editor operations that assume a settled world - play-mode
   enter and map switch wait on (or refuse during) `ChunkSystem::IsStreaming()`.

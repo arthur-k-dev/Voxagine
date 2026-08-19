@@ -11,13 +11,40 @@ ctest --test-dir Build/Linux/Editor/Release --output-on-failure
 
 | mode | what it is | cost (Release / Debug) |
 |---|---|---|
-| `checks` | assertions about one unit at a time | 0.1 s / 0.7 s |
+| `checks` | assertions about one unit at a time | 11 s / 132 s |
 | `scenarios` | every scenario × every invariant, each run twice | 3.3 s / 36 s |
 | `perf` | every benchmark, compared against a baseline | 1.1 s / 8.4 s |
 
-All three run in CI on both configurations. Each takes an optional substring
-filter — `voxagine_tests scenarios diagonal`, `voxagine_tests checks VoxelGrid`
+All three run in CI on both configurations, and the whole suite also runs under
+ASan+UBSan (`.github/workflows/build.yml`'s `sanitizers` job). Almost all of
+`checks`' wall time is one case - `ModelMeshUpload` is 10.9 of the 11 seconds -
+so a filter is cheap: `Streaming` is 0.18 s, `VoxelStorage` 13 ms.
+
+Each takes an optional substring filter — `voxagine_tests scenarios diagonal`, `voxagine_tests checks VoxelGrid`
 — which is what you want while chasing one failure.
+
+## Opt-in GPU integration test
+
+`Tests/Rendering/DestructionSyncStress.cpp` is a separate executable because it
+needs the real game world, chunk jobs, Vulkan renderer and a desktop GPU. It is
+not part of the CPU suite or CI, and its fixture lives entirely under `Tests/`.
+
+```bash
+cmake --preset game -DVOXAGINE_BUILD_GPU_TESTS=ON
+cmake --build --preset game --target voxagine_gpu_destruction_stress
+ctest --test-dir Build/Linux/Game/Debug -R gpu_destruction_sync_stress --output-on-failure
+```
+
+The fixture alternates the resident window between two positions, first in
+Fishing Village Beat 1 and then in Beat 2 after switching levels through the
+game's real asynchronous replace-world path. It waits for all nine chunk
+mappings to commit, restricts each new phase to chunks that entered the window,
+and accepts a burst only when a live destructible model voxel is removed
+immediately. Whole application-loop intervals have separate hard hitch limits
+for steady destruction, chunk-window changes, and level replacement. It also
+fails if the Vulkan direct timeline stops advancing while submissions are
+outstanding. The CTest timeout remains the backstop for a main thread blocked
+inside a fence wait.
 
 ## Layout
 
@@ -26,20 +53,42 @@ happens to live in.
 
 ```
 Framework/     the runner, the four registries, the assertion macros, the baseline format
-Harness/       a whole voxel world with no GPU, and the destruction pipeline driven once
+Harness/       a whole voxel world with no GPU (VoxelWorldHarness), the destruction
+               pipeline driven once (DestructionRun), a whole chunk-streaming
+               world with no render context (StreamingHarness), and a .vox read
+               without the resource stack (VoxModelFile) so a test can place a
+               real model at a real transform
+Fixtures/      synthetic .wld worlds the streaming harness loads - a 5x5 chunk
+               level, and a copy of it whose chunks lead with deliberately
+               malformed roots (T7)
 Baselines/     the checked-in perf baseline
 
+Streaming/     ChunkSystem - the window commit transaction, the bounded unload,
+               and what survives a chunk leaving and coming back
 VoxelStorage/  VoxelGrid, VoxelBrickGrid, owner slots
 VoxelEditing/  VoxelEditBatch — the one voxel write path
 Destruction/   SphericalDestruction, plus the scenarios and invariants
 Integrity/     IntegrityChecker — which geometry is still holding itself up
 Particles/     ParticleCore, ParticleLanding, ParticleSimulation
+Rendering/     the renderer's CPU-side decisions - model mesh uploads, and where a
+               model's voxels land (VoxelStamp, including the resumable stamp)
 Foundation/    engine-wide primitives that are not about voxels at all
 ```
 
 Within a system: `<Thing>Checks.cpp` and `<Thing>Perf.cpp`. Scenarios and
 invariants get one file each, named for the situation they set up or the
 property they assert.
+
+**Streaming budgets are injectable, and a streaming test must say so.** Every
+resumable step in `ChunkSystem`/`Chunk` takes its bound from
+`StreamingBudgets` — a wall-clock allowance in the game, a *unit count* in a
+test. Wrap a scenario in `StreamingBudgetOverride` (`Harness/StreamingHarness.h`)
+and the slice boundaries land in the same places on every machine;
+`Units(1)` puts one between every root and every RLE run, which is how all of
+the resumption points get exercised rather than the ones this machine is fast
+enough to reach. `Streaming/StreamingPerf.cpp` does the same thing for the
+opposite reason: with unit budgets its per-slice counters are exact numbers
+the baseline can hold.
 
 ## The four kinds, and when to write which
 

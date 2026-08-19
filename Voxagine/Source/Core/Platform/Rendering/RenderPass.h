@@ -80,6 +80,13 @@ public:
 		bool							m_bUseScreenResolution = true;
 		float							m_fRenderScale = 1.0f;
 
+		/* Whether m_fRenderScale above came from Settings::ResolutionScale, and
+		   so has to be re-read and the target resized when the player changes
+		   it. Set by the two passes that take it - Voxel and Particles - rather
+		   than inferred from m_fRenderScale != 1.0, which would stop being true
+		   the moment somebody chose a scale of exactly 1. */
+		bool							m_bFollowsResolutionScale = false;
+
 		bool							m_BlendEnabled = false;
 		uint32_t						m_uiBackBuffers = 0;
 	};
@@ -100,6 +107,12 @@ public:
 
 	virtual UVector2 GetTargetSize() const = 0;
 	const Data& GetData() const { return m_Data; }
+
+	/* Settings::ResolutionScale changed. Only writes the copy the pass took at
+	   construction - resizing the attachments to match is the caller's, because
+	   only the render context knows the resolution to scale.
+	   RenderContext::ApplyRenderSettings does both together. */
+	void SetRenderScale(float fScale) { m_Data.m_fRenderScale = fScale; }
 
 	void ToggleBackBuffer() { m_uiCurrentBackBuffer = (m_uiCurrentBackBuffer + 1) % (m_Data.m_uiBackBuffers + 1); }
 	uint32_t GetPreviousBackBuffer() const { return m_uiCurrentBackBuffer == 0 ? m_Data.m_uiBackBuffers : m_uiCurrentBackBuffer - 1; }

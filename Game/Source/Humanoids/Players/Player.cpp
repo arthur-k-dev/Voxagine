@@ -1,6 +1,7 @@
 #include "Player.h"
 
 #include <Core/Application.h>
+#include <Core/LaunchOptions.h>
 #include <Core/ECS/World.h>
 #include <Core/ECS/Entities/Camera.h>
 
@@ -45,6 +46,7 @@ RTTR_REGISTRATION
 {
 	rttr::registration::class_<Player>("Player")
 	.constructor<World*>()(rttr::policy::ctor::as_raw_ptr)
+	.property("Player Index", &Player::GetPlayerIndex, &Player::SetPlayerIndex)(RTTR_PUBLIC)
 	.property("Movement Speed", &Player::GetMovementSpeed, &Player::SetMovementSpeed)(RTTR_PUBLIC)
 	.property("Jump Force", &Player::m_fJumpForce)(RTTR_PUBLIC)
 	.property("Dash Speed", &Player::m_fDashSpeed)(RTTR_PUBLIC)
@@ -98,6 +100,25 @@ void Player::Awake()
 	if (std::find(tags.begin(), tags.end(), "Player") == tags.end())
 		tags.push_back("Player");
 
+	/* **Back-compatibility for levels authored before "Player Index" existed.**
+	   Every shipped level names its two players "Player" and "Player1", and
+	   that naming was already load-bearing further down this function - Start
+	   picked each one's animation set from it. Deriving the index here means
+	   those levels keep working untouched while nothing downstream has to know
+	   about names.
+
+	   A level that indexes its players explicitly overrides this, because the
+	   deserialized property is applied before Awake. */
+	if (m_iPlayerIndex < 0)
+	{
+		const std::string& sName = GetName();
+
+		if (sName == "Player")
+			m_iPlayerIndex = 0;
+		else if (sName == "Player1")
+			m_iPlayerIndex = 1;
+	}
+
 	/* Aim/Recall child entity */
 	for (Entity* pChild : GetChildren())
 	{
@@ -149,8 +170,11 @@ void Player::Start()
 			m_pInputHandler->VibrateGamePad(0.0f, 0.0f);
 	}, this);
 
-	bool bIsPlayer1 = GetName() == "Player";
-	m_bIsAltPlayer = GetName() == "Player1";
+	/* Index, not name - see GetPlayerIndex. Awake has already derived the index
+	   from the name for levels that predate the property, so this is the same
+	   answer for every shipped level and a stable one for anything new. */
+	const bool bIsPlayer1 = m_iPlayerIndex == 0;
+	m_bIsAltPlayer = m_iPlayerIndex == 1;
 
 	if (bIsPlayer1)
 	{
@@ -240,6 +264,17 @@ void Player::Start()
 
 	m_pInputHandler->BindAction("Fire", IKS_PRESSED, [&]() 
 	{
+		/* VOXAGINE_GAMEPLAY_DEBUG=1. Which branch Fire takes is the whole of
+		   "I can't recall the bullet", and it is decided by four values that
+		   nothing prints. */
+		static const bool s_bDebug = std::getenv("VOXAGINE_GAMEPLAY_DEBUG") != nullptr;
+
+		if (s_bDebug)
+			fprintf(stderr, "[player] Fire on '%s': receiver %d, ammo %u, incoming %zu, casted %zu, partner %p, return %d\n",
+				GetName().c_str(), m_bIsReceiver ? 1 : 0, m_pWeapon->GetCurrentAmmo(),
+				m_vIncomingBullets.size(), m_vCastedBullets.size(),
+				(void*)m_pReferencePlayer, m_bReturn ? 1 : 0);
+
 		// If you are the receiver
 		if(m_bIsReceiver && m_pWeapon->GetCurrentAmmo() == 0)
 		{
@@ -341,19 +376,26 @@ void Player::Start()
 	bool bPlayer1Active = MainMenuManagerComponent::m_bPlayer1Active;
 	bool bPlayer2Active = MainMenuManagerComponent::m_bPlayer2Active;
 
+	/* Playing a level straight from the editor *or* through --map skips the
+	   main menu, so nobody ever joins and the count stays at zero - which
+	   leaves both player entities live and reads as a two player game, with
+	   neither of them taking input. Default that case to player one alone.
+	   Reaching the level through the menu sets a real count, so the game's own
+	   flow is untouched.
+
+	   --map was the missing half: every headless run of a level had an
+	   uncontrollable player, which is why nothing could script gameplay. */
+	bool bDirectLevelLaunch = LaunchOptions::Get().HasMap();
 #ifdef EDITOR
-	// Playing a level straight from the editor skips the main menu, so nobody
-	// ever joins and the count stays at zero - which leaves both player
-	// entities live and reads as a two player game. Default that case to
-	// player one alone. Reaching the level through the menu sets a real count,
-	// so the game's own flow is untouched.
-	if (uiPlayerCount == 0)
+	bDirectLevelLaunch = true;
+#endif
+
+	if (uiPlayerCount == 0 && bDirectLevelLaunch)
 	{
 		uiPlayerCount = 1;
 		bPlayer1Active = true;
 		bPlayer2Active = false;
 	}
-#endif
 
 	// Single player mode
 	if (uiPlayerCount == 1)
@@ -447,11 +489,33 @@ void Player::Tick(float fDeltaTime)
 	}
 
 	/* if there is no bullet at all we need to feed it someone */
-// 	if(bIsReceiver && (m_vIncomingBullets.empty() && m_vCastedBullets.empty()))
-// 	{
-// 		m_pWeapon->SetCurrentAmmo(m_pWeapon->GetCurrentAmmo() + 1);
-// 		m_bRumble = true;
-// 	}
+	/* The authors' own recovery, above, restricted to the case that needs it.
+	 *
+	 * A thrown bullet can leave for good - past a wall, out of bounds, or timed
+	 * out - and with two players that is survivable because the other one still
+	 * has the shared bullet's other half of the loop. Solo it is a dead end: no
+	 * bullet in flight, no ammo, nothing to recall, and the level cannot be
+	 * continued. Reported as "if it goes beyond the wall I can't recall it
+	 * anymore".
+	 *
+	 * Deliberately not enabled for two players, which is why it was commented
+	 * out rather than deleted: both lists are empty at the start of a level too,
+	 * so the receiver would be handed an ammo before anyone has thrown and the
+	 * one-bullet-between-two-players rule would stop being a rule. */
+	if (!m_pReferencePlayer && m_bIsReceiver &&
+		!m_pWeapon->HasInfiniteAmmo() && m_pWeapon->GetCurrentAmmo() == 0 &&
+		m_vIncomingBullets.empty() && m_vCastedBullets.empty())
+	{
+		m_pWeapon->SetCurrentAmmo(m_pWeapon->GetCurrentAmmo() + 1);
+		m_bRumble = true;
+
+		/* Back to being the thrower: the aim marker returns and the recall
+		   marker goes, which is what Start does for a player who has ammo. */
+		m_bIsReceiver = false;
+		m_pRecallEntity->SetEnabled(false);
+
+		ShowAimer();
+	}
 
 	// Note for debug purposes
 	// TODO adding recall feature automatic after n seconds
@@ -532,8 +596,12 @@ void Player::AddSpawnedBullet(Bullet* pBullet)
 {
 	m_vCastedBullets.push_back(pBullet);
 
-	if(m_pReferencePlayer)
-		m_pReferencePlayer->m_vIncomingBullets.push_back(pBullet);
+	/* The receiver's incoming list is what Recall and the Fire-as-catch action
+	   iterate, so with no second player it has to be this one's - otherwise a
+	   solo throw is unrecallable and the bullet simply leaves. See Switch. */
+	Player* const pReceiver = m_pReferencePlayer ? m_pReferencePlayer : this;
+
+	pReceiver->m_vIncomingBullets.push_back(pBullet);
 }
 
 
@@ -569,11 +637,16 @@ void Player::Switch()
 	// So now you are the thrower and the other one is the receiver now
 	m_bIsReceiver = false;
 	m_pRecallEntity->SetEnabled(false);
-	if (m_pReferencePlayer)
-	{
-		m_pReferencePlayer->m_pRecallEntity->SetEnabled(true);
-		m_pReferencePlayer->m_bIsReceiver = true;
-	}
+
+	/* Unless there is no other one, in which case you are both ends of the
+	   throw. Catch() and the recall both run only for m_bIsReceiver, so without
+	   this a solo player throws once and can never get the bullet back - the
+	   role was handed to a partner who does not exist. The escape procedure in
+	   Weapon::Fire is what stops it being caught the moment it is thrown. */
+	Player* const pReceiver = m_pReferencePlayer ? m_pReferencePlayer : this;
+
+	pReceiver->m_pRecallEntity->SetEnabled(true);
+	pReceiver->m_bIsReceiver = true;
 }
 
 bool Player::Damage(float damage, Vector3 impactNormal, float fLaunchStrength /*= 1.0f*/)
@@ -694,7 +767,15 @@ void Player::Catch()
 			if (m_pBullet == pBullet && m_bReturn)
 			{
 				m_pBullet = nullptr;
-				m_pReferencePlayer->m_pBullet = nullptr;
+
+				/* Guarded like every other use of the reference player in this
+				   file: there may not be a second one. Same defect as
+				   Weapon::Fire's - catching your own returning bullet alone
+				   reaches this, and it is the crash immediately after that one
+				   is fixed. */
+				if (m_pReferencePlayer)
+					m_pReferencePlayer->m_pBullet = nullptr;
+
 				m_bReturn = false;
 			}
 

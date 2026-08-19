@@ -39,6 +39,12 @@ public:
 		if (uiIndex < m_pPlayers.size()) m_pPlayers[uiIndex] = pPlayer;
 	}
 
+	/* Fills any empty player slot by index. Idempotent and cheap once both are
+	   attached; called from Awake, StartGame and every Tick so that a player
+	   arriving late - or coming back after its chunk reloaded - is picked up.
+	   See the comment on the definition. */
+	void ResolvePlayers();
+
 	std::array<Player*, 2>& GetPlayers()
 	{
 		return m_pPlayers;

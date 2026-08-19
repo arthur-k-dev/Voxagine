@@ -308,7 +308,9 @@ AudioSource::Group* AudioSource::GetFreeChannel(SoundReference* pReference)
 	}
 
 	if (m_pAudioSystem)
-		m_pAudioSystem->m_pWorld->GetApplication()->GetLoggingSystem().Log(LogLevel::LOGLEVEL_MESSAGE, "Audio", std::to_string(m_pGroups.size() + 1).c_str() + ':' + pReference->GetRefPath());
+		m_pAudioSystem->m_pWorld->GetApplication()->GetLoggingSystem().Log(
+			LogLevel::LOGLEVEL_MESSAGE, "Audio",
+			std::to_string(m_pGroups.size() + 1) + ':' + pReference->GetRefPath());
 
 	m_pGroups[pReference].push_back(Group());
 

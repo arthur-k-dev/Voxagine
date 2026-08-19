@@ -26,6 +26,11 @@ public:
 
 private:
 
+	/* InputHandler's own numbering: handles are 1-based and player one holds the
+	   keyboard, mouse and touch (InputContextNew::Initialize). Not to be
+	   confused with Player::GetPlayerIndex, which is 0-based. */
+	static constexpr int k_iFirstPlayerHandle = 1;
+
 	void TogglePlayerShowing();
 
 	void SetJoinVisualActive(int);

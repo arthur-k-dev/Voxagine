@@ -24,6 +24,8 @@ public:
 	virtual bool Present() override;
 
 	virtual bool OnResize(uint32_t uiWidth, uint32_t uiHeight) override;
+	virtual void ApplyRenderSettings() override;
+	void LogRenderSettings() const;
 
 	/* Android destroys the app's ANativeWindow while backgrounded - the same
 	   handle the live VkSurfaceKHR was created from - so the surface does not
@@ -43,6 +45,7 @@ public:
 
 	virtual bool IsVSyncEnabled() const override { return m_Swapchain.IsVSyncEnabled(); }
 	virtual void SetVSyncEnabled(bool bEnabled) override;
+	virtual std::string GetStartupError() const override { return m_StartupError; }
 
 	VKDevice* GetDevice() { return &m_Device; }
 	const VKAllocator* GetAllocator() const { return &m_Allocator; }
@@ -67,4 +70,5 @@ private:
 	VkSurfaceKHR m_Surface = VK_NULL_HANDLE;
 
 	bool m_bBackendReady = false;
+	std::string m_StartupError;
 };

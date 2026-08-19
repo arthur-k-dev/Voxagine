@@ -6,6 +6,18 @@
 #include <rttr/registration>
 #include "Core/MetaData/PropertyTypeMetaData.h"
 
+namespace rttr::detail
+{
+	/* RTTR 0.9.6 generates two equally specific std::array traits. Newer
+	   Android Clang rejects that ambiguity, so spell out only the reflected
+	   concrete type instead of adding a third generic partial specialization. */
+	template<>
+	struct template_type_trait<std::array<SpriteRenderer*, 5>> : std::true_type
+	{
+		static std::vector<::rttr::type> get_template_arguments() { return {}; }
+	};
+}
+
 RTTR_REGISTRATION
 {
 	rttr::registration::class_<HealthComponent>("HealthComponent")

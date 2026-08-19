@@ -18,6 +18,15 @@ void FrameProfiler::Report(const std::string& name, double fMilliseconds)
 	++accum.uiSamples;
 }
 
+void FrameProfiler::ReportCount(const std::string& name, double fCount)
+{
+	Accumulator& accum = m_Accumulators[name];
+	accum.fTotalMs += fCount;
+	accum.fPeakMs = std::max(accum.fPeakMs, fCount);
+	accum.bIsCount = true;
+	++accum.uiSamples;
+}
+
 void FrameProfiler::Tick(float fDeltaTime)
 {
 	if (!m_bEnabled)
@@ -35,8 +44,20 @@ void FrameProfiler::Tick(float fDeltaTime)
 		if (accum.uiSamples == 0)
 			continue;
 
-		fprintf(stderr, "[timing] %-28s %6.3f ms avg, %8.3f ms peak (x%u/s)\n",
-		        name.c_str(), accum.fTotalMs / accum.uiSamples, accum.fPeakMs, accum.uiSamples);
+		if (accum.bIsCount)
+		{
+			/* Total, not average: the question a count answers is "how much of
+			   this happens per second", and an average over a variable frame
+			   rate hides exactly that. The peak is still the single worst
+			   frame, which is where a stall lives. */
+			fprintf(stderr, "[work]   %-28s %12.0f /s total, %10.0f peak (x%u/s)\n",
+			        name.c_str(), accum.fTotalMs, accum.fPeakMs, accum.uiSamples);
+		}
+		else
+		{
+			fprintf(stderr, "[timing] %-28s %6.3f ms avg, %8.3f ms peak (x%u/s)\n",
+			        name.c_str(), accum.fTotalMs / accum.uiSamples, accum.fPeakMs, accum.uiSamples);
+		}
 
 		accum.fTotalMs = 0.0;
 		accum.fPeakMs = 0.0;

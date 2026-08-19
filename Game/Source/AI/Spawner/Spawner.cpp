@@ -399,8 +399,11 @@ void Spawner::SpawnEnemies()
 			if (!pPathfinder)
 				pPathfinder = pMonsterEntity->AddComponent<pathfinding::Pathfinder>();
 
-			pPathfinder->m_group = m_Group;
-			m_Group->addAgent(*pPathfinder);
+			/* One call, so m_group and the group's m_agents cannot disagree.
+			   Writing m_group and calling addAgent by hand meant Pathfinder::
+			   Start registered a second time off the same m_group, and left
+			   the two ends of the registration owned by nobody. */
+			pPathfinder->SetGroup(m_Group);
 		}
 
 		pMonsterEntity->Destroyed += Event<Entity*>::Subscriber([=](Entity* pEntity)

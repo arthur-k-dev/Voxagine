@@ -30,9 +30,39 @@
  * writes drift apart, and Vulkan only reports the symptom. */
 struct VKPassBinding
 {
-	/* Slots reserved for an unbounded HLSL array; mirrors the 256-entry
-	   descriptor heaps the DX12 managers allocated. */
-	static constexpr uint32_t m_uiBindlessCapacity = 256;
+	/* Slots reserved for the shader's bindless texture array. Must match
+	   UIRenderer.ps.hlsl's BindlessTextureCapacity and VoxelBaker.cs.hlsl's
+	   BindlessModelCapacity exactly: glslc compiles an unsized HLSL resource
+	   array as length one, and a platform-specific size would make the shared
+	   SPIR-V output depend on whichever platform happened to build it last.
+
+	   96 is a hardware ceiling on the iPad's A12Z, not a preference. MoltenVK
+	   binds this set through a Metal indirect argument buffer, and Metal caps
+	   the textures in one at 96 - it says so exactly, and refuses the pipeline:
+
+	     Total number of indirect argument buffer resources exceeded for
+	     indirect textures (120/96)
+	     vkCreateGraphicsPipelines failed for 'UI Renderer'
+
+	   (Raising it far enough also trips a second, separate limit: an individual
+	   [[texture(N)]] index must be <= 127, which at 256 put the Voxel pass's
+	   voxelWorldData at texture(262).)
+
+	   **This is now a bound on one frame's working set, not on how many
+	   textures may be loaded.** It used to be both, because the array was
+	   indexed by TextureManager ID: it had to be as large as the highest live
+	   ID, a level here keeps more than 96 textures resident, and every texture
+	   past the limit stopped rendering - which is what garbled in-game text
+	   while the main menu, with far fewer textures loaded, looked correct.
+	   Raising the number could never have fixed that on A12Z.
+
+	   RenderContext::PackBindlessTextures now assigns each texture a slot in
+	   first-seen order across the sprites a frame actually draws, and rewrites
+	   the uploaded SpriteData::TextureID to that slot. VKRenderPass fills slot
+	   N from the same table. Overflowing 96 therefore takes 96 *distinct
+	   textures in a single frame*, and the warning for it lives with the
+	   packing rather than here. */
+	static constexpr uint32_t m_uiBindlessCapacity = 96;
 
 	enum Kind
 	{

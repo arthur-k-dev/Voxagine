@@ -637,9 +637,10 @@ bool VKRenderPass::WriteDescriptors(PCommandEngine* pEngine, VkDescriptorSet set
 
 	/* Bindless texture array, filled from the texture manager's live views so
 	   sprites and fonts loaded at any point appear without the pass being
-	   told. Model buffers (E_BINDLESS_SOURCE_MODELS) stay unwritten until the
-	   VoxModel GPU upload is restored; the array is PARTIALLY_BOUND, so that
-	   is legal as long as no shader indexes them. */
+	   told. Every slot is initialized with a valid fallback view before live
+	   IDs overwrite it. Vulkan permits partially-bound arrays, but MoltenVK
+	   represents this set as a Metal argument buffer, where an accidentally
+	   indexed hole is a GPU address fault rather than a harmless null sample. */
 	std::vector<VkDescriptorImageInfo> bindlessInfos;
 
 	if (m_Data.m_BindlessSource == RenderPass::E_BINDLESS_SOURCE_TEXTURES)
@@ -651,14 +652,65 @@ bool VKRenderPass::WriteDescriptors(PCommandEngine* pEngine, VkDescriptorSet set
 
 			TextureManager* pManager = m_pContext->GetTextureManager();
 
-			bindlessInfos.reserve(pManager->m_pViews.size());
+			VkDescriptorImageInfo fallback{};
 
 			for (const auto& entry : pManager->m_pViews)
 			{
-				if (entry.first >= binding.m_uiCount)
+				View* pTexture = entry.second.get();
+
+				if (pTexture == nullptr || pTexture->GetNative() == nullptr ||
+				    pTexture->GetNative()->IsLayoutUndefined())
 					continue;
 
-				View* pTexture = entry.second.get();
+				fallback.imageView =
+					pTexture->GetNative()->GetOrCreateImageView(VK_IMAGE_VIEW_TYPE_2D);
+				fallback.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+				if (fallback.imageView != VK_NULL_HANDLE)
+					break;
+			}
+
+			/* With no uploaded texture there can be no valid sprite draw.  Leave
+			   the bindless write absent and let the ordinary completeness/draw
+			   checks skip it. */
+			if (fallback.imageView == VK_NULL_HANDLE)
+				continue;
+
+			bindlessInfos.assign(binding.m_uiCount, fallback);
+
+			/* Slot N holds the texture the frame's Nth distinct sprite
+			   referenced, not the texture whose TextureManager ID happens to
+			   be N.
+			 *
+			 * That used to be the other way round - this loop walked every
+			 * live view and wrote it at index entry.first - and it is the
+			 * whole reason the array had to be as large as the highest live ID
+			 * rather than as large as a frame's working set. It cannot be: 96
+			 * is a Metal limit on A12Z, the content keeps more than 96
+			 * textures resident, and everything past the limit sampled the
+			 * wrong image. RenderContext::PackBindlessTextures builds this
+			 * list and rewrites the sprites to match; see m_BindlessTextureIDs
+			 * for the full reasoning.
+			 *
+			 * Bounded by both sizes because the two are decided in different
+			 * places: the packer against m_uiBindlessCapacity, this against
+			 * whatever the binding table declared. They agree today and a
+			 * mismatch should truncate rather than corrupt. */
+			const std::vector<uint32_t>& packedTextures =
+				m_pContext->GetBindlessTextureIDs();
+
+			const size_t uiSlots = std::min(packedTextures.size(), bindlessInfos.size());
+
+			for (size_t uiSlot = 0; uiSlot < uiSlots; ++uiSlot)
+			{
+				const auto entry = pManager->m_pViews.find(packedTextures[uiSlot]);
+
+				/* Destroyed between the packing and here. The slot keeps the
+				   fallback, which is a valid descriptor. */
+				if (entry == pManager->m_pViews.end())
+					continue;
+
+				View* pTexture = entry->second.get();
 
 				/* A view that was never uploaded is still UNDEFINED; binding
 				   it as sampled would be invalid. */
@@ -676,19 +728,19 @@ bool VKRenderPass::WriteDescriptors(PCommandEngine* pEngine, VkDescriptorSet set
 				info.imageView = imageView;
 				info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
-				bindlessInfos.push_back(info);
-
-				VkWriteDescriptorSet write{};
-				write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-				write.dstSet = set;
-				write.dstBinding = binding.m_uiBinding;
-				write.dstArrayElement = entry.first;
-				write.descriptorCount = 1;
-				write.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-				write.pImageInfo = &bindlessInfos.back();
-
-				writes.push_back(write);
+				bindlessInfos[uiSlot] = info;
 			}
+
+			VkWriteDescriptorSet write{};
+			write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+			write.dstSet = set;
+			write.dstBinding = binding.m_uiBinding;
+			write.dstArrayElement = 0;
+			write.descriptorCount = binding.m_uiCount;
+			write.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+			write.pImageInfo = bindlessInfos.data();
+
+			writes.push_back(write);
 		}
 	}
 

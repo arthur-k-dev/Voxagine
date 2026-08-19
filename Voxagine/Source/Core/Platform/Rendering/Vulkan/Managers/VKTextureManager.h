@@ -26,11 +26,14 @@ public:
 	virtual void DestroyTexture(const TextureReference* pTextureReference) override;
 
 private:
-	/* Texture IDs are descriptor array indices, so they have to be reused
-	   rather than handed out monotonically: the array is a fixed size and the
-	   shader indexes it with whatever ID a sprite carries. DXHeapManager did
-	   exactly this with ReserveID/FreeID; without it, streaming worlds in and
-	   out walks the IDs past the end of the array. */
+	/* Texture IDs are identities, not descriptor array indices - the bindless
+	   array is indexed by a per-frame slot, see
+	   RenderContext::PackBindlessTextures. They are still reused rather than
+	   handed out monotonically, but for a weaker reason than before: it keeps
+	   the ID range dense, which keeps m_pViews and the packer's ID-indexed
+	   scratch lookup proportional to the live set instead of to everything the
+	   session has ever loaded. DXHeapManager did the same with
+	   ReserveID/FreeID. */
 	uint32_t AcquireID();
 	void ReleaseID(uint32_t uiID);
 

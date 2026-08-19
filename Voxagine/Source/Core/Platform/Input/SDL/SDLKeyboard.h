@@ -129,6 +129,14 @@ public:
 
 	static Keyboard& Get();
 
+	/* --ui-script only: stop and restart the script's clock. A scripted token is
+	   spent on a *display frame*, and a level spends hundreds of those with
+	   gameplay held while its initial window streams in - so a script written
+	   against wall clock presses its keys into a world where no entity has
+	   ticked and nothing has bound an action yet. Application::Run sets this
+	   from World::IsGameplayHeld each frame. See SDLKeyboard.cpp. */
+	static void SetUIScriptPaused(bool bPaused);
+
 	State GetState() const;
 	bool IsConnected() const { return true; }
 

@@ -17,6 +17,7 @@
 #include "Core/ECS/Entities/Camera.h"
 #include "Core/ECS/Components/VoxRenderer.h"
 #include "Core/ECS/Systems/Physics/IntegrityChecker.h"
+#include "Core/ECS/Systems/Chunk/StreamingCounters.h"
 #include "Core/ECS/Components/Particles/ParticleSystem.h"
 #include "Core/ECS/Components/Particles/ParticlePool.h"
 #include <iostream>
@@ -59,8 +60,11 @@ PhysicsSystem::PhysicsSystem(World* pWorld, Vector3 gridSize, uint32_t voxelSize
 
 	if (m_pWorld)
 	{
-		m_pGPUParticles = m_pWorld->GetApplication()->GetPlatform().GetRenderContext()->m_pParticlePass->GetMapper();
-		m_pGPUParticles->Resize(m_uiMaxParticleCount, sizeof(GPUParticle));
+		RenderContext* pRenderContext = m_pWorld->GetApplication()->GetPlatform().GetRenderContext();
+		ParticlePass* pParticlePass = pRenderContext != nullptr ? pRenderContext->m_pParticlePass : nullptr;
+		m_pGPUParticles = pParticlePass != nullptr ? pParticlePass->GetMapper() : nullptr;
+		if (m_pGPUParticles != nullptr)
+			m_pGPUParticles->Resize(m_uiMaxParticleCount, sizeof(GPUParticle));
 
 		m_pWorld->Paused += Event<World*>::Subscriber(std::bind(&PhysicsSystem::OnWorldPaused, this, std::placeholders::_1), this);
 		m_pWorld->Resumed += Event<World*>::Subscriber(std::bind(&PhysicsSystem::OnWorldResumed, this, std::placeholders::_1), this);
@@ -818,6 +822,14 @@ void PhysicsSystem::ApplySphericalDestruction(const Vector3& position, float fRa
 		}
 	}
 
+	/* Phase 11. Counted before the early-out, because a burst that destroyed
+	   nothing is a result and not a non-event: it says the shot connected with
+	   indestructible geometry, or with air, and those are different lines in a
+	   headless run's report. Once per burst, never per voxel. */
+	StreamingCounters::Get().DestructionBursts.fetch_add(1, std::memory_order_relaxed);
+	StreamingCounters::Get().VoxelsDestroyed.fetch_add(result.uiDestroyed, std::memory_order_relaxed);
+	StreamingCounters::Get().VoxelsProtected.fetch_add(result.uiProtected, std::memory_order_relaxed);
+
 	if (result.uiDestroyed == 0)
 		return;
 
@@ -1382,13 +1394,31 @@ bool PhysicsSystem::CheckContinousCollision(BoxCollider* pColliderA, Manifold& m
 	float dot = FLT_MAX;
 	Vector3 origin;
 
-	for (float z = -halfSizeA.z; z <= halfSizeA.z; z += halfSizeA.z * 2.f)
+	/* The eight corners of the collider, counted rather than stepped to.
+	 *
+	 * This was three nested loops of the form
+	 * `for (float z = -h.z; z <= h.z; z += h.z * 2.f)`, which visit -h and +h
+	 * and are meant to be the corners - but **the step is h * 2, so a collider
+	 * with a zero extent on any axis steps by zero and the loop never ends**.
+	 * A flat collider, or one whose size was never set, is enough. It only
+	 * matters for a body moving more than 5 units in a tick (the early-out
+	 * above), which in this game is a thrown bullet, and in Debug or the editor
+	 * every iteration submits a debug line - so the process spins on the main
+	 * thread *and* grows m_DebugDrawLines without bound. Pausing it lands in
+	 * DebugRenderer, which is where it was first reported from and is not where
+	 * the defect is.
+	 *
+	 * Counting to 8 gives the identical set of origins for any collider with
+	 * real extents, and for a degenerate one it simply repeats a corner, which
+	 * costs a few redundant casts and terminates. */
+	for (uint32_t uiCorner = 0; uiCorner < 8; ++uiCorner)
 	{
-		for (float y = -halfSizeA.y; y <= halfSizeA.y; y += halfSizeA.y * 2.f)
 		{
-			for (float x = -halfSizeA.x; x <= halfSizeA.x; x += halfSizeA.x * 2.f)
 			{
-				origin = { x,y,z };
+				origin = {
+					(uiCorner & 1) ? halfSizeA.x : -halfSizeA.x,
+					(uiCorner & 2) ? halfSizeA.y : -halfSizeA.y,
+					(uiCorner & 4) ? halfSizeA.z : -halfSizeA.z };
 
 #if defined(EDITOR) || defined(_DEBUG)							
 					{
@@ -1406,8 +1436,47 @@ bool PhysicsSystem::CheckContinousCollision(BoxCollider* pColliderA, Manifold& m
 				BoxCollider* pIgnoreCollider = pColliderA;
 				float rayLenght = lenght;
 
+				/* This loop can only repeat through the `continue` below, and it
+				 * terminates only because that path shortens the ray. Both of its
+				 * bounds were therefore one float comparison:
+				 *
+				 *   - `dist == 0.f` is exact equality. A hit that advances the ray
+				 *     by 1e-30 is not zero, so it passed the guard, subtracted
+				 *     nothing from rayLenght, moved rayStart nowhere, and the next
+				 *     cast returned the identical hit - forever. A frame that never
+				 *     ends looks exactly like the GPU hang in CLAUDE.md and is not
+				 *     the same thing at all.
+				 *   - Nothing bounded the number of hits. `pIgnoreCollider` excludes
+				 *     only the collider hit last, so two overlapping voxel-precise
+				 *     colliders can hand the ray back and forth.
+				 *
+				 * So: progress must be real (an epsilon, which also disposes of a
+				 * NaN distance - `!(dist > eps)` is true for one, where the old
+				 * test was false), and there is a hard step cap behind it. Same
+				 * argument as the marcher's MARCH_STEP_BUDGET: a wrong answer in a
+				 * pathological case is cheaper than a frame that never returns. */
+				const float k_fMinRayAdvance = 1e-3f;
+				const uint32_t k_uiMaxRaySteps = 32;
+
+				uint32_t uiRaySteps = 0;
+
 				while( rayLenght > 0.f && RayCastGroup(pIgnoreCollider, potentialColliders, rayStart + origin, manifold.Normal, hitRes, rayLenght))
 				{
+					if (++uiRaySteps > k_uiMaxRaySteps)
+					{
+						static bool s_bWarned = false;
+
+						if (!s_bWarned)
+						{
+							s_bWarned = true;
+							fprintf(stderr, "[physics] ray against '%s' passed %u voxel-precise colliders and was cut short\n",
+								pColliderA->GetOwner() ? pColliderA->GetOwner()->GetName().c_str() : "?",
+								k_uiMaxRaySteps);
+						}
+
+						break;
+					}
+
 					if (hitRes.HitEntity)
 					{
 						BoxCollider* pColliderB = hitRes.HitEntity->GetComponent<BoxCollider>();
@@ -1425,7 +1494,10 @@ bool PhysicsSystem::CheckContinousCollision(BoxCollider* pColliderA, Manifold& m
 							else
 							{
 								float dist = glm::distance(hitRes.HitPoint, rayStart);
-								if (dist == 0.f)
+
+								/* Not `dist == 0.f`: see the loop's comment. This
+								   is the only thing that makes the loop shorter. */
+								if (!(dist > k_fMinRayAdvance))
 									break;
 
 								rayLenght -= dist;
@@ -1601,5 +1673,3 @@ void PhysicsSystem::SimulateParticles(float fDeltaTime)
 	   actually written and the pass drew stale ones (P15). */
 	m_uiActiveParticleCount = m_Debris.GetCount();
 }
-
-

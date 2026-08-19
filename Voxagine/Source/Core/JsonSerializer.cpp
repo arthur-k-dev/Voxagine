@@ -1,6 +1,11 @@
 #include "pch.h"
 #include "JsonSerializer.h"
 
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <set>
+
 #include "Core/ECS/World.h"
 #include "Core/ECS/Entities/Camera.h"
 #include "Core/ECS/Systems/Physics/PhysicsSystem.h"
@@ -10,6 +15,7 @@
 #include "Core/Resources/Formats/VoxModel.h"
 #include "Core/ECS/Systems/Chunk/Chunk.h"
 #include "Core/ECS/Systems/Chunk/ChunkSystem.h"
+#include "Core/ECS/Systems/Chunk/StreamingCounters.h"
 #include "Core/Threading/JobManager.h"
 #include "Core/Application.h"
 #include "Core/Objects/TSubclass.h"
@@ -61,6 +67,34 @@ bool JsonSerializer::SerializeWorld(World* pWorld, Document& worldDoc)
 	return true;
 }
 
+bool JsonSerializer::IsWorldSerializable(World* pWorld) const
+{
+	/* **A world that is still streaming must not be written to disk.**
+	   CHUNK_STREAMING_PLAN.md phase 7, and it is a data-loss class rather than
+	   a tidiness rule: ChunkifyWorld distributes the *live* entities into the
+	   chunk grid, and mid-stream the live set is not the world. An incoming
+	   chunk's roots may be constructed but not admitted (so they are in no list
+	   ChunkifyWorld walks), and an outgoing chunk's may be half
+	   serialized-and-destroyed. Saving then writes a level with a hole in it
+	   over the only copy of it.
+
+	   **This gates the file write and nothing else, and that distinction is the
+	   whole bug it caused.** It was on SerializeWorld itself, which also serves
+	   Editor::OnPlay - the editor serializes the world to an in-memory document
+	   when you press Play so it can restore it when you stop. Refusing that
+	   handed play mode an *empty snapshot*: no players, no camera links,
+	   nothing for the camera to follow. It went unnoticed for a session because
+	   phase 5 had just broadened ChunkSystem::IsStreaming to include the
+	   far-field build and pending voxel bakes, which stay true for the first
+	   seconds after a world loads - exactly when somebody presses Play.
+
+	   Making play-mode *wait* for streaming rather than snapshotting mid-stream
+	   is the better answer and is phase 10's; refusing it is not. */
+	return pWorld == nullptr ||
+		pWorld->GetChunkSystem() == nullptr ||
+		!pWorld->GetChunkSystem()->IsStreaming();
+}
+
 void JsonSerializer::SerializeWorldAsync(World* pWorld, std::function<void(bool, Document&)> callback)
 {
 	//TODO: Run SerializeWorld via job and return callback
@@ -69,6 +103,20 @@ void JsonSerializer::SerializeWorldAsync(World* pWorld, std::function<void(bool,
 void JsonSerializer::SerializeWorldToFile(const std::string& filePath, World* pWorld, std::function<void(bool)> callback)
 {
 	//TODO: Run via job
+
+	/* The data-loss guard, on the path that can actually lose data. See
+	   IsWorldSerializable. */
+	if (!IsWorldSerializable(pWorld))
+	{
+		m_Logger.Log(LOGLEVEL_WARNING, "JsonSerializer",
+			"Refused to write '" + filePath +
+			"' while the world's chunks are still streaming - the live entity set "
+			"is not the world yet, and saving it would write a level with a hole "
+			"in it.");
+
+		callback(false);
+		return;
+	}
 
 	// Check if filepath is valid wld file
 	if (filePath.substr(filePath.find_last_of(".") + 1) != m_Settings.GetWorldFileExtension())
@@ -99,6 +147,14 @@ void JsonSerializer::SerializeWorldToFile(const std::string& filePath, World* pW
 
 	m_pFileSystem->CloseFile(handle);
 	callback(false);
+}
+
+/* Shares VOXAGINE_CHUNK_IO_TIMINGS with the chunk codec's reporting: one switch
+   for "tell me what streaming costs in wall clock". */
+static bool ChunkIoTimingsEnabled()
+{
+	static const bool s_bEnabled = std::getenv("VOXAGINE_CHUNK_IO_TIMINGS") != nullptr;
+	return s_bEnabled;
 }
 
 bool JsonSerializer::DeserializeWorld(World& world, Document& worldDoc)
@@ -151,12 +207,21 @@ bool JsonSerializer::DeserializeWorld(World& world, Document& worldDoc)
 			// duplicates, and FindEntity returns whichever it reaches first.
 			uint64_t highestId = 0;
 			Value& chunksVal = worldVal["ChunkData"]["Chunks"];
+			std::unordered_set<uint64_t> knownIds;
+
 			for (SizeType i = 0; i < chunksVal.Size(); i++)
 			{
 				uint64_t chunkHighestId = GetHighestEntityID(chunksVal[i]["RootEntities"]);
 				if (chunkHighestId > highestId)
 					highestId = chunkHighestId;
+
+				/* The same walk, one question further: which ids does this
+				   level contain at all? See World::SetKnownEntityIds - it is
+				   what lets a link tell "not here yet" from "never coming". */
+				CollectEntityIds(chunksVal[i]["RootEntities"], knownIds);
 			}
+
+			world.SetKnownEntityIds(std::move(knownIds));
 
 			if (highestId + 1 > Entity::EntityIdCounter)
 				Entity::EntityIdCounter = highestId + 1;
@@ -342,7 +407,7 @@ Entity* JsonSerializer::ValueToEntity(Value& val, World& world, bool bGenerateNe
 		if (prop.get_name().to_string() == "ID" && bGenerateNewId)
 		{
 			if (val.HasMember(prop.get_name().to_string()))
-				m_vOldPrefabIDs.insert({ val[prop.get_name().to_string()].GetInt64(), pEntity->GetId() });
+				world.m_vOldPrefabIDs.insert({ val[prop.get_name().to_string()].GetInt64(), pEntity->GetId() });
 			continue;
 		}
 
@@ -352,36 +417,79 @@ Entity* JsonSerializer::ValueToEntity(Value& val, World& world, bool bGenerateNe
 		}
 	}
 
-	// Create and add all components to entity
-	Value& componentsVal = val["Components"];
-	for (SizeType i = 0; i < componentsVal.Size(); i++)
+	/* "Components" and "Children" are both optional as far as the file format is
+	   concerned - an entity with neither is a legal, if useless, root - and
+	   rapidjson's operator[] on a missing member aborts in Debug and hands back
+	   a static null Value in Release. Streamed content is data and data is
+	   hostile (CHUNK_STREAMING_PLAN.md T7); an entity missing a member is
+	   skipped past, not crashed on.
+	   Create and add all components to entity */
+	if (val.HasMember("Components") && val["Components"].IsArray())
 	{
-		std::string compTypeName = componentsVal[i]["ComponentType"].GetString();
-		if (compTypeName != "Transform")
+		Value& componentsVal = val["Components"];
+
+		for (SizeType i = 0; i < componentsVal.Size(); i++)
 		{
-			Component* pComponent = ValueToComponent(world, componentsVal[i], pEntity);
-			pEntity->AddComponent(pComponent);
-		}
-		else
-		{
-			// Special case for transform since its already added in the entity constructor
-			rttr::instance transformInstance = *pEntity->GetTransform();
-			for (rttr::property prop : rttr::type::get<Transform>().get_properties())
+			if (!componentsVal[i].HasMember("ComponentType"))
+				continue;
+
+			std::string compTypeName = componentsVal[i]["ComponentType"].GetString();
+			if (compTypeName != "Transform")
 			{
-				if (componentsVal[i].HasMember(prop.get_name().to_string()))
+				/* Streaming's remaining transition cost is inside here rather
+				   than in the reflection walk: a component whose setter names a
+				   model or a texture pulls it through the resource stack, and
+				   VKTextureManager uploads one texture per submit with a
+				   WaitForGPU after it (CLAUDE.md, "Chunk loading stalls the
+				   frame"). A chunk streaming budget cannot bound anything
+				   smaller than one root, so this is where the worst case lives -
+				   named, under an env var, because it is per component. */
+				const bool bReportSlow = ChunkIoTimingsEnabled();
+				const std::chrono::steady_clock::time_point start = bReportSlow
+					? std::chrono::steady_clock::now()
+					: std::chrono::steady_clock::time_point();
+
+				Component* pComponent = ValueToComponent(world, componentsVal[i], pEntity);
+				pEntity->AddComponent(pComponent);
+
+				if (bReportSlow)
 				{
-					SetPropertyFromValue(&world, componentsVal[i][prop.get_name().to_string()], prop, transformInstance);
+					const double fMs = std::chrono::duration<double, std::milli>(
+						std::chrono::steady_clock::now() - start).count();
+
+					if (fMs >= 1.0)
+					{
+						fprintf(stderr, "[chunk] component '%s' of '%s' took %.2f ms to construct\n",
+							compTypeName.c_str(), pEntity->GetName().c_str(), fMs);
+					}
+				}
+			}
+			else
+			{
+				// Special case for transform since its already added in the entity constructor
+				rttr::instance transformInstance = *pEntity->GetTransform();
+				for (rttr::property prop : rttr::type::get<Transform>().get_properties())
+				{
+					if (componentsVal[i].HasMember(prop.get_name().to_string()))
+					{
+						SetPropertyFromValue(&world, componentsVal[i][prop.get_name().to_string()], prop, transformInstance);
+					}
 				}
 			}
 		}
 	}
 
 	// Create and add all entity children to parent entity
-	Value& childrenVal = val["Children"];
-	for (SizeType i = 0; i < childrenVal.Size(); i++)
+	if (val.HasMember("Children") && val["Children"].IsArray())
 	{
-		ValueToEntity(childrenVal[i], world, bGenerateNewId, pEntity);
+		Value& childrenVal = val["Children"];
+
+		for (SizeType i = 0; i < childrenVal.Size(); i++)
+		{
+			ValueToEntity(childrenVal[i], world, bGenerateNewId, pEntity);
+		}
 	}
+
 	return pEntity;
 }
 
@@ -391,9 +499,32 @@ Component* JsonSerializer::ValueToComponent(World& world, Value& val, Entity* pE
 	std::string componentTypeName = val["ComponentType"].GetString();
 	rttr::type componentType = rttr::type::get_by_name(componentTypeName);
 
-	// Check if the type is valid before creation
+	/* An unknown component type used to be dropped in complete silence, and the
+	   entity came up looking right with a piece of its behaviour missing - a
+	   button that focuses and does nothing, a script that never runs. It is the
+	   same class of defect as Settings::FromJson applying zero properties: the
+	   file parsed, the entity built, nothing said otherwise.
+
+	   The usual cause is not a typo. It is a reflection-only translation unit
+	   whose RTTR_REGISTRATION never made it into the binary - see CLAUDE.md's
+	   note on Settings.cpp - so the name the world file asks for was never
+	   registered. `nm -C <binary> | grep <Type>` is the ten-second confirmation.
+
+	   Once per type rather than per entity: a world can hold hundreds of the
+	   same component and the second line adds nothing. */
 	if (!componentType.is_valid())
+	{
+		static std::set<std::string> reported;
+
+		if (reported.insert(componentTypeName).second)
+		{
+			printf("[serializer] unknown component type '%s' - it is not RTTR-registered "
+			       "in this binary, so every one of them is being dropped\n",
+			       componentTypeName.c_str());
+		}
+
 		return nullptr;
+	}
 
 	// Create Component using rttr type
 	rttr::variant componentVar = componentType.create({ pEntity });
@@ -822,12 +953,12 @@ void JsonSerializer::ValueToVariant(World* world, rttr::instance& instance, rttr
 	else if ((variantType == rttr::type::get<Entity*>() || Utils::CheckDerivedType(variantType, rttr::type::get<Entity*>())) && val.IsInt64())
 	{
 		if (!rttr::type::get<VClass>().is_base_of(instance.get_derived_type()) && world)
-			world->m_vWorldConnections.push_back({ instance, property, variantType, val.GetInt64() });
+			RecordWorldLink(*world, instance, property, variantType, val.GetInt64(), -1);
 	}
 	else if ((variantType == rttr::type::get<Component*>() || Utils::CheckDerivedType(variantType, rttr::type::get<Component*>())) && val.IsInt64())
 	{
 		if (!rttr::type::get<VClass>().is_base_of(instance.get_derived_type()) && world)
-			world->m_vWorldConnections.push_back({ instance, property, variantType, val.GetInt64() });
+			RecordWorldLink(*world, instance, property, variantType, val.GetInt64(), -1);
 	}
 	// I don't have to create this because it is a stack member
 // {
@@ -897,7 +1028,7 @@ void JsonSerializer::ValueToVariant(World* world, rttr::instance& instance, rttr
 			return;
 
 		if(world)
-			world->m_vWorldConnections.push_back({ instance, property, variantType, val.GetInt64(), index });
+			RecordWorldLink(*world, instance, property, variantType, val.GetInt64(), index);
 	}
 	// Same goes for the component array types
 	else if ((Utils::CheckDerivedType(variantType, rttr::type::get<Component*>())) && val.IsInt64())
@@ -906,7 +1037,7 @@ void JsonSerializer::ValueToVariant(World* world, rttr::instance& instance, rttr
 			return;
 
 		if(world)
-			world->m_vWorldConnections.push_back({ instance, property, variantType, val.GetInt64(), index });
+			RecordWorldLink(*world, instance, property, variantType, val.GetInt64(), index);
 	}
 	else if (Utils::CheckDerivedType(variantType, rttr::type::get<VClass>()) && property.get_type().is_sequential_container())
 	{
@@ -1033,12 +1164,36 @@ uint64_t JsonSerializer::GetHighestEntityID(Value& rootEntityVal)
 				id = entityId;
 		}
 
+		/* A root with no "Children" is legal data - an older save, a hand-edited
+		   world - and rapidjson's operator[] on a missing member is an assert in
+		   Debug and a read of a static null Value in Release, so the recursion
+		   below has to ask first. CHUNK_STREAMING_PLAN.md T7. */
+		if (!rootEntityVal[i].HasMember("Children") || !rootEntityVal[i]["Children"].IsArray())
+			continue;
+
 		uint64_t highestChildId = GetHighestEntityID(rootEntityVal[i]["Children"]);
 		if (highestChildId > id)
 			id = highestChildId;
 	}
 
 	return id;
+}
+
+void JsonSerializer::CollectEntityIds(Value& rootEntityVal, std::unordered_set<uint64_t>& out)
+{
+	for (SizeType i = 0; i < rootEntityVal.Size(); i++)
+	{
+		if (rootEntityVal[i].HasMember("ID"))
+			out.insert(rootEntityVal[i]["ID"].GetUint64());
+
+		/* Same guard as GetHighestEntityID: a root with no "Children" is legal
+		   data, and rapidjson's operator[] on a missing member is an assert in
+		   Debug. */
+		if (!rootEntityVal[i].HasMember("Children") || !rootEntityVal[i]["Children"].IsArray())
+			continue;
+
+		CollectEntityIds(rootEntityVal[i]["Children"], out);
+	}
 }
 
 void JsonSerializer::AddRootEntityToWorld(World& world, Entity* pEntity)
@@ -1072,93 +1227,437 @@ void JsonSerializer::ToJson(rttr::instance instance, Document & doc)
 	doc.AddMember("Data", dataVal, doc.GetAllocator());
 }
 
+void JsonSerializer::RecordWorldLink(World& world, rttr::instance& instance,
+	const rttr::property& property, const rttr::type& variantType,
+	int64_t iTargetEntityId, int iIndex)
+{
+	/* Reduce the source to an identity here, while the object is certainly
+	   alive, rather than storing it and dereferencing it a frame later. See
+	   World::WorldConnectionInformation for why (M3). */
+	World::WorldConnectionInformation connection;
+	connection.rProperty = property;
+	connection.rType = variantType;
+	connection.iEntityId = iTargetEntityId;
+	connection.iIndex = iIndex;
+
+	if (Component* pComponent = instance.try_convert<Component>())
+	{
+		Entity* pOwner = pComponent->GetOwner();
+
+		/* No owner means nothing can find it again, so the link could never be
+		   made. Dropping it here is the same outcome as dropping it later,
+		   minus the pointer. */
+		if (pOwner == nullptr)
+			return;
+
+		connection.uiSourceEntityId = pOwner->GetId();
+		connection.rSourceComponentType = pComponent->get_type();
+	}
+	else if (Entity* pEntity = instance.try_convert<Entity>())
+	{
+		/* "ID" is Entity's first registered property and a derived type's
+		   properties follow its base's, so by the time any link-bearing property
+		   is read the entity is already carrying its serialized id - which is
+		   what the world will know it by. */
+		connection.uiSourceEntityId = pEntity->GetId();
+	}
+	else
+	{
+		return;
+	}
+
+	world.m_vWorldConnections.push_back(std::move(connection));
+}
+
 void JsonSerializer::ResolveWorldLinks(World& pWorld)
 {
 	if (pWorld.m_vWorldConnections.empty())
 		return;
 
-	for (const auto& connection : pWorld.m_vWorldConnections)
+	/* K6. A link is retried until both ends of it are in the world, because
+	   with streaming the two ends arrive in different frames: the source may
+	   still be a staged root that has not been admitted, and the target may be
+	   in a chunk whose static art is still admitting sixteen roots at a time.
+	   Master resolved once and cleared the list unconditionally, so a
+	   cross-chunk reference that was one frame early became a permanent null -
+	   which is the bug class the experiment answered with GameManager::
+	   ResolvePlayers, SpawnerManager::RefreshSpawnerLinks polled from four
+	   places and a guard in Weapon::Fire (ledger E3). None of those land. */
+	std::vector<World::WorldConnectionInformation> pending;
+	pending.reserve(pWorld.m_vWorldConnections.size());
+
+	/* Swapped out first: SetInstanceProperty can run reflected setters, and a
+	   setter that deserializes something would otherwise append to the vector
+	   being iterated. */
+	std::vector<World::WorldConnectionInformation> connections;
+	connections.swap(pWorld.m_vWorldConnections);
+
+	for (World::WorldConnectionInformation& connection : connections)
 	{
 		// if we have -1 that means it has not been set yet.
 		if (connection.iEntityId == -1)
 			continue;
 
-		auto number = connection.iEntityId;
-		const auto fIter = m_vOldPrefabIDs.find(number);
+		/* **The prefab remap is folded in once, on the first attempt, and the
+		   map is cleared every pass.** It maps a serialized id to the one a
+		   freshly generated prefab instance actually got, and it is only
+		   meaningful for the deserialization pass that filled it.
 
-		// See if we have the same number or else find a different entity
-		if (fIter != m_vOldPrefabIDs.end())
-			number = (connection.iEntityId != fIter->second) ? fIter->second : connection.iEntityId;
+		   Making links *retryable* (K6) accidentally made this map outlive that
+		   pass: it used to be cleared unconditionally at the end of every
+		   ResolveWorldLinks, and keeping it alive while anything was pending
+		   meant a single unresolvable link kept it for up to
+		   k_uiMaxWorldLinkRetries PreTicks - and JsonSerializer belongs to the
+		   Application, not the world, so a stale entry from an earlier world or
+		   an earlier prefab load could silently redirect a link to a different
+		   entity. Resolving it into the connection keeps retries working without
+		   the map having to survive at all. */
+		if (connection.uiAttempts == 0)
+		{
+			const auto fIter = pWorld.m_vOldPrefabIDs.find(connection.iEntityId);
+
+			if (fIter != pWorld.m_vOldPrefabIDs.end())
+				connection.iEntityId = fIter->second;
+		}
+
+		/* Nothing has entered or left the world since this link last looked, so
+		   looking again cannot produce a different answer. Skipped before the
+		   lookups rather than after them, because World::FindEntity is a linear
+		   scan of every resident entity and this runs every PreTick for every
+		   pending link - the pass costs nothing at all on a quiet frame. */
+		const uint64_t uiPopulation = pWorld.GetEntityPopulationGeneration();
+
+
+
+		const auto number = connection.iEntityId;
+
+		Entity* pSourceEntity = pWorld.FindEntity(connection.uiSourceEntityId);
 
 		// find the entity that needs to be connected
 		Entity* pVarEntity = pWorld.FindEntity(number);
-		if (pVarEntity == nullptr)
+
+		if (pSourceEntity == nullptr || pVarEntity == nullptr)
+		{
+			/* One or both ends are not here yet. Keep it and try again next
+			   PreTick, up to a bound - a level may legitimately reference an
+			   entity that no longer exists, and retrying that forever is a
+			   per-frame cost that never ends.
+
+			   **The bound is counted in frames where gameplay actually runs.**
+			   It used to be counted in PreTicks, and a world's first window is
+			   streamed now (phase 4), so gameplay is held while it builds -
+			   `World::IsGameplayHeld` - and PreTick runs throughout. On this
+			   machine a Debug `Fishing_Village_Beat1` holds for 480+ frames,
+			   which is twice the budget: **every cross-chunk link in the level
+			   was abandoned before a single entity had ticked.** Measured, all
+			   eleven of them, including the two that attach the camera to the
+			   players:
+
+			       Gave up connecting 'Player 1' on entity 13 to entity 12
+			       Gave up connecting 'Player 2' on entity 13 to entity 2955
+
+			   It is intermittent in exactly the way that made it hard to place:
+			   Release lifts the hold in well under 240 frames and works, Debug
+			   does not and does not. Four runs of the same binary and command
+			   line split three to one on nothing but how long the bake took.
+
+			   Not gated on `IsStreaming` instead, which would be the tempting
+			   wider rule: the window slides constantly during normal play, so
+			   that makes the bound never expire and is what it exists to
+			   prevent. The hold is the precise period where nothing can consume
+			   a link anyway, because entities are not ticking. */
+			/* **And only when the attempt could have learned something.**
+			 *
+			 * The hold is one half of this race and was the half that had been
+			 * measured; the other half is that a streamed level admits an
+			 * entity whenever the player walks to its chunk, which may be
+			 * minutes. Counted in frames, the budget expires long before, and
+			 * it did: every `Spawners` and `AI Group` link in
+			 * Fishing_Village_Beat1 was abandoned with "the source never
+			 * arrived", because the *source* - the spawner manager itself - is
+			 * three chunks away from where the player starts and had not been
+			 * admitted yet. A spawner that spawns nothing, from a link that
+			 * died before either end existed.
+			 *
+			 * So a retry is spent only on an attempt that learned nothing: the
+			 * world's entity population is the same as it was last time, so
+			 * looking again could not have produced a different answer. That
+			 * keeps the bound doing its actual job - a level referencing an
+			 * entity it no longer contains still gives up, because a settled
+			 * world stops changing this number - while a link whose end is
+			 * merely not resident yet waits as long as it takes.
+			 *
+			 * Deliberately not gated on IsStreaming, for the reason the comment
+			 * above gives: the window slides throughout normal play, so that
+			 * rule would make the bound never expire at all. */
+			/* **Can this end ever arrive?** That is the question the budget
+			 * could not ask, and asking it is the difference between a bound
+			 * that works and one that cannot.
+			 *
+			 * Both ends of a link are entity ids, and the level file lists
+			 * every id it contains across every chunk (World::
+			 * SetKnownEntityIds). An id that is in that list is in a chunk, and
+			 * the chunk arrives when the player walks to it - minutes, maybe,
+			 * and no frame count can wait that long and still be a bound. So a
+			 * link whose missing end the level *does* contain simply waits, and
+			 * costs nothing while it waits: the skip above means it is not even
+			 * looked at until streaming admits something.
+			 *
+			 * An id the level does not contain has nothing coming, and that is
+			 * the case the bound exists for - a level referencing an entity it
+			 * no longer has. It keeps the frame budget, and the check that
+			 * covers it (Streaming/ALinkWhoseTargetNeverArrivesIsGivenUpOnQuietly)
+			 * is about exactly that: "a link with no possible target".
+			 *
+			 * Measured: every 'Spawners' and 'AI Group' link in
+			 * Fishing_Village_Beat1 was abandoned four seconds into the level
+			 * with "the source never arrived", because the source is a spawner
+			 * manager three chunks from the player's start. Eleven links, and
+			 * an arena wired to nothing. */
+			const bool bSourceCanArrive =
+				pSourceEntity != nullptr || pWorld.LevelContainsEntityId(connection.uiSourceEntityId);
+
+			const bool bTargetCanArrive =
+				pVarEntity != nullptr || (number >= 0 && pWorld.LevelContainsEntityId(static_cast<uint64_t>(number)));
+
+			connection.uiLastPopulationGeneration = uiPopulation;
+
+			if (!pWorld.IsGameplayHeld() && !(bSourceCanArrive && bTargetCanArrive))
+				++connection.uiAttempts;
+
+			if (connection.uiAttempts < World::k_uiMaxWorldLinkRetries)
+			{
+				pending.push_back(std::move(connection));
+				continue;
+			}
+
+			StreamingCounters::Get().WorldLinksAbandoned.fetch_add(1, std::memory_order_relaxed);
+
+			if (pSourceEntity == nullptr)
+				StreamingCounters::Get().WorldLinksSourceLost.fetch_add(1, std::memory_order_relaxed);
+
+			/* Say so. A link that never forms is a gameplay entity that quietly
+			   does not work - a camera that does not follow, a spawner that
+			   spawns nothing - and it produced no output at all until now, which
+			   is how one goes unnoticed until somebody plays the game. */
+			m_Logger.Log(LOGLEVEL_WARNING, "JsonSerializer",
+				"Gave up connecting '" + connection.rProperty.get_name().to_string() +
+				"' on entity " + std::to_string(connection.uiSourceEntityId) +
+				" to entity " + std::to_string(number) + " - " +
+				(pSourceEntity == nullptr ? "the source never arrived" : "the target never arrived"));
+
 			continue;
+		}
 
 		rttr::variant varEntity = pVarEntity;
 		if (!varEntity.is_valid()) continue;
 
-		// if we are dealing with a component that has a property that needs to be linked.
-		if(auto pComponent = connection.rInstance.try_convert<Component>())
+		auto applyLink = [&](rttr::instance& instance)
 		{
-			// search the entity where a property needs to be connected
-			if(auto pSearchEntity = pWorld.FindEntity(pComponent->GetOwner()->GetId()))
+			if (connection.rProperty.get_type().is_sequential_container())
 			{
-				// grab the current component of the search entity
-				Component* pCurrentComponent = pSearchEntity->GetComponent(pComponent->get_type());
-
-				// if we are dealing with a array inside a component
-				if(connection.rProperty.get_type().is_sequential_container())
+				if (!SetInstanceArrayProperty(instance, connection.rProperty, varEntity, connection.rType, connection.iIndex))
 				{
-					// Fill the container with the right information
-					rttr::instance instComponent = pCurrentComponent;
-
-					if (!SetInstanceArrayProperty(instComponent, connection.rProperty, varEntity, connection.rType, connection.iIndex))
-					{
-						m_Logger.Log(LOGLEVEL_ERROR, "JsonSerializer", "Could not insert entity or component");
-					}
-				}
-				else
-				{
-					rttr::instance instComponent = pCurrentComponent;
-					if (!SetInstanceProperty(instComponent, connection.rProperty, varEntity, connection.rType))
-					{
-						m_Logger.Log(LOGLEVEL_ERROR, "JsonSerializer", "Could not connect entity or component");
-					}
+					m_Logger.Log(LOGLEVEL_ERROR, "JsonSerializer", "Could not insert entity or component");
 				}
 			}
+			else
+			{
+				if (!SetInstanceProperty(instance, connection.rProperty, varEntity, connection.rType))
+				{
+					m_Logger.Log(LOGLEVEL_ERROR, "JsonSerializer", "Could not connect entity or component");
+				}
+			}
+
+			/* M8. The link is a raw pointer from here on and nothing else knows
+			   it exists, so remember where it was written - destroying the
+			   target is what has to null it.
+
+			   **Container links are recorded too, and that was not always
+			   true.** They used to be counted and left dangling, on the grounds
+			   that no shipped level had one; Fishing_Village_Beat1 has five, in
+			   the spawner manager's Spawners vector, and they were invisible
+			   only because they never resolved. The moment they did, a chunk
+			   unload left the manager holding freed components and it crashed
+			   inside its own null check - the pointer was not null, it was
+			   dead. A pointer you have to dereference to validate cannot be
+			   validated. */
+			World::EntityLinkRecord record;
+			record.uiTargetId = pVarEntity->GetId();
+			record.uiSourceEntityId = connection.uiSourceEntityId;
+			record.rSourceComponentType = connection.rSourceComponentType;
+			record.rProperty = connection.rProperty;
+			record.iIndex = connection.iIndex;
+
+			pWorld.m_vEntityLinks.push_back(record);
+		};
+
+		/* The source, resolved from the world rather than remembered. For a
+		   component link that is the component of the recorded type on the
+		   recorded entity; for an entity link it is the entity. Two branches
+		   rather than one reassigned instance because rttr::instance is not
+		   assignable. */
+		if (connection.rSourceComponentType.is_valid() &&
+			connection.rSourceComponentType != rttr::type::get<nullptr_t>())
+		{
+			Component* pCurrentComponent =
+				pSourceEntity->GetComponent(connection.rSourceComponentType);
+
+			/* The entity is here and the component is not - it was removed
+			   between deserialization and now. Nothing to link. */
+			if (pCurrentComponent == nullptr)
+			{
+				StreamingCounters::Get().WorldLinksSourceLost.fetch_add(1, std::memory_order_relaxed);
+				continue;
+			}
+
+			rttr::instance instComponent = pCurrentComponent;
+			applyLink(instComponent);
 		}
-		// if we are dealing with an entity that ha a property that needs to be linked.
-		else if (const auto & pEntity = connection.rInstance.try_convert<Entity>())
+		else
 		{
-			if (auto pSearchEntity = pWorld.FindEntity(pEntity->GetId()))
-			{
-				if (connection.rProperty.get_type().is_sequential_container())
-				{
-					// Fill the container with the right information
-					rttr::instance instEntity = pSearchEntity;
-
-					// Create an array view
-					if (!SetInstanceArrayProperty(instEntity, connection.rProperty, varEntity, connection.rType, connection.iIndex))
-					{
-						m_Logger.Log(LOGLEVEL_ERROR, "JsonSerializer", "Could not insert entity or component");
-					}
-				}
-				// normal property
-				else
-				{
-					rttr::instance instEntity = pSearchEntity;
-					if (!SetInstanceProperty(instEntity, connection.rProperty, varEntity, connection.rType))
-					{
-						m_Logger.Log(LOGLEVEL_ERROR, "JsonSerializer", "Could not connect entity or component");
-					}
-				}
-			}
+			rttr::instance instEntity = pSourceEntity;
+			applyLink(instEntity);
 		}
 	}
 
-	pWorld.m_vWorldConnections.clear();
-	m_vOldPrefabIDs.clear();
+	/* Anything a setter appended while we were resolving stays queued too. */
+	pending.insert(pending.end(),
+		std::make_move_iterator(pWorld.m_vWorldConnections.begin()),
+		std::make_move_iterator(pWorld.m_vWorldConnections.end()));
+
+	pWorld.m_vWorldConnections = std::move(pending);
+
+	StreamingCounters::RaiseMax(StreamingCounters::Get().MaxPendingWorldLinks,
+		pWorld.m_vWorldConnections.size());
+
+	/* Unconditionally, exactly as it was before links became retryable: the
+	   remap describes the pass that just ran and nothing else. Pending
+	   connections carry an already-remapped target id (see above), so they do
+	   not need it. */
+	pWorld.m_vOldPrefabIDs.clear();
+}
+
+void JsonSerializer::ClearEntityLinks(World& world, Entity* pEntity)
+{
+	if (world.m_vEntityLinks.empty() || pEntity == nullptr)
+		return;
+
+	const uint64_t uiId = pEntity->GetId();
+
+	/* A null of the *property's own* type, because rttr will not write an
+	   Entity* into a Player* property. Built once per call rather than per
+	   record; the conversion is per record because the type is. */
+	std::vector<World::EntityLinkRecord> kept;
+	kept.reserve(world.m_vEntityLinks.size());
+
+	for (World::EntityLinkRecord& record : world.m_vEntityLinks)
+	{
+		/* The source is going away too: nothing left to null, and keeping the
+		   record would let it fire against a *different* entity later, because
+		   entity ids are restored from the stored JSON and a chunk that comes
+		   back brings the same ones. */
+		if (record.uiSourceEntityId == uiId)
+			continue;
+
+		if (record.uiTargetId != uiId)
+		{
+			kept.push_back(record);
+			continue;
+		}
+
+		Entity* pSource = world.FindEntity(record.uiSourceEntityId);
+
+		if (pSource == nullptr)
+			continue;
+
+		/* A null of the *property's own* type: rttr will not write an Entity*
+		   into a Player* property, and a link whose declared type is a derived
+		   entity is the normal case in game code. */
+		rttr::variant varNull = static_cast<Entity*>(nullptr);
+
+		if (!varNull.convert(record.rProperty.get_type()))
+		{
+			/* Dropping the record is still right - the pointer dangles either
+			   way - but this is a property type the repair cannot reach, and
+			   that is worth a number rather than silence. */
+			StreamingCounters::Get().EntityLinksLeftDangling.fetch_add(1, std::memory_order_relaxed);
+			continue;
+		}
+
+		const bool bContainer = record.rProperty.get_type().is_sequential_container();
+
+		bool bCleared = false;
+
+		if (record.rSourceComponentType.is_valid() &&
+			record.rSourceComponentType != rttr::type::get<nullptr_t>())
+		{
+			Component* pComponent = pSource->GetComponent(record.rSourceComponentType);
+
+			if (pComponent == nullptr)
+				continue;
+
+			rttr::instance instComponent = pComponent;
+
+			bCleared = bContainer
+				? ClearInstanceArrayElement(instComponent, record.rProperty, record.iIndex)
+				: record.rProperty.set_value(instComponent, varNull);
+		}
+		else
+		{
+			rttr::instance instEntity = pSource;
+
+			bCleared = bContainer
+				? ClearInstanceArrayElement(instEntity, record.rProperty, record.iIndex)
+				: record.rProperty.set_value(instEntity, varNull);
+		}
+
+		if (bCleared)
+			StreamingCounters::Get().EntityLinksCleared.fetch_add(1, std::memory_order_relaxed);
+		else
+			StreamingCounters::Get().EntityLinksLeftDangling.fetch_add(1, std::memory_order_relaxed);
+	}
+
+	world.m_vEntityLinks.swap(kept);
+}
+
+/* One element of a reflected sequential container, set to null.
+ *
+ * The mirror image of SetInstanceArrayProperty, and it goes through the same
+ * create_sequential_view / SetInstanceProperty write-back, because a property
+ * getter hands back a *copy* of the container - mutating the view alone changes
+ * nothing.
+ *
+ * The null has to be of the element's own type: rttr will not write a
+ * Component* into a Spawner* slot any more than it writes an Entity* into a
+ * Player* property. */
+bool JsonSerializer::ClearInstanceArrayElement(rttr::instance& instance, const rttr::property& property, int index)
+{
+	if (!property.get_type().is_sequential_container() || index < 0)
+		return false;
+
+	rttr::variant var = instance.get_derived_type().get_property_value(property.get_name(), instance);
+	rttr::variant_sequential_view arrView = var.create_sequential_view();
+
+	if (static_cast<size_t>(index) >= arrView.get_size())
+		return false;
+
+	const rttr::type valueType = arrView.get_value_type();
+
+	rttr::variant varNull = static_cast<Component*>(nullptr);
+
+	if (!varNull.convert(valueType))
+	{
+		varNull = static_cast<Entity*>(nullptr);
+
+		if (!varNull.convert(valueType))
+			return false;
+	}
+
+	if (!arrView.set_value(index, varNull))
+		return false;
+
+	return SetInstanceProperty(instance, property, var, valueType, true);
 }
 
 bool JsonSerializer::SetInstanceArrayProperty(rttr::instance& instance, const rttr::property& property, rttr::variant& variant, const rttr::type& variantType, const int& index)

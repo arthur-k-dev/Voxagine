@@ -150,12 +150,10 @@ float GetDistanceToWorld(float3 v3Position, float3 v3InvDirection, float3 v3Chun
     return ((tNear <= tFar) ? tNear : -1.0);
 }
 
-// Returns a vector that is orthogonal to u.
-float3 GetOrthogonal(float3 u){
-	u = normalize(u);
-	float3 v = float3(0.99146, 0.11664, 0.05832); // Pick any normalized vector.
-	return abs(dot(u, v)) > 0.99999 ? cross(u, float3(0, 1, 0)) : cross(u, v);
-}
+/* DYNAMIC_MODELS_PLAN.md phase 2: moved to VectorMath.hlsl, which this pulls
+   in below, so a translation unit can use it without also declaring
+   voxelWorldData/voxelBrickData - GetOrthogonal never touched them. */
+#include "VectorMath.hlsl"
 
 /* Two-level DDA over the resident window: an outer walk that steps whole
    BRICK_SIZE^3 bricks and skips empty ones for free, and an inner voxel walk

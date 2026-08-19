@@ -33,10 +33,32 @@ static float3 CUBE_VERTS[24] = {
 
 VOXEL_RW_BUFFER voxelWorldData : register(u0);
 
+/* Scalarised for the same reason UIRenderer.vs.hlsl's SpriteData is, and the
+   consequence of not doing it is larger here. The engine memcpys a packed
+   32-byte StructuredVoxelBuffer (Vector3 Position, Vector3 Extents, uint32
+   MapperID, float Distance) straight into this buffer. Spelled as float3 the
+   members get std430's 16-byte alignment, which makes the stride 48 - so every
+   AABB after [0] was decoded from the wrong offset.
+
+   That is what left the world unrendered: this buffer is the voxel pass's
+   instance list, one proxy box per submitted region, so garbage extents mean
+   nothing rasterises and only the far field survives. Regions re-submitted
+   after a destruction happened to land readably, which is why shooting
+   "revealed" parts of the world.
+
+   Eight 4-byte scalars are laid out identically by std430 and by DX packing,
+   so this is correct under glslc and DXC alike rather than compensating for
+   one of them. */
 struct AABB
 {
-	float3 Position;
-	float3 Extents;
+	float PositionX;
+	float PositionY;
+	float PositionZ;
+
+	float ExtentsX;
+	float ExtentsY;
+	float ExtentsZ;
+
 	int TextureID;
 	float Distance;
 };
@@ -68,7 +90,10 @@ VS_out main(uint IDvert : VERT_ID, uint IDinst : INST_ID)
 
     // Get cube model data
     // Store world-space coordinates in the vertex
-	OUT.WorldPosition = vertices[indices[IDvert]] * tAABB.Extents + tAABB.Position;
+	float3 aabbExtents = float3(tAABB.ExtentsX, tAABB.ExtentsY, tAABB.ExtentsZ);
+	float3 aabbPosition = float3(tAABB.PositionX, tAABB.PositionY, tAABB.PositionZ);
+
+	OUT.WorldPosition = vertices[indices[IDvert]] * aabbExtents + aabbPosition;
 	OUT.WorldPosition = clamp(OUT.WorldPosition.xyz, float3(0.0, 0.0, 0.0), float3(worldSize.xyz)) + camOffset.xyz;
 
     // Multiply the position with the MVP matrix

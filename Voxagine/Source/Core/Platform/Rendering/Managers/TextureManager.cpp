@@ -15,6 +15,16 @@
 
 #include <External/STB/stb_image_aug.h>
 
+TextureReadData::~TextureReadData()
+{
+	/* stbi_load_from_memory owns this allocation and its default allocator is
+	   malloc, so the delete[] this used to be is a mismatched free - heap
+	   corruption every time a menu or loading texture is released on a world
+	   transition. Kept beside the decoder include so it stays correct if a
+	   custom STBI allocator is ever set. */
+	stbi_image_free(m_Data);
+}
+
 TextureManager::TextureManager(PRenderContext* pContext) { m_pContext = pContext; }
 
 TextureReadData* TextureManager::ReadTexture(const std::string& texturePath)

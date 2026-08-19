@@ -64,11 +64,19 @@ struct VoxFrame {
 	inline uint32_t GetVoxelColor(uint8_t x, uint8_t y, uint8_t z) const;
 	SoundReference* GetAudioAsset() const { return m_pAudioAsset; }
 
-	struct Data { 
+	struct Data {
 		Data() = default;
 		unsigned char x, y, z, colorIndex;
 	};
-	
+
+	/* DYNAMIC_MODELS_PLAN.md phase 1: this frame's greedy mesh, in
+	   ModelMeshStore's shared quad list. UINT_MAX means "not built yet" -
+	   mutable because building is a cache fill on first use, triggered from
+	   VoxRenderer::SetFrame on a `const VoxFrame*`, not a change to the model
+	   itself. See VoxelMesher.h for the quad layout. */
+	mutable uint32_t m_uiMeshFirstQuad = UINT_MAX;
+	mutable uint32_t m_uiMeshQuadCount = 0;
+
 private:
 	Vector3 m_v3Size;
 	Vector3 m_v3FitSizeOffset;

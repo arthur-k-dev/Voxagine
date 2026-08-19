@@ -5,6 +5,7 @@
 #include <Core/Platform/Rendering/Vulkan/VulkanAPI.h>
 
 #include <atomic>
+#include <string>
 #include <vector>
 
 struct SDL_Window;
@@ -25,6 +26,7 @@ public:
 	virtual void* GetHandle() override { return m_pWindow; }
 
 	virtual void Poll() override;
+
 
 	/* Events */
 	virtual void OnMove() override;

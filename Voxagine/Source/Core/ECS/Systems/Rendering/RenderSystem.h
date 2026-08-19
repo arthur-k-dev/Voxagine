@@ -33,6 +33,23 @@ public:
 
 	virtual void Start() override;
 
+	/* This world is going away; nothing it drew can be presented again.
+
+	   Two things follow and both are the point. Every renderer's stamp is
+	   *forgotten* rather than cleared - the same distinction a chunk unload
+	   makes (see OnComponentDestroyed): the voxel window is about to be
+	   replaced wholesale, so rewriting it a renderer at a time is thousands of
+	   passes over storage no future frame can expose. And the renderer list is
+	   emptied in one go rather than erased from the middle once per component
+	   as World::Unload destroys entities.
+
+	   bReleaseVoxelWindow is false only when the world being unloaded is *not*
+	   the one whose voxels are in the window - the loading screen at the moment
+	   its replacement is activated, whose own unload would otherwise wipe the
+	   level that was just streamed in behind it. Docs/CHUNK_STREAMING_PLAN.md
+	   phase 8. */
+	void BeginWorldUnload(bool bReleaseVoxelWindow = true);
+
 	virtual bool CanProcessComponent(Component * pComponent) override;
 	virtual void Tick(float fDeltaTime) override;
 	virtual void PostTick(float fDeltaTime) override;
@@ -60,6 +77,13 @@ public:
 	void AuditRepresentationSync();
 
 	void EnableDebugLines(bool bEnabled);
+
+	/* Is any admitted renderer still waiting to be stamped into the voxel
+	   window? CHUNK_STREAMING_PLAN.md phase 5: the stamp is budgeted now, so a
+	   world can be fully admitted and still not fully *drawn*, and anything
+	   asking "is this world settled" has to mean both.
+	   ChunkSystem::IsStreaming folds this in. */
+	bool HasPendingVoxelBakes() const { return m_bVoxelBakesPending; }
 
 	void SetFadeTime(float fFadeTime);
 
@@ -208,7 +232,19 @@ private:
 	   OnComponentAdded. */
 	bool m_bStarted = false;
 
+	/* See BeginWorldUnload. The second is what the destructor reads, so a
+	   world unloaded without ever calling BeginWorldUnload behaves as it always
+	   did. */
+	bool m_bWorldUnloading = false;
+	bool m_bReleaseVoxelWindow = true;
+
 	bool m_bForcedUpdate = true;
+
+	/* Renderers still waiting for a stamp because VoxelBaker::Bake ran out of
+	   budget. CHUNK_STREAMING_PLAN.md phase 5 - HasPendingVoxelBakes is what
+	   ChunkSystem::IsStreaming folds in, so "is this world settled" accounts
+	   for geometry that has been admitted but not yet written. */
+	bool m_bVoxelBakesPending = false;
 	bool m_bShouldUpdateVoxelWorld = true;
 	
 	UVector3 m_v3WorldSize = UVector3(0, 0, 0);

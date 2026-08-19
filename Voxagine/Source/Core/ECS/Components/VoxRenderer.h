@@ -8,6 +8,7 @@
 
 #include "Core/ECS/Systems/Physics/VoxelGrid.h"
 #include "Core/ECS/Systems/Physics/Box.h"
+#include "Core/ECS/Systems/Rendering/VoxelStampCursor.h"
 
 class RenderSystem;
 
@@ -97,7 +98,10 @@ public:
 		struct StampKey
 		{
 			Vector3 Origin = Vector3(0.f);
-			Quaternion Rotation;
+
+			/* Identity rather than uninitialised: two default-constructed keys
+			   have to compare equal, and GLM leaves this as stack garbage. */
+			Quaternion Rotation = Quaternion(1.f, 0.f, 0.f, 0.f);
 			Vector3 Scale = Vector3(1.f);
 			Vector3 RoundedScale = Vector3(0.f);
 
@@ -139,7 +143,12 @@ public:
 
 		Vector3 LastLocation = Vector3(0.f, 0.f, 0.f);
 		Vector3 LastScale = Vector3(1.f, 1.f, 1.f);
-		Quaternion LastRotation;
+
+		/* Identity, for the same reason as StampKey::Rotation above:
+		   CheckRendererChange compares this against the transform's rotation to
+		   decide whether a renderer moved, and stack garbage makes that answer
+		   arbitrary on the first frame. */
+		Quaternion LastRotation = Quaternion(1.f, 0.f, 0.f, 0.f);
 
 		bool IsEnabled = true;
 		bool IsStatic = false;
@@ -149,6 +158,30 @@ public:
 		   back voxels somebody else erased, so its own clear must not send a
 		   third renderer round the same loop. Cleared by the bake it triggers. */
 		bool RepairOnly = false;
+
+		/* Where a stamp that ran out of budget stopped, and that it did.
+		   CHUNK_STREAMING_PLAN.md phase 9.
+		 *
+		 * This is the one piece of bake state that survives a frame boundary,
+		 * and it is deliberately a *cursor* rather than anything with a
+		 * lifetime: it names a position in the renderer's own model, so
+		 * nothing it refers to can be destroyed while it is held. The renderer
+		 * itself leaving takes the whole BakeData with it.
+		 *
+		 * While OccupyInProgress is set, Positions/Size describe the part of
+		 * the stamp that is already in the buffer - which is what makes an
+		 * interrupted stamp safe to clear, and is the thing the first attempt
+		 * at this phase got wrong: re-clearing a half-written renderer on every
+		 * resume erased everything but its last slice, and a level 580,000
+		 * voxels short reads as content rather than as a bug. */
+		VoxelStampCursor StampCursor;
+		bool OccupyInProgress = false;
+
+		/* Accumulated across the slices of one stamp, so the clipped-geometry
+		   warning below still reports the whole model rather than whichever
+		   part of it the last frame happened to reach. Reset with the cursor. */
+		uint32_t StampDropped = 0;
+		uint32_t StampPlaced = 0;
 	};
 
 	Event<VoxRenderer*> FrameChanged;
@@ -203,10 +236,60 @@ public:
 	   this renderer - see BakeData::StampKey, which folds it in for exactly that
 	   reason. */
 	bool IsEmissive() const { return m_bEmissive; }
-	void SetEmissive(bool bEmissive) { m_bEmissive = bEmissive; RequestUpdate(); }
+
+	void SetEmissive(bool bEmissive)
+	{
+		/* Only on a change. Deserialization drives every reflected setter with
+		   whatever was stored, so an unconditional request here means every
+		   VoxRenderer that comes back out of JSON asks to be re-stamped - which
+		   is one half of M7 (CHUNK_STREAMING_PLAN.md). The other half is fixed
+		   below; this one is fixed here because "set it to what it already is"
+		   should not be work in the first place. */
+		if (m_bEmissive == bEmissive)
+			return;
+
+		m_bEmissive = bEmissive;
+		RequestUpdate();
+	}
 
 	bool IsChunkInstanceLoaded() const { return m_bIsChunkInstanceLoaded; }
-	void SetChunkInstanceLoaded(bool bChunkLoaded) { m_bIsChunkInstanceLoaded = bChunkLoaded; }
+
+	/* Set by Chunk::LoadEntities for every renderer of a chunk that is coming
+	   *back*, never on a first load. It means: the voxels this renderer would
+	   stamp are already in the chunk's decoded volume, damage and all, and
+	   re-stamping would replace them with the pristine model.
+
+	   Clearing the two "something changed" flags is the fix for M7. The chunk's
+	   roots are re-serialized from the live reflection registration on unload,
+	   so the JSON a chunk carries in memory has every property this build knows
+	   about even when the level on disk predates them - and a reflected setter
+	   that requests an update makes a restored renderer look freshly edited.
+	   VoxelBaker::Bake consults IsChunkInstanceLoaded only as
+	   `(!Updated || bIsStaticChunkLoaded)`, **anded** with `!UpdateRequested()`,
+	   so a request walks straight past the guard and the pristine model lands on
+	   top of the decoded voxels. Suppressing the request at the one point that
+	   knows the decoded voxels are authoritative closes the whole class rather
+	   than the one setter that happened to reach it. A later editor edit
+	   requests an update explicitly and is unaffected. */
+	void SetChunkInstanceLoaded(bool bChunkLoaded)
+	{
+		m_bIsChunkInstanceLoaded = bChunkLoaded;
+
+		if (!bChunkLoaded)
+			return;
+
+		m_bUpdateRequested = false;
+		m_bIsFrameChanged = false;
+	}
+
+	/* Set immediately before Chunk::PrepareUnloadBatch destroys an entity whose
+	   chunk has already left the published window. The renderer's colours are in
+	   that chunk's own voxels and are about to be encoded with them; what its
+	   BakeData records is a set of addresses in a window that has since moved,
+	   so the ordinary destroy-time Clear would erase whatever slid in underneath.
+	   RenderSystem::OnComponentDestroyed forgets the stamp instead. */
+	void MarkChunkUnloading() { m_bChunkUnloading = true; }
+	bool IsChunkUnloading() const { return m_bChunkUnloading; }
 
 private:
 	void ResetModel();
@@ -232,6 +315,7 @@ private:
 	bool m_bUpdateRequested = false;
 	bool m_bIsFrameChanged = false;
 	bool m_bIsChunkInstanceLoaded = false;
+	bool m_bChunkUnloading = false;
 
 	RTTR_ENABLE(Component)
 };

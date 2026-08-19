@@ -399,8 +399,20 @@ void InputContextNew::UpdateIMGUI()
 	io.MouseDown[1] = m_MouseController.IsKeyDown(IK_MOUSEBUTTONRIGHT);
 	io.MouseDown[2] = m_MouseController.IsKeyDown(IK_MOUSEBUTTONMIDDLE);
 
+	/* One notch of wheel is one unit of ImGui scroll, which is what every other
+	   application does and what ImGui's own defaults are tuned against.
+	 *
+	 * It used to be 0.2, and nothing ever noticed because until SDLEventInput
+	 * started calling Mouse::AddScrollDelta this value was multiplied by a
+	 * delta that was permanently zero - the wheel was not wired up at all
+	 * under SDL. The first build where scrolling worked was also the first
+	 * build where scrolling five times to move a list one line was visible.
+	 *
+	 * Still the sign only: the running total is in DirectXTK's 120-per-notch
+	 * units (Mouse::AddScrollDelta), so the magnitude here counts device
+	 * units, not notches. */
 	float fMouseWheelDelta = m_MouseController.GetAxisValue(IK_MOUSEWHEELAXISDELTA).Value;
-	io.MouseWheel = (fMouseWheelDelta != 0.0f) ? static_cast<float>(fMouseWheelDelta / abs(fMouseWheelDelta)) * 0.2f : 0.0f;
+	io.MouseWheel = (fMouseWheelDelta != 0.0f) ? static_cast<float>(fMouseWheelDelta / abs(fMouseWheelDelta)) : 0.0f;
 }
 #endif
 

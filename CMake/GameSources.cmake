@@ -23,6 +23,7 @@ set(VOXAGINE_GAME_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/Game/Source/General/KillTrigger.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Game/Source/General/Managers/GameManager.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Game/Source/General/Managers/GameStateManager.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Game/Source/General/PlayerSlot.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Game/Source/General/Managers/WeaponManager.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Game/Source/General/OpenLevelTrigger.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Game/Source/Humanoids/Enemies/AutoMoveMonster.cpp
@@ -81,9 +82,12 @@ set(VOXAGINE_GAME_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/Game/Source/UI/MainMenu/StartToJoinPlayerComponent.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Game/Source/UI/OnBoarderUI.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Game/Source/UI/PausedScreen/PauseScreenHandler.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Game/Source/UI/Settings/SettingsCanvas.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Game/Source/UI/Settings/SettingsScreenButton.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Game/Source/UI/Spinner.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Game/Source/UI/SplashScreen/SplashScreenHandler.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Game/Source/UI/States/MenuState.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Game/Source/UI/TextMenuButton.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Game/Source/UI/WorldSwitch.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Game/Source/VoxApp.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Game/Source/Weapons/Bullet.cpp

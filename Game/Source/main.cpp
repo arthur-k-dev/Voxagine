@@ -38,6 +38,22 @@ int main(int argc, char* argv[])
 	   four buttons. */
 	SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
 
+	/* Both directions of SDL's touch/mouse synthesis, off.
+	 *
+	 * By default SDL turns finger 0 into mouse events and mouse clicks into
+	 * fake touches. That is the right default for a game that only wants a
+	 * pointer, and the wrong one here: the editor reads fingers directly
+	 * (SDLEventInput.h) to tell a one-finger pointer from a two-finger orbit,
+	 * and with synthesis on it would see the first finger of every gesture
+	 * twice - once as itself and once as a click. The reverse hint keeps a
+	 * paired Magic Keyboard trackpad from arriving as a phantom finger and
+	 * being read as a gesture.
+	 *
+	 * Set for the game too, not just the editor: the game reads
+	 * TouchController and gets the same double-reporting. */
+	SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");
+	SDL_SetHint(SDL_HINT_MOUSE_TOUCH_EVENTS, "0");
+
 	/* Then the assets: on Android and iOS this unpacks the packaged content
 	   into writable storage and chdir()s there, which is what makes every bare
 	   relative asset path in the engine resolve at all. A no-op on desktop.

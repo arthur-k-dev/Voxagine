@@ -1,19 +1,26 @@
 #pragma once
 
-/* Making a packaged mobile app look like a directory of files.
+/* Making a packaged app look like a directory of files.
  *
  * Every asset path in this engine is a bare relative string handed to fopen -
  * "Content/Music/Arena_BGM.ogg", "Engine/Assets/Shaders/Particles.vs.spv" -
  * resolved against the process's working directory. There are on the order of a
- * hundred such sites and no central resolver to hook. On desktop that is fine:
- * the game is launched from Game/ and everything is where it says it is.
+ * hundred such sites and no central resolver to hook. Run from a terminal in
+ * Game/ that is fine: everything is where it says it is.
  *
- * Neither mobile platform gives you that for free:
+ * Nothing that ships as an application bundle gives you that for free:
  *
  *  - **Android** assets are entries in a zip. `fopen` cannot see them at all;
  *    they need AAssetManager. Nothing in this engine speaks AAssetManager.
  *  - **iOS** assets *are* real files in the app bundle, but the bundle is
  *    read-only and the working directory is not it.
+ *  - **macOS** has the same problem the moment anything is double-clicked
+ *    rather than run from a shell: a bundle launched from Finder inherits a
+ *    working directory of "/", so every relative path above resolves against
+ *    the root of the disk. This is why the editor - which is a .app there -
+ *    could not previously be launched the way a Mac application is launched.
+ *    The same binary run from Game/ is not bundled and is left alone; only the
+ *    runtime can tell those two apart, so the check is a runtime one.
  *
  * So the asset tree is copied out once, on first launch, into the app's private
  * writable directory, and the process chdir()s there. Every existing relative
@@ -26,10 +33,17 @@
  * **It costs a second copy of the assets on disk** - ~100 MB here - and one
  * slow first launch. Both are recorded in MOBILE_PORT_LOG.md as the price of
  * not touching those call sites, and both are revisitable if a device says
- * they matter.
+ * they matter. A game build avoids the copy where it can: on iOS and macOS the
+ * two read-only trees are symlinked back into the bundle instead. An editor
+ * build cannot, because it writes into them.
  *
  * Re-extraction is skipped when a stamp file matching VOXAGINE_ASSET_VERSION is
  * already present, so it happens once per install rather than once per launch.
+ *
+ * Setting **VOXAGINE_ASSET_ROOT** in the environment overrides all of this and
+ * uses that directory as-is. That is the developer escape hatch for the macOS
+ * editor: without it, worlds saved from Voxagine.app go to a private container
+ * rather than to the Game/ tree they came from.
  */
 
 namespace MobileAssets

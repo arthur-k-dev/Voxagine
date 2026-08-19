@@ -54,6 +54,16 @@ void StartToJoinPlayerComponent::Awake()
 
 		pInputContext->RegisterAction(UI_INPUT_LAYER, "MainMenu_PressToJoin", IKS_PRESSED, IK_GAMEPADOPTION);
 		pInputContext->RegisterAction(UI_INPUT_LAYER, "MainMenu_PressToJoin", IKS_PRESSED, IK_MOUSEBUTTONLEFT);
+
+		/* J, because joining had no keyboard binding at all - a keyboard-only
+		   player could not get past this screen, and --ui-script is keyboard-only
+		   so menu -> level was not scriptable headlessly either
+		   (Docs/CHUNK_STREAMING_PLAN.md phase 0 finding 2, phase 8's first item).
+
+		   Deliberately not IK_ENTER or IK_SPACE: Canvas binds both to "Pressed_UI"
+		   and the level-select button is live on this same screen, so a shared key
+		   would join and click in one press, in an order nothing defines. */
+		pInputContext->RegisterAction(UI_INPUT_LAYER, "MainMenu_PressToJoin", IKS_PRESSED, IK_J);
 	}
 }
 
@@ -80,6 +90,29 @@ void StartToJoinPlayerComponent::Start()
 	m_pAudioSource->SetFilePath("Content/SFX/Menu/ButtonError.ogg");
 	m_pAudioSource->SetLooping(false);
 	m_pAudioSource->Set3DAudio(false);
+
+	/* Player one is joined already, provided its device is actually there.
+	   Nobody plays this alone by pressing Start at an empty menu first, and the
+	   single-player case is the common one; player two still joins by pressing,
+	   and player one can drop out by pressing again - this sets the initial
+	   state, it does not pin it.
+
+	   Gated on HasConnectedDevice so the rule stays "a player is a device that
+	   is present": a handle with nothing behind it must not arrive in a level
+	   as a character nobody can move. Player one holds the keyboard on desktop
+	   and the touchscreen on mobile, so in practice this is true; on a build
+	   with neither, the menu behaves exactly as it did. */
+	if (!PlayerJoined() && m_pPlayer != nullptr)
+	{
+		const InputHandler* pInputHandler = m_pPlayer->GetComponent<InputHandler>();
+
+		if (pInputHandler != nullptr &&
+			pInputHandler->GetPlayerHandle() == k_iFirstPlayerHandle &&
+			pInputHandler->HasConnectedDevice())
+		{
+			TogglePlayerShowing();
+		}
+	}
 }
 
 

@@ -3,6 +3,22 @@
 
 #include "Core/Application.h"
 #include "Core/GameTimer.h"
+#include "Core/System/MobileLog.h"
+
+namespace
+{
+	const char* LogLevelName(LogLevel level)
+	{
+		switch (level)
+		{
+		case LOGLEVEL_MESSAGE: return "message";
+		case LOGLEVEL_WARNING: return "warning";
+		case LOGLEVEL_ERROR: return "error";
+		case LOGLEVEL_CRITICAL_ERROR: return "critical";
+		default: return "unknown";
+		}
+	}
+}
 
 LoggingSystem::LoggingSystem()
 {
@@ -43,23 +59,43 @@ void LoggingSystem::Log(const LogLevel & level, const std::string & category, co
 #endif
 
 	LogEvent* event = new LogEvent();
-	m_LogEvents.push_back(event);
-	LogEvent& NewLogEvent = *m_LogEvents.back();
-	unsigned long NewLogEventID = static_cast<unsigned long>(m_LogEvents.size() - 1);
 
-	NewLogEvent.EventTime = m_pApplication->GetTimer().GetCurrentSystemTime();
-	NewLogEvent.Level = level;
-	NewLogEvent.Category = category;
-	NewLogEvent.Description = description;
+	/* There is not always a clock. A log line can be emitted before
+	   Platform::Initialize has created the game timer, and by a process that
+	   never creates one at all - which used to be a null dereference inside the
+	   logger, i.e. the one place least able to report it. */
+	const GameTimer* pTimer = m_pApplication != nullptr ? m_pApplication->TryGetTimer() : nullptr;
 
-	CreateCategory(category);
-	m_Categories[category].push_back(NewLogEventID);
+	event->EventTime = pTimer != nullptr ? pTimer->GetCurrentSystemTime() : Time{ 0, 0, 0 };
+	event->Level = level;
+	event->Category = category;
+	event->Description = description;
+
+	LogEvent& NewLogEvent = *event;
+	unsigned long NewLogEventID = 0;
+
+	{
+		std::lock_guard<std::recursive_mutex> lock(m_Mutex);
+
+		m_LogEvents.push_back(event);
+		NewLogEventID = static_cast<unsigned long>(m_LogEvents.size() - 1);
+
+		CreateCategory(category);
+		m_Categories[category].push_back(NewLogEventID);
+	}
+
+	/* The editor observes LogEventCreated, but a game on a phone has no editor
+	   console. Publish the exact same event through the platform sink rather
+	   than adding iOS/Android logging calls at individual failure sites. */
+	MobileLog::Write(std::string("[") + LogLevelName(level) + "] [" + category + "] " + description);
 
 	LogEventCreated.operator()(NewLogEvent, NewLogEventID);
 }
 
 void LoggingSystem::CreateCategory(const std::string & newCategory)
 {
+	std::lock_guard<std::recursive_mutex> lock(m_Mutex);
+
 	std::unordered_map<std::string, std::vector<unsigned long>>::iterator found = m_Categories.find(newCategory);
 
 	if (found == m_Categories.end())

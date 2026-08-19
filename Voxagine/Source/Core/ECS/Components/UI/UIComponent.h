@@ -34,6 +34,15 @@ public:
 	void SetDefaultFocus(bool);
 	bool GetDefaultFocus() const;
 
+	/* Whether the canvas currently has focus on this component.
+	 *
+	 * It exists because the focus events are not enough on their own: a canvas
+	 * focuses its default component from Canvas::Start, and a component whose
+	 * own Start runs later has already missed that first OnFocus. Anything that
+	 * draws focus rather than swapping pre-authored objects - a text row, say -
+	 * has to be able to ask. */
+	bool IsFocused() const { return m_Focused; }
+
 	void SetPreviousComponent(UIComponent*);
 	UIComponent* GetPreviousComponent() const;
 	void SetNextComponent(UIComponent*);

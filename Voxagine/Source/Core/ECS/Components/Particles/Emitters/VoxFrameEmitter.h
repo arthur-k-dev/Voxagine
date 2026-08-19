@@ -23,6 +23,12 @@ public:
 	void SetSplashDirection(Vector3 dir) { m_SplashDirection = dir; }
 
 private:
+	/* Timer/force/velocity/spawn - identical regardless of where Position/
+	   GridPosition/Color came from, so both of Emit's branches (baked-static
+	   and mesh-sourced-dynamic, DYNAMIC_MODELS_PLAN.md phase 3) call this
+	   once they have filled those three arrays. */
+	void EmitCommon(ParticlePool& particleData, uint32_t uiStartId, uint32_t uiEndId);
+
 	VoxRenderer* m_pRenderer = nullptr;
 	Vector3 m_MinForce = Vector3(0.f);
 	Vector3 m_MaxForce = Vector3(0.f);

@@ -4,6 +4,10 @@
 #include "Core/Platform/Rendering/RenderPass.h"
 #include "Core/Platform/Rendering/RenderContextInc.h"
 
+#include "../../Platform.h"
+#include <Core/Application.h>
+#include "Core/Settings.h"
+
 SunShadowPass::SunShadowPass(
 	PRenderContext* pContext, Shader* pVertex, Shader* pPixel, Sampler* pSampler,
 	Buffer* pCameraBuffer, Mapper* pVoxelMapper, Mapper* pBrickMapper
@@ -20,11 +24,20 @@ SunShadowPass::SunShadowPass(
 	   pass exists - see the header. m_fRenderScale stays 1.0 so
 	   Settings::ResolutionScale cannot drag it around either: rendering the
 	   game at half resolution should not halve shadow quality, and rendering
-	   at 4K should not quadruple the shadow cost. */
+	   at 4K should not quadruple the shadow cost.
+
+	   Fixed for a given quality, that is. The size comes from
+	   Settings::GetSunShadowResolution, and RenderContext::ApplyRenderSettings
+	   resizes the target when that changes - this pass marches the whole
+	   resident window once per texel, so its cost is exactly this number
+	   squared and it is the only lever on it. */
+	const uint32_t uiResolution = pContext->GetPlatform()->GetApplication()
+		->GetSettings().GetSunShadowResolution();
+
 	RenderPassData.m_bUseScreenResolution = false;
 	RenderPassData.m_TargetSize = Vector2(
-		static_cast<float>(RenderContext::k_uiSunShadowResolution),
-		static_cast<float>(RenderContext::k_uiSunShadowResolution));
+		static_cast<float>(uiResolution),
+		static_cast<float>(uiResolution));
 	RenderPassData.m_fRenderScale = 1.0f;
 
 	RenderPassData.m_TargetFormat = { E_R32_FLOAT };

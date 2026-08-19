@@ -14,6 +14,10 @@
 
 #include "AI/FiniteStateMachine.h"
 
+#include "General/PlayerSlot.h"
+
+#include <cstdlib>
+
 #include "UI/Loadout.h"
 
 #include "Humanoids/Enemies/Monster.h"
@@ -28,6 +32,21 @@
 // States
 #include "Gameplay/States/GM_LoadoutState.h"
 #include "UI/States/MenuState.h"
+
+namespace rttr::detail
+{
+	template<>
+	struct template_type_trait<std::array<Player*, 2>> : std::true_type
+	{
+		static std::vector<::rttr::type> get_template_arguments() { return {}; }
+	};
+
+	template<>
+	struct template_type_trait<std::array<Entity*, 2>> : std::true_type
+	{
+		static std::vector<::rttr::type> get_template_arguments() { return {}; }
+	};
+}
 
 RTTR_REGISTRATION
 {
@@ -75,6 +94,128 @@ RTTR_REGISTRATION
 		.property("UI buttons", &GameManager::vCurrentButtons)(RTTR_PUBLIC);
 }
 
+/* **Player discovery by index, retried until it succeeds.**
+
+   This replaced `FindEntitiesOfType<Player>()` indexed positionally behind an
+   exact `size() == 1` / `size() == 2` test, which had three failure modes and
+   hit all of them under chunk streaming: the vector's order is admission order,
+   so which player became P1 varied between runs of the same level; a count of
+   zero - the normal state while the players' chunk is still admitting - matched
+   neither branch and left both slots null with nothing to try again; and it ran
+   only from Awake, once.
+
+   See PlayerSlot for the measurements. */
+void GameManager::ResolvePlayers()
+{
+	const bool bHadBoth = m_pPlayers[0] != nullptr && m_pPlayers[1] != nullptr;
+
+	for (uint32_t uiIndex = 0; uiIndex < m_pPlayers.size(); ++uiIndex)
+	{
+		if (m_pPlayers[uiIndex] != nullptr)
+			continue;
+
+		Player* pPlayer = FindPlayerByIndex(GetWorld(), static_cast<int32_t>(uiIndex));
+
+		if (pPlayer == nullptr)
+			continue;
+
+		m_pPlayers[uiIndex] = pPlayer;
+		pPlayer->fReturnSpeed = m_fBulletReturnSpeed;
+
+		/* A player is what the resident window is centred on, so it must not be
+		   unloaded out from under the level by the chunk it happens to stand in.
+		   StartGame meant to do this and set player 0 twice, so player 2 was
+		   never pinned - a copy-paste that only shows up as the second player
+		   vanishing mid-level. Done here instead, where it applies to whichever
+		   players actually attached and does not depend on StartGame having run
+		   after they did. */
+		pPlayer->SetPersistent(true);
+
+		pPlayer->Destroyed += Event<Entity*>::Subscriber([this, uiIndex](Entity*)
+		{
+			m_pPlayers[uiIndex] = nullptr;
+
+			/* And break the *other* player's link to this one, which nothing
+			   did: SetLinkPlayer hands out a raw Player* and chunk streaming
+			   destroys players routinely, so the survivor was left holding a
+			   freed pointer that it dereferences on every throw and catch. The
+			   cross-link below re-establishes both when the pair is complete
+			   again. */
+			const uint32_t uiOther = uiIndex == 0 ? 1 : 0;
+
+			if (m_pPlayers[uiOther] != nullptr)
+				m_pPlayers[uiOther]->SetLinkPlayer(nullptr);
+		}, this);
+	}
+
+	/* Cross-link whenever both are present and are not already pointing at each
+	 * other. **Idempotent, not edge-triggered**, and that distinction is the
+	 * whole defect.
+	 *
+	 * This used to fire only on the transition into "both present"
+	 * (`!bHadBoth && both`), which is a trigger that can be consumed without
+	 * doing anything: ResolvePlayers runs from Awake, from StartGame and from
+	 * every Tick, so any call that observed both players before the links were
+	 * wanted left bHadBoth true forever after, and the pair was never linked.
+	 * Measured in a live session - both players resolved, correctly indexed,
+	 * with `partners now (nil) / (nil)` and `had both 1`.
+	 *
+	 * Everything the two-player loop does hangs off this one pointer: the
+	 * receiver role, the incoming-bullet list Recall iterates, and the catch. So
+	 * the visible symptom was "the bullet never comes back", three layers away
+	 * from the missed assignment.
+	 *
+	 * Two pointer comparisons per tick is not a cost worth an edge trigger. */
+	if (m_pPlayers[0] != nullptr && m_pPlayers[1] != nullptr)
+	{
+		if (m_pPlayers[0]->GetLinkedPlayer() != m_pPlayers[1])
+			m_pPlayers[0]->SetLinkPlayer(m_pPlayers[1]);
+
+		if (m_pPlayers[1]->GetLinkedPlayer() != m_pPlayers[0])
+			m_pPlayers[1]->SetLinkPlayer(m_pPlayers[0]);
+	}
+
+
+	/* VOXAGINE_GAMEPLAY_DEBUG=1, once per change. Both players report a null
+	   partner in a level that has two of them, and this is the only place that
+	   pairs them - so the question is which of "found index 0", "found index 1"
+	   and "took the cross-link branch" is not happening. */
+	static const bool s_bDebug = std::getenv("VOXAGINE_GAMEPLAY_DEBUG") != nullptr;
+
+	if (s_bDebug)
+	{
+		static const void* s_pLast0 = reinterpret_cast<const void*>(-1);
+		static const void* s_pLast1 = reinterpret_cast<const void*>(-1);
+
+		if (s_pLast0 != m_pPlayers[0] || s_pLast1 != m_pPlayers[1])
+		{
+			s_pLast0 = m_pPlayers[0];
+			s_pLast1 = m_pPlayers[1];
+
+			/* Every Player in the world with the index it is actually
+			   advertising - because if the pair never completes, the reason is
+			   almost certainly that two players are advertising the same index.
+			   Player::Awake derives it from the name, and the name arrives by
+			   deserialization. */
+			for (Player* pAny : GetWorld()->FindEntitiesOfType<Player>())
+			{
+				if (pAny == nullptr)
+					continue;
+
+				fprintf(stderr, "[gamemanager]   candidate %p '%s' index %d destroyed %d\n",
+					(void*)pAny, pAny->GetName().c_str(), pAny->GetPlayerIndex(), pAny->IsDestroyed() ? 1 : 0);
+			}
+
+			fprintf(stderr, "[gamemanager] players: [0] %p '%s', [1] %p '%s' (had both %d); partners now %p / %p\n",
+				(void*)m_pPlayers[0], m_pPlayers[0] ? m_pPlayers[0]->GetName().c_str() : "-",
+				(void*)m_pPlayers[1], m_pPlayers[1] ? m_pPlayers[1]->GetName().c_str() : "-",
+				bHadBoth ? 1 : 0,
+				(void*)(m_pPlayers[0] ? m_pPlayers[0]->GetLinkedPlayer() : nullptr),
+				(void*)(m_pPlayers[1] ? m_pPlayers[1]->GetLinkedPlayer() : nullptr));
+		}
+	}
+}
+
 void GameManager::SetPlayerPosition(const Vector3& vPosition, uint32_t uiIndex)
 {
 	if (uiIndex < m_pPlayers.size() && m_pPlayers[uiIndex]) m_pPlayers[uiIndex]->GetTransform()->SetPosition(vPosition);
@@ -96,16 +237,9 @@ GameManager::GameManager(World* world) : Entity(world)
 
 void GameManager::StartGame()
 {
-	if (m_pPlayers[0])
-	{
-		m_pPlayers[0]->SetPersistent(true);
-		// m_pPlayers[0]->GetTransform()->SetPosition((m_pPlayers[0] ? m_pPlayers[0]->GetTransform()->GetPosition() : Vector3(0.0f)));
-	}
-	if (m_pPlayers[1])
-	{
-		m_pPlayers[0]->SetPersistent(true);
-		// m_pPlayers[1]->GetTransform()->SetPosition((m_pPlayers[1] ? m_pPlayers[1]->GetTransform()->GetPosition() : Vector3(0.0f)));
-	}
+	/* Pinning the players moved into ResolvePlayers, which is where they are
+	   known - this ran before they had attached and set player 0 twice. */
+	ResolvePlayers();
 
 	m_fHealth = m_fMaxHealth;
 	m_bIsPlaying = true;
@@ -143,23 +277,7 @@ void GameManager::SetPlayState(EGameState state)
 
 void GameManager::Awake()
 {
-	if (!m_pPlayers[0] && !m_pPlayers[1])
-	{
-		auto players = GetWorld()->FindEntitiesOfType<Player>();
-		if (players.size() == 1)
-			m_pPlayers[0] = players[0];
-		if (players.size() == 2)
-		{
-			m_pPlayers[0] = players[0];
-			m_pPlayers[1] = players[1];
-
-			m_pPlayers[0]->SetLinkPlayer(m_pPlayers[1]);
-			m_pPlayers[1]->SetLinkPlayer(m_pPlayers[0]);
-
-			m_pPlayers[0]->fReturnSpeed = m_fBulletReturnSpeed;
-			m_pPlayers[1]->fReturnSpeed = m_fBulletReturnSpeed;
-		}
-	}
+	ResolvePlayers();
 
 	const auto children = GetChildren();
 	if (!children.empty())
@@ -239,6 +357,8 @@ void GameManager::Start()
 void GameManager::Tick(float fDeltaTime)
 {
 	Entity::Tick(fDeltaTime);
+
+	ResolvePlayers();
 
 	if (m_fInvincibilityTimer > 0)
 		m_fInvincibilityTimer -= fDeltaTime;

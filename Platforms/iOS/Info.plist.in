@@ -1,12 +1,15 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-    Never built. This is a first draft written on a Linux machine with no
-    Xcode; see MOBILE_PORT_LOG.md phase 2 and 8. Everything here is
-    conventional for an SDL game, but "conventional" is not "verified".
-
     Deliberately minimal on permissions - this game wants none. No camera, no
     microphone, no location, no network, so there is no usage-description key
     to justify to review.
+
+    Two substitution syntaxes, and mixing them is deliberate. @VAR@ is CMake's,
+    resolved by configure_file(@ONLY) at configure time. $(VAR) is Xcode's,
+    resolved per-configuration at build time. A ${VAR} would be ambiguous
+    between the two - configure_file(@ONLY) leaves it alone and Xcode then
+    expands it as a build setting that does not exist, silently emitting an
+    empty string - so it is used for neither.
 -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -20,27 +23,39 @@
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>Bit Buster</string>
+    <string>@VOXAGINE_BUNDLE_NAME@</string>
     <key>CFBundleDisplayName</key>
-    <string>Bit Buster</string>
+    <string>@VOXAGINE_BUNDLE_NAME@</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>${PROJECT_VERSION}</string>
+    <string>@PROJECT_VERSION@</string>
     <key>CFBundleVersion</key>
     <string>1</string>
 
-    <!-- Matches the Android manifest's sensorLandscape: a twin-stick layout
-         with two thumbs and four buttons does not fit a portrait phone. -->
+    <!-- Without this, iOS treats the bundle as iPhone-only and runs it in
+         compatibility mode on iPad. Bit Buster has iPad landscape layouts,
+         so declare both supported device families explicitly. -->
+    <key>UIDeviceFamily</key>
+    <array>
+        <integer>1</integer>
+        <integer>2</integer>
+    </array>
+
+    <!-- The game matches the Android manifest's sensorLandscape: a twin-stick
+         layout with two thumbs and four buttons does not fit a portrait phone.
+         The editor is landscape for a different reason - it is a docked
+         Magic Keyboard tool with a menu bar and side panels - but it lands on
+         the same answer, so both configurations substitute the same list.
+         @VOXAGINE_IOS_ORIENTATIONS@ is set in CMakeLists.txt beside the
+         bundle name it travels with. -->
     <key>UISupportedInterfaceOrientations</key>
     <array>
-        <string>UIInterfaceOrientationLandscapeLeft</string>
-        <string>UIInterfaceOrientationLandscapeRight</string>
+@VOXAGINE_IOS_ORIENTATIONS@
     </array>
     <key>UISupportedInterfaceOrientations~ipad</key>
     <array>
-        <string>UIInterfaceOrientationLandscapeLeft</string>
-        <string>UIInterfaceOrientationLandscapeRight</string>
+@VOXAGINE_IOS_ORIENTATIONS@
     </array>
 
     <key>UIRequiresFullScreen</key>
@@ -60,7 +75,7 @@
     </array>
 
     <key>MinimumOSVersion</key>
-    <string>${VOXAGINE_IOS_MIN_VERSION}</string>
+    <string>@VOXAGINE_IOS_MIN_VERSION@</string>
     <key>LSRequiresIPhoneOS</key>
     <true/>
 </dict>

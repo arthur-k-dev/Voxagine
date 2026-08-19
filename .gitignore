@@ -56,13 +56,12 @@ x86/
 .cache/
 *.swp
 
-# Phased agent planning docs - kept local, not checked in.
-/Docs/RENDERING_PLAN.md
-/Docs/MOBILE_PORT_PLAN.md
-
 # OAuth/credential files — never commit real tokens
 **/token_v2.json
 
 # Editor autosaves (UserSettings::AutoSaveWorld, every 5s by default) - these
 # are working-copy artifacts, not real content, and churn constantly.
 **/*_AutoSave.wld
+
+# macOS Finder metadata; never wanted in the tree.
+.DS_Store

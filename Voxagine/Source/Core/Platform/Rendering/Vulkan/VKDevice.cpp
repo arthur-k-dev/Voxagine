@@ -7,7 +7,7 @@
 namespace
 {
 	const char* const kValidationLayer = "VK_LAYER_KHRONOS_validation";
-	const char* const kDeviceExtensions[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+	const char* const kSwapchainExtension = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
 
 	VKAPI_ATTR VkBool32 VKAPI_CALL DebugCallback(
 		VkDebugUtilsMessageSeverityFlagBitsEXT severity,
@@ -41,11 +41,11 @@ namespace
 		VkPhysicalDeviceProperties props{};
 		vkGetPhysicalDeviceProperties(device, &props);
 
-		/* VKSwapchain records with vkCmdPipelineBarrier2/vkQueueSubmit2 and the
-		   passes use dynamic rendering, both core in 1.3 with no fallback path
-		   anywhere in this backend. */
-		if (props.apiVersion < VK_API_VERSION_1_3)
-			missing.push_back("Vulkan 1.3");
+		/* Timeline semaphores, descriptor indexing and buffer addresses are core
+		   in 1.2. Synchronization uses the compatible legacy API below, while
+		   dynamic rendering may be supplied through its KHR extension. */
+		if (props.apiVersion < VK_API_VERSION_1_2)
+			missing.push_back("Vulkan 1.2");
 
 		VkPhysicalDeviceScalarBlockLayoutFeatures scalar{};
 		scalar.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SCALAR_BLOCK_LAYOUT_FEATURES;
@@ -76,9 +76,6 @@ namespace
 
 		vkGetPhysicalDeviceFeatures2(device, &features);
 
-		if (!sync2.synchronization2)
-			missing.push_back("synchronization2");
-
 		if (!dynamicRendering.dynamicRendering)
 			missing.push_back("dynamicRendering");
 
@@ -100,12 +97,6 @@ namespace
 		   wrong offset - which does not fail, it draws garbage. */
 		if (!scalar.scalarBlockLayout)
 			missing.push_back("scalarBlockLayout (needed by -fvk-use-dx-layout)");
-
-		if (!features.features.fragmentStoresAndAtomics)
-			missing.push_back("fragmentStoresAndAtomics");
-
-		if (!features.features.vertexPipelineStoresAndAtomics)
-			missing.push_back("vertexPipelineStoresAndAtomics");
 
 		if (!features.features.shaderStorageImageWriteWithoutFormat)
 			missing.push_back("shaderStorageImageWriteWithoutFormat");
@@ -129,6 +120,39 @@ namespace
 
 		return false;
 	}
+
+	bool HasInstanceExtension(const char* pName)
+	{
+		uint32_t uiCount = 0;
+		vkEnumerateInstanceExtensionProperties(nullptr, &uiCount, nullptr);
+
+		std::vector<VkExtensionProperties> extensions(uiCount);
+		vkEnumerateInstanceExtensionProperties(nullptr, &uiCount, extensions.data());
+
+		for (const VkExtensionProperties& extension : extensions)
+		{
+			if (strcmp(extension.extensionName, pName) == 0)
+				return true;
+		}
+
+		return false;
+	}
+
+	bool HasDeviceExtension(VkPhysicalDevice device, const char* pName)
+	{
+		uint32_t count = 0;
+		vkEnumerateDeviceExtensionProperties(device, nullptr, &count, nullptr);
+		std::vector<VkExtensionProperties> extensions(count);
+		vkEnumerateDeviceExtensionProperties(device, nullptr, &count, extensions.data());
+
+		for (const VkExtensionProperties& extension : extensions)
+		{
+			if (strcmp(extension.extensionName, pName) == 0)
+				return true;
+		}
+
+		return false;
+	}
 }
 
 VKDevice::~VKDevice()
@@ -138,6 +162,7 @@ VKDevice::~VKDevice()
 
 bool VKDevice::CreateInstance(const std::vector<const char*>& a_InstanceExtensions, bool bEnableValidation)
 {
+	m_StartupError.clear();
 	/* Nothing Vulkan can be called before this: with volk every entry point is
 	   a null function pointer until the loader has been opened. See
 	   VulkanAPI.h for why the engine loads Vulkan dynamically at all - the
@@ -145,6 +170,7 @@ bool VKDevice::CreateInstance(const std::vector<const char*>& a_InstanceExtensio
 	if (volkInitialize() != VK_SUCCESS)
 	{
 		fprintf(stderr, "[vulkan] no Vulkan loader on this system\n");
+		m_StartupError = "No Vulkan loader is available.";
 		return false;
 	}
 
@@ -165,8 +191,25 @@ bool VKDevice::CreateInstance(const std::vector<const char*>& a_InstanceExtensio
 	if (m_bValidationEnabled)
 		extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
 
+	VkInstanceCreateFlags instanceFlags = 0;
+
+	/* MoltenVK is a portability driver, and since loader 1.3.216 the loader
+	   hides those from vkEnumeratePhysicalDevices unless the application opts
+	   in here. Without it macOS fails at vkCreateInstance with "Found no
+	   drivers!" even though MoltenVK is installed and working.
+
+	   Only macOS goes through the loader: the iOS build links MoltenVK
+	   statically as its own ICD, so the extension is absent there and this is
+	   correctly skipped. Querying rather than #ifdef-ing keeps that automatic. */
+	if (HasInstanceExtension(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME))
+	{
+		extensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+		instanceFlags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+	}
+
 	VkInstanceCreateInfo createInfo{};
 	createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+	createInfo.flags = instanceFlags;
 	createInfo.pApplicationInfo = &appInfo;
 	createInfo.enabledExtensionCount = static_cast<uint32_t>(extensions.size());
 	createInfo.ppEnabledExtensionNames = extensions.data();
@@ -180,6 +223,7 @@ bool VKDevice::CreateInstance(const std::vector<const char*>& a_InstanceExtensio
 	if (vkCreateInstance(&createInfo, nullptr, &m_Instance) != VK_SUCCESS)
 	{
 		fprintf(stderr, "[vulkan] vkCreateInstance failed\n");
+		m_StartupError = "vkCreateInstance failed.";
 		return false;
 	}
 
@@ -265,6 +309,7 @@ bool VKDevice::PickPhysicalDevice(VkSurfaceKHR surface)
 	if (uiCount == 0)
 	{
 		fprintf(stderr, "[vulkan] no physical devices\n");
+		m_StartupError = "No Vulkan physical devices were found.";
 		return false;
 	}
 
@@ -334,12 +379,18 @@ bool VKDevice::PickPhysicalDevice(VkSurfaceKHR surface)
 	if (fallback == VK_NULL_HANDLE)
 	{
 		if (rejections.empty())
+		{
 			fprintf(stderr, "[vulkan] no device can present to this surface\n");
+			m_StartupError = "No Vulkan device can present to this surface.";
+		}
 		else
+		{
 			fprintf(stderr,
 				"[vulkan] no device meets this renderer's requirements.%s\n"
 				"[vulkan] Bit Buster needs Vulkan 1.3; there is no fallback path.\n",
 				rejections.c_str());
+			m_StartupError = "No Vulkan device meets this renderer's requirements:" + rejections;
+		}
 
 		return false;
 	}
@@ -355,6 +406,31 @@ bool VKDevice::CreateDevice(VkSurfaceKHR surface)
 {
 	if (!PickPhysicalDevice(surface))
 		return false;
+
+	VkPhysicalDeviceProperties properties{};
+	vkGetPhysicalDeviceProperties(m_PhysicalDevice, &properties);
+
+	/* Dynamic rendering is core in 1.3, but this iPad exposes it as the
+	   Vulkan 1.2 VK_KHR_dynamic_rendering extension. Querying the feature is
+	   not sufficient: the extension has to be enabled on vkCreateDevice before
+	   vkCmdBeginRendering may be used. */
+	std::vector<const char*> deviceExtensions = { kSwapchainExtension };
+	if (properties.apiVersion < VK_API_VERSION_1_3)
+	{
+		if (!HasDeviceExtension(m_PhysicalDevice, VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME))
+		{
+			m_StartupError = "The selected Vulkan 1.2 device does not expose VK_KHR_dynamic_rendering.";
+			return false;
+		}
+
+		deviceExtensions.push_back(VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME);
+	}
+
+	/* Not optional: the spec says a device advertising VK_KHR_portability_subset
+	   *must* have it enabled, and the loader's validation refuses vkCreateDevice
+	   otherwise. MoltenVK advertises it on both macOS and iOS. */
+	if (HasDeviceExtension(m_PhysicalDevice, "VK_KHR_portability_subset"))
+		deviceExtensions.push_back("VK_KHR_portability_subset");
 
 	const float fPriority = 1.f;
 
@@ -373,8 +449,6 @@ bool VKDevice::CreateDevice(VkSurfaceKHR surface)
 		queueInfos.push_back(queueInfo);
 	}
 
-	/* Synchronization2 gives us the split access/stage masks that VKTranslate.h
-	   expands engine resource states into. */
 	/* Shaders are compiled with -fvk-use-dx-layout so structured buffers match
 	   the tightly packed C++ structs the engine memcpys in (D3D's rules).
 	   float3 members then straddle 16-byte boundaries, which Vulkan only
@@ -383,18 +457,13 @@ bool VKDevice::CreateDevice(VkSurfaceKHR surface)
 	scalarLayout.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SCALAR_BLOCK_LAYOUT_FEATURES;
 	scalarLayout.scalarBlockLayout = VK_TRUE;
 
-	VkPhysicalDeviceSynchronization2Features sync2{};
-	sync2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES;
-	sync2.synchronization2 = VK_TRUE;
-	sync2.pNext = &scalarLayout;
-
 	/* CommandEngine exposes a monotonically increasing fence value that other
 	   engines wait on - an ID3D12Fence. Timeline semaphores are the direct
 	   equivalent. */
 	VkPhysicalDeviceTimelineSemaphoreFeatures timeline{};
 	timeline.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES;
 	timeline.timelineSemaphore = VK_TRUE;
-	timeline.pNext = &sync2;
+	timeline.pNext = &scalarLayout;
 
 	/* Buffer::GetGPUAddress() returns a uint64 that used to be a
 	   D3D12_GPU_VIRTUAL_ADDRESS. bufferDeviceAddress is the equivalent and
@@ -420,11 +489,11 @@ bool VKDevice::CreateDevice(VkSurfaceKHR surface)
 	dynamicRendering.dynamicRendering = VK_TRUE;
 	dynamicRendering.pNext = &descriptorIndexing;
 
-	/* The voxel and particle fragment shaders write to storage buffers, which
-	   Vulkan gates behind these. D3D12 had no equivalent switch. */
+	/* Storage-image writes use format-less image stores. This is the only core
+	   shader-storage feature the shipped shaders require: they do not perform
+	   fragment or vertex-stage atomic operations, so requesting those features
+	   would unnecessarily exclude iOS GPUs such as A12Z. */
 	VkPhysicalDeviceFeatures coreFeatures{};
-	coreFeatures.fragmentStoresAndAtomics = VK_TRUE;
-	coreFeatures.vertexPipelineStoresAndAtomics = VK_TRUE;
 	coreFeatures.shaderStorageImageWriteWithoutFormat = VK_TRUE;
 
 	VkDeviceCreateInfo deviceInfo{};
@@ -432,13 +501,14 @@ bool VKDevice::CreateDevice(VkSurfaceKHR surface)
 	deviceInfo.pNext = &dynamicRendering;
 	deviceInfo.queueCreateInfoCount = static_cast<uint32_t>(queueInfos.size());
 	deviceInfo.pQueueCreateInfos = queueInfos.data();
-	deviceInfo.enabledExtensionCount = 1;
-	deviceInfo.ppEnabledExtensionNames = kDeviceExtensions;
+	deviceInfo.enabledExtensionCount = static_cast<uint32_t>(deviceExtensions.size());
+	deviceInfo.ppEnabledExtensionNames = deviceExtensions.data();
 	deviceInfo.pEnabledFeatures = &coreFeatures;
 
 	if (vkCreateDevice(m_PhysicalDevice, &deviceInfo, nullptr, &m_Device) != VK_SUCCESS)
 	{
 		fprintf(stderr, "[vulkan] vkCreateDevice failed\n");
+		m_StartupError = "vkCreateDevice failed after selecting " + m_DeviceName + ".";
 		return false;
 	}
 

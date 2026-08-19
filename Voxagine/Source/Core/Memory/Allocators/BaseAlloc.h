@@ -1,7 +1,7 @@
 #pragma once
 
 #ifndef _ORBIS
-#include <malloc.h>
+#include <cstdlib>
 #define SCE_KERNEL_WB_ONION 0 
 #define SCE_KERNEL_WB_GARLIC 1
 #define SCE_KERNEL_PROT_CPU_RW 0

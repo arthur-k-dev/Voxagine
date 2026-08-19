@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    The macOS editor bundle.
+
+    Only @VAR@ substitution here, unlike the iOS template next door, and that
+    is not a style choice. The iOS build uses the Xcode generator, which
+    expands $(EXECUTABLE_NAME) and friends per configuration at build time.
+    The macOS build uses Ninja, which copies this file into the bundle
+    verbatim after configure_file() has run - an $(EXECUTABLE_NAME) left in it
+    would reach Launch Services literally and the app would refuse to start
+    with "You can't open the application because it may be damaged".
+
+    Deliberately minimal on permissions, like the iOS one: the editor wants no
+    camera, no microphone, no location and no network.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleExecutable</key>
+    <string>@VOXAGINE_APP_EXECUTABLE@</string>
+    <key>CFBundleIdentifier</key>
+    <string>@VOXAGINE_BUNDLE_ID@</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>@VOXAGINE_BUNDLE_NAME@</string>
+    <key>CFBundleDisplayName</key>
+    <string>@VOXAGINE_BUNDLE_NAME@</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>@PROJECT_VERSION@</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+
+    <!-- Without this the window is backed by a 1x surface and upscaled, which
+         defeats SDL_WINDOW_HIGH_PIXEL_DENSITY and the DPI-aware ImGui atlas
+         that SDLWindowContext and ImguiSystem go to some trouble to set up. -->
+    <key>NSHighResolutionCapable</key>
+    <true/>
+
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
+
+    <!-- Present only when the build actually pinned a deployment target. An
+         empty LSMinimumSystemVersion is worse than an absent one: it claims a
+         minimum and names none. -->
+@VOXAGINE_MACOS_MIN_VERSION_KEY@
+    <!-- A tool window, not an agent: it belongs in the Dock and the menu bar. -->
+    <key>LSUIElement</key>
+    <false/>
+</dict>
+</plist>

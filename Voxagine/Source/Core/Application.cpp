@@ -11,6 +11,8 @@
 #include "Core/System/FileSystem.h"
 #include "Platform/Window/WindowContext.h"
 #include "Platform/Input/Temp/InputContextNew.h"
+#include "Core/Platform/Input/SDL/SDLKeyboard.h"
+#include "Core/ECS/Systems/Chunk/StreamingCounters.h"
 #include "Platform/Rendering/RenderContext.h"
 #include "Editor/imgui/ImguiSystem.h"
 
@@ -18,8 +20,11 @@
 #include "ECS/Entities/Camera.h"
 
 #include <chrono>
+#include "Core/Platform/Rendering/FrameProfiler.h"
 #include <iostream>
 #include <thread>
+#include <SDL3/SDL_messagebox.h>
+#include "Core/Platform/Rendering/RenderDocCapture.h"
 #include "Core/GameTimer.h"
 #include "ECS/WorldManager.h"
 #include "ECS/Systems/Physics/PhysicsSystem.h"
@@ -41,6 +46,47 @@ Application::~Application()
 
 }
 
+/* Main-loop stage timing, so "the transition frame took 94 ms" can be answered
+   with *which stage*. Every named cost this tree profiles is inside one system
+   or one function; before this there was nothing that said whether a frame's
+   time was in gameplay, in the render submission or in Present, and the answer
+   for a chunk transition turned out not to be any of the streaming timers.
+
+   Guarded on the profiler being enabled (VOXAGINE_PROFILE=1, or a Debug build),
+   so a shipping frame pays one predictable branch per stage. */
+namespace
+{
+	class StageTimer
+	{
+	public:
+		explicit StageTimer(const char* pName) :
+			m_pName(pName),
+			m_bEnabled(FrameProfiler::Get().IsEnabled()),
+			m_Start(m_bEnabled ? std::chrono::steady_clock::now()
+				: std::chrono::steady_clock::time_point())
+		{
+		}
+
+		~StageTimer()
+		{
+			if (!m_bEnabled)
+				return;
+
+			FrameProfiler::Get().Report(m_pName,
+				std::chrono::duration<double, std::milli>(
+					std::chrono::steady_clock::now() - m_Start).count());
+		}
+
+		StageTimer(const StageTimer&) = delete;
+		StageTimer& operator=(const StageTimer&) = delete;
+
+	private:
+		const char* m_pName;
+		bool m_bEnabled;
+		std::chrono::steady_clock::time_point m_Start;
+	};
+}
+
 void Application::Run()
 {
 #ifdef _ORBIS
@@ -54,43 +100,65 @@ void Application::Run()
 	m_LoggingSystem.Initialize(this);
 	m_Serializer.Initialize(m_pFileSystem);
 
+	/* Before LoadSettings, because the render settings the player chose live in
+	   here and LoadSettings is what restores them. It used to be initialized in
+	   VoxApp::OnCreate, which runs *after* Platform::Initialize has already
+	   built the render passes from Settings - too late to decide how large the
+	   shadow map should be. Nothing else about it moved: it is an Application
+	   member and always was. */
+	m_PlayerPrefs.Initialize(&m_Serializer, "PlayerPrefs.vgprefs");
+
 	LoadSettings();
 
-#ifdef EDITOR
-	/* The lock is a game presentation choice; the editor wants the whole
-	   window. Play mode still uses the camera's own aspect ratio. */
-	m_Settings.SetLockedAspectRatio(0.f);
-#elif defined(VOXAGINE_MOBILE)
-	/* Same on a phone, for a different reason. The lock letterboxes the frame
-	   to 16:9 whatever the display is, and a modern phone is nearer 20:9 - so
-	   a locked game would run with black bars down a fifth of the screen while
-	   the device it is on has no bars anywhere else. Rendering at the device's
-	   own ratio widens the view instead, which is the right trade for a
-	   top-down game: it shows more of the arena rather than stretching it.
+#if defined(EDITOR) || defined(VOXAGINE_MOBILE)
+	/* The 16:9 lock is a game presentation choice and neither of these wants
+	   it, for two different reasons.
 
-	   The screen is also the only place a phone has to put anything, so
-	   spending a fifth of it on nothing is worse here than on a monitor. */
-	m_Settings.SetLockedAspectRatio(0.f);
+	   The editor wants the whole window; play mode still uses the camera's own
+	   aspect ratio.
 
-	/* Half resolution by default, and this is the single biggest performance
-	   lever the engine has on a phone.
-	 *
-	 * Measured on a Galaxy S23 (Adreno 740) at native 2340x1080, in an arena:
-	 * the Voxel pass alone is 108.8 ms of a ~138 ms frame - 79% of it - and it
-	 * is fragment-bound, so it scales with pixel count almost linearly. Sun
-	 * Shadow (a fixed 1024^2) and the full-resolution post and UI passes do
-	 * not scale, which is why this is worth about 2.5x rather than 4x.
-	 *
-	 * Set from code rather than from Settings.vgs on purpose: that file is
-	 * shared with the desktop build, and a half-resolution default is very
-	 * much not wanted on a 4070. */
-	m_Settings.SetResolutionScale(0.5f);
+	   A phone is nearer 20:9, so a locked frame would run with black bars down
+	   a fifth of a screen that has no bars anywhere else. Rendering at the
+	   device's own ratio widens the view instead, which is the right trade for
+	   a top-down game: it shows more of the arena rather than stretching it.
+
+	   The render *quality* defaults that used to sit in this block are in
+	   Settings::ApplyPlatformRenderDefaults now, where the player's own choices
+	   can be layered on top of them. */
+	m_Settings.SetLockedAspectRatio(0.f);
 #endif
 
 	m_JobManager.Initialize();
+
+	/* Before Platform::Initialize, and that is the whole constraint: RenderDoc
+	   hooks Vulkan through the loader, so its library has to be in the process
+	   before VKRenderContext::InitializeBackend calls volkInitialize and creates
+	   the instance. A no-op when RenderDoc is neither injected nor asked for,
+	   which is every ordinary run. See RenderDocCapture.h. */
+	RenderDocCapture::Get().Initialize();
+
 	m_Platform.Initialize();
 
-	OnCreate();
+	/* A window/input platform may initialize while its renderer rejects the
+	   device. World startup requires RenderContext's voxel mapper, so stop here
+	   with the renderer's already-recorded diagnostic instead of crashing later
+	   in ChunkSystem or PhysicsSystem. */
+	if (m_Platform.GetRenderContext()->IsReady())
+	{
+		OnCreate();
+	}
+	else
+	{
+		const std::string startupError = m_Platform.GetRenderContext()->GetStartupError();
+		m_LoggingSystem.Log(LOGLEVEL_CRITICAL_ERROR, "Application",
+			"Renderer initialization did not complete; application startup was stopped. " + startupError);
+		SDL_ShowSimpleMessageBox(
+			SDL_MESSAGEBOX_ERROR,
+			"Bit Buster cannot start",
+			("The selected renderer is not available on this device.\n\n" + startupError).c_str(),
+			nullptr);
+		m_bExit = true;
+	}
 
 #ifdef EDITOR
 	m_Editor.Initialize(this);
@@ -150,14 +218,37 @@ void Application::Run()
 				return;
 			}
 
+			/* --ui-script's clock is stopped while gameplay is held, so a
+			   scripted token is never spent on a world where no entity has
+			   ticked. Both worlds are asked: during a phase 8 switch the top
+			   world is the sprite-only loading screen, which is never held,
+			   while the level streaming in behind it is - and pressing keys at
+			   a loading screen is the same defect one indirection along.
+			   No-op unless --ui-script is set. See Keyboard::SetUIScriptPaused. */
+			if (LaunchOptions::Get().HasUIScript())
+			{
+				const World* pTopWorld = m_WorldManager.GetTopWorld();
+				const World* pStreamingWorld = m_WorldManager.GetStreamingWorld();
+
+				Keyboard::SetUIScriptPaused(
+					(pTopWorld != nullptr && pTopWorld->IsGameplayHeld()) ||
+					(pStreamingWorld != nullptr && pStreamingWorld->IsGameplayHeld()));
+			}
+
 			m_Platform.GetInputContext()->Update();
 			m_Platform.GetImguiSystem().Update();
 
 			m_Platform.GetRenderContext()->Clear();
 
-			OnUpdate();
+			{
+				StageTimer stage("CPU Frame OnUpdate");
+				OnUpdate();
+			}
 
-			m_JobManager.ProcessFinishedJobs();
+			{
+				StageTimer stage("CPU Frame JobCallbacks");
+				m_JobManager.ProcessFinishedJobs();
+			}
 
 			/* Update loop for world */
 			World* activeWorld = m_WorldManager.GetTopWorld();
@@ -227,7 +318,12 @@ void Application::Run()
 #else
 			if (activeWorld)
 			{
-				activeWorld->PreTick();
+				{
+					StageTimer stage("CPU Frame World PreTick");
+					activeWorld->PreTick();
+				}
+
+				StageTimer stage("CPU Frame World Tick");
 				activeWorld->Tick(fElapsed);
 			}
 
@@ -239,13 +335,31 @@ void Application::Run()
 
 				if (activeWorld)
 				{
+					StageTimer stage("CPU Frame World FixedTick");
 					activeWorld->FixedTick(*m_Platform.m_pFixedGameTimer);
 					activeWorld->PostFixedTick(*m_Platform.m_pFixedGameTimer);
 				}
 			});
 
 			if (activeWorld)
+			{
+				StageTimer stage("CPU Frame World PostTick");
 				activeWorld->PostTick(fElapsed);
+			}
+
+			/* A world being brought up behind the loading screen advances here,
+			   with the same fixed-step count the visible world was ticked with,
+			   and only its ChunkSystem and RenderSystem move. It is deliberately
+			   after the active world's ticks and before its Render: the pending
+			   world's stamps and the visible world's are both budgeted, and this
+			   order spends the pending one's budget on a frame that has already
+			   done everything it owes the player.
+			   Docs/CHUNK_STREAMING_PLAN.md phase 8. */
+			{
+				StageTimer stage("CPU Frame Streaming World");
+				m_WorldManager.UpdateStreamingWorld(
+					*m_Platform.m_pFixedGameTimer, bFixedStep ? 1u : 0u);
+			}
 
 			Camera* pCamera = nullptr;
 			if (activeWorld) {
@@ -278,6 +392,8 @@ void Application::Run()
 
 			if (activeWorld)
 			{
+				StageTimer stage("CPU Frame World Render");
+
 				if (bFixedStep)
 				{
 					activeWorld->Render(*m_Platform.m_pFixedGameTimer);
@@ -287,7 +403,10 @@ void Application::Run()
 			}
 #endif
 
-			OnDraw();
+			{
+				StageTimer stage("CPU Frame OnDraw");
+				OnDraw();
+			}
 
 			/* --frames / --screenshot (LaunchOptions.h). Counted here rather
 			   than in the outer while loop because that one spins on the game
@@ -317,7 +436,10 @@ void Application::Run()
 				}
 			}
 
-			m_Platform.GetRenderContext()->Present();
+			{
+				StageTimer stage("CPU Frame Present");
+				m_Platform.GetRenderContext()->Present();
+			}
 
 #ifdef _ORBIS
 			uint32_t uiFPS = GetTimer().GetFramesPerSecond();
@@ -325,6 +447,44 @@ void Application::Run()
 			std::printf(pFPS);
 #endif
 		});
+	}
+
+	/* One line, always, so a headless run says whether it destroyed anything
+	   rather than leaving it to be inferred from a screenshot. Phase 11 exists
+	   because "a scripted boundary crossing with combat" was claimed for four
+	   phases while no headless run in this tree destroyed a single voxel, and
+	   the cheapest guard against saying it again is a run that reports zero. */
+	{
+		const StreamingCounters& counters = StreamingCounters::Get();
+
+		fprintf(stderr, "[destruction] %llu voxels destroyed, %llu protected, over %llu bursts\n",
+			static_cast<unsigned long long>(counters.VoxelsDestroyed.load(std::memory_order_relaxed)),
+			static_cast<unsigned long long>(counters.VoxelsProtected.load(std::memory_order_relaxed)),
+			static_cast<unsigned long long>(counters.DestructionBursts.load(std::memory_order_relaxed)));
+
+		/* Phase 12. Both zero on a run that neither destroyed anything nor slid
+		   the window over a write, so they say nothing then rather than adding
+		   two lines every run has to be read past. */
+		const uint64_t uiReplayed =
+			counters.WindowCommitWritesReplayed.load(std::memory_order_relaxed);
+		const uint64_t uiLost =
+			counters.WindowCommitWritesLost.load(std::memory_order_relaxed);
+
+		if (uiReplayed > 0)
+		{
+			fprintf(stderr, "[streaming] %llu voxel writes republished at a window commit, %llu of which the swap would have lost\n",
+				static_cast<unsigned long long>(uiReplayed),
+				static_cast<unsigned long long>(uiLost));
+		}
+
+		const uint64_t uiDiverging =
+			counters.VoxelStampDivergingErases.load(std::memory_order_relaxed);
+
+		if (uiDiverging > 0)
+		{
+			fprintf(stderr, "[destruction] %llu mapping voxels erased over a live CPU voxel - invisible but solid geometry\n",
+				static_cast<unsigned long long>(uiDiverging));
+		}
 	}
 
 	// Stop application-level producers while all of their dependencies are alive.
@@ -357,6 +517,48 @@ void Application::LoadSettings()
 		GetSerializer().ToJsonFile(m_Settings, "Settings.vgs", true);
 	}
 
+	/* Render quality is three layers and the order is the whole design:
+	 *
+	 *   1. Settings.vgs, above  - shipped engine configuration, one file for
+	 *      every platform.
+	 *   2. the platform's defaults - what a phone should do differently, which
+	 *      cannot live in a file shared with the desktop build.
+	 *   3. the player's own choices from the settings menu, restored last so
+	 *      that anything they have deliberately changed survives both.
+	 *
+	 * A key the player has never touched is simply absent from PlayerPrefs, so
+	 * layer 3 is not "all settings" - it is exactly the ones they chose, which
+	 * is what lets a future change to the mobile defaults reach everyone who
+	 * never opened the menu. */
+	m_Settings.ApplyPlatformRenderDefaults();
+	LoadRenderSettings();
+
+	/* --render-quality, after all three layers so that it overrides them, and
+	   nothing is written back - the same contract --uncapped has. It exists so
+	   that pricing the shading levers does not mean editing PlayerPrefs and
+	   remembering to put it back; LaunchOptions.h has the full reasoning. */
+	switch (LaunchOptions::Get().GetQualityPreset())
+	{
+	case LaunchOptions::QualityPreset::E_LOW:
+		m_Settings.SetShadowQuality(SHQ_HARD);
+		m_Settings.SetAmbientQuality(AMQ_OFF);
+		m_Settings.SetBounceLight(false);
+		m_Settings.SetReflections(false);
+		m_Settings.SetFXAA(false);
+		break;
+
+	case LaunchOptions::QualityPreset::E_HIGH:
+		m_Settings.SetShadowQuality(SHQ_SOFT);
+		m_Settings.SetAmbientQuality(AMQ_CONE);
+		m_Settings.SetBounceLight(true);
+		m_Settings.SetReflections(true);
+		m_Settings.SetFXAA(true);
+		break;
+
+	case LaunchOptions::QualityPreset::E_UNSET:
+		break;
+	}
+
 	/* --uncapped, after the file so that it overrides it - RENDERING_PLAN.md
 	   phase 0b, and it should have been there from the start.
 
@@ -376,4 +578,82 @@ void Application::LoadSettings()
 		m_Settings.SetVSync(false);
 		m_Settings.SetFrameLimit(0.0);
 	}
+}
+
+/* The player's render choices, in PlayerPrefs rather than in Settings.vgs.
+ *
+ * Settings.vgs is shipped content - on Android it is a file inside the APK that
+ * gets extracted once per install, and rewriting it would be rewriting an
+ * asset. PlayerPrefs is already the per-install store this game writes to (the
+ * level unlocks live there), it is already on a writable path on every
+ * platform, and its "has the key" test is exactly the question layer 3 asks.
+ *
+ * The keys are prefixed and spelled out rather than generated from the RTTR
+ * property names: a renamed C++ member should not silently lose a player's
+ * settings, and a name in a save file is a compatibility promise. */
+namespace
+{
+	const char* k_pShadowQualityKey = "Render_ShadowQuality";
+	const char* k_pShadowResolutionKey = "Render_ShadowResolution";
+	const char* k_pShadowRayDistanceKey = "Render_ShadowRayDistance";
+	const char* k_pAmbientQualityKey = "Render_AmbientQuality";
+	const char* k_pBounceKey = "Render_BounceLight";
+	const char* k_pReflectionsKey = "Render_Reflections";
+	const char* k_pFXAAKey = "Render_FXAA";
+	const char* k_pResolutionScaleKey = "Render_ResolutionScale";
+	const char* k_pVSyncKey = "Render_VSync";
+}
+
+void Application::LoadRenderSettings()
+{
+	if (PlayerPrefs::HasKey(k_pShadowQualityKey))
+	{
+		m_Settings.SetShadowQuality(static_cast<ShadowQuality>(
+			PlayerPrefs::GetInt(k_pShadowQualityKey, static_cast<int32_t>(SHQ_SOFT))));
+	}
+
+	if (PlayerPrefs::HasKey(k_pShadowResolutionKey))
+	{
+		m_Settings.SetSunShadowResolution(static_cast<uint32_t>(
+			PlayerPrefs::GetInt(k_pShadowResolutionKey, 1024)));
+	}
+
+	if (PlayerPrefs::HasKey(k_pShadowRayDistanceKey))
+		m_Settings.SetShadowRayDistance(PlayerPrefs::GetFloat(k_pShadowRayDistanceKey, 0.f));
+
+	if (PlayerPrefs::HasKey(k_pAmbientQualityKey))
+	{
+		m_Settings.SetAmbientQuality(static_cast<AmbientQuality>(
+			PlayerPrefs::GetInt(k_pAmbientQualityKey, static_cast<int32_t>(AMQ_CONE))));
+	}
+
+	if (PlayerPrefs::HasKey(k_pBounceKey))
+		m_Settings.SetBounceLight(PlayerPrefs::GetInt(k_pBounceKey, 1) != 0);
+
+	if (PlayerPrefs::HasKey(k_pReflectionsKey))
+		m_Settings.SetReflections(PlayerPrefs::GetInt(k_pReflectionsKey, 1) != 0);
+
+	if (PlayerPrefs::HasKey(k_pFXAAKey))
+		m_Settings.SetFXAA(PlayerPrefs::GetInt(k_pFXAAKey, 1) != 0);
+
+	if (PlayerPrefs::HasKey(k_pResolutionScaleKey))
+		m_Settings.SetResolutionScale(PlayerPrefs::GetFloat(k_pResolutionScaleKey, 1.f));
+
+	if (PlayerPrefs::HasKey(k_pVSyncKey))
+		m_Settings.SetVSync(PlayerPrefs::GetInt(k_pVSyncKey, 0) != 0);
+}
+
+void Application::SaveRenderSettings()
+{
+	PlayerPrefs::SetInt(k_pShadowQualityKey, static_cast<int32_t>(m_Settings.GetShadowQuality()));
+	PlayerPrefs::SetInt(k_pShadowResolutionKey, static_cast<int32_t>(m_Settings.GetSunShadowResolution()));
+	PlayerPrefs::SetFloat(k_pShadowRayDistanceKey, m_Settings.GetShadowRayDistance());
+	PlayerPrefs::SetInt(k_pAmbientQualityKey, static_cast<int32_t>(m_Settings.GetAmbientQuality()));
+	PlayerPrefs::SetInt(k_pBounceKey, m_Settings.IsBounceLightEnabled() ? 1 : 0);
+	PlayerPrefs::SetInt(k_pReflectionsKey, m_Settings.IsReflectionEnabled() ? 1 : 0);
+	PlayerPrefs::SetInt(k_pFXAAKey, m_Settings.IsFXAAEnabled() ? 1 : 0);
+	PlayerPrefs::SetFloat(k_pResolutionScaleKey, m_Settings.GetResolutionScale());
+	PlayerPrefs::SetInt(k_pVSyncKey, m_Settings.IsVSyncEnabled() ? 1 : 0);
+
+	PlayerPrefs::Save();
 }

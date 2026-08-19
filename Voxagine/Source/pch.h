@@ -16,6 +16,7 @@
 
 #include "Core/Utils/Utils.h"
 #include "Core/Math.h"
+#include "Core/RTTRGlmTraits.h"
 #include "Core/VColors.h"
 #include "Core/GameTimer.h"
 /* Core/FileBrowser.h is deliberately not here. It pulls in nativefiledialog,

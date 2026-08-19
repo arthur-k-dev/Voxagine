@@ -35,6 +35,12 @@ public:
 	JobManager& GetJobManager() { return m_JobManager; }
 	FileSystem* GetFileSystem() { return m_pFileSystem; }
 	const GameTimer& GetTimer() const { return *m_Platform.GetGameTimer(); }
+
+	/* Null until Platform::Initialize has run, which is never for an
+	   Application that exists only to own a serializer and a job manager -
+	   the streaming harness (CHUNK_STREAMING_PLAN.md T1). Anything that runs
+	   both before startup and during the frame has to ask this way. */
+	const GameTimer* TryGetTimer() const { return m_Platform.GetGameTimer(); }
 	const GameTimer& GetFixedTimer() const { return *m_Platform.GetFixedTimer(); }
 
 	bool IsSuspended() const { return m_bSuspended; }
@@ -50,6 +56,16 @@ public:
 	}
 
 	bool IsShuttingDown() const { return m_bExit; }
+
+	/* Persist whatever the player changed in the settings menu, and restore it
+	   at startup. See the definitions in Application.cpp for why this is
+	   PlayerPrefs rather than Settings.vgs, and for the three-layer order.
+
+	   SaveRenderSettings is public because the settings menu is the only thing
+	   that calls it - it writes the whole set on leaving the screen rather than
+	   on every keypress, so a player scrubbing through options is not writing a
+	   file per frame. */
+	void SaveRenderSettings();
 
 protected:
 	virtual void OnCreate() {};
@@ -68,6 +84,7 @@ protected:
 	PlayerPrefs m_PlayerPrefs;
 private:
 	void LoadSettings();
+	void LoadRenderSettings();
 
 #ifdef EDITOR
  	Editor m_Editor;

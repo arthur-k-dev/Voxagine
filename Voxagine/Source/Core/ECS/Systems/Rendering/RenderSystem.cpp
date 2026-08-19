@@ -23,6 +23,7 @@
 
 #include "Core/ECS/Systems/Rendering/Buffers/RenderData.h"
 #include "Core/ECS/Systems/Rendering/VoxelStamp.h"
+#include "Core/ECS/Systems/Rendering/ModelMeshStore.h"
 
 #include "Core/Platform/Rendering/RenderContext.h"
 #include "Core/Platform/Rendering/FrameProfiler.h"
@@ -40,6 +41,29 @@
 
 #include "../../Components/VoxAnimator.h"
 #include "DebugRenderer.h"
+
+namespace
+{
+	/* Once per entity, not once per frame: whatever produces a NaN keeps
+	   producing it, and this is a per-renderer path (streaming plan rule R9,
+	   which measured per-renderer stderr turning a 2 ms bake into 20+ ms). The
+	   set is by name because the point is to name the culprit in a bug report,
+	   and two entities sharing a name share a cause. */
+	void ReportNonFiniteModelTransform(VoxRenderer* pRenderer, const char* pWhat)
+	{
+		static std::set<std::string> s_Reported;
+
+		const std::string& sName = pRenderer->GetOwner()->GetName();
+
+		if (!s_Reported.insert(sName).second)
+			return;
+
+		fprintf(stderr,
+			"[render] '%s' produced a non-finite model %s; "
+			"repaired for drawing, but the source is a real defect\n",
+			sName.c_str(), pWhat);
+	}
+}
 
 RenderSystem::RenderSystem(World* pWorld) :
 	ComponentSystem(pWorld),
@@ -66,27 +90,40 @@ RenderSystem::RenderSystem(World* pWorld) :
 
 RenderSystem::~RenderSystem()
 {
-	for (VoxRenderer* pRenderer : m_VoxRenderers)
-	{
-		/* Remove old voxels if array is valid */
-		if (pRenderer->m_BakeData.Positions)
-		{
-			delete[] pRenderer->m_BakeData.Positions;
-			pRenderer->m_BakeData.Positions = nullptr;
-		}
-	}
+	/* Idempotent, and normally already done by World::Unload - this is the
+	   path for a RenderSystem destroyed without one (the editor, and the
+	   harness). ForgetChunkStamp frees BakeData::Positions, which is what this
+	   loop used to do by hand. */
+	BeginWorldUnload(m_bReleaseVoxelWindow);
 
 	m_pRenderContext->SetFadeValue(1.f);
 
-	/* Clear the current world's voxels */
-	ClearVoxels();
+	/* Clear the current world's voxels - unless this world is not the one whose
+	   voxels are in the window. See BeginWorldUnload. */
+	if (m_bReleaseVoxelWindow)
+		ClearVoxels();
 
 	m_pWorld->Resumed -= this;
 }
 
+void RenderSystem::BeginWorldUnload(bool bReleaseVoxelWindow)
+{
+	m_bReleaseVoxelWindow = bReleaseVoxelWindow;
+
+	if (m_bWorldUnloading)
+		return;
+
+	m_bWorldUnloading = true;
+
+	for (VoxRenderer* pRenderer : m_VoxRenderers)
+		m_VoxelBaker.ForgetChunkStamp(pRenderer);
+
+	m_VoxRenderers.clear();
+}
+
 void RenderSystem::Start()
 {
-	if (!m_pRenderContext->ResizeWorldBuffer())
+	if (!m_pRenderContext->ResizeWorldBuffer(m_pWorld))
 		ClearVoxels();
 
 	/* Only from here on is a stamp worth making: everything above wipes the
@@ -214,6 +251,105 @@ void RenderSystem::PostTick(float fDeltaTime)
 		}
 
 		m_pRenderContext->Submit(buffer);
+
+		/* DYNAMIC_MODELS_PLAN.md phase 2. A dynamic renderer is still baked as
+		   well, at this point in the plan (phase 3 removes that) - this is the
+		   redundant-but-verifiable overlay the phase's acceptance criteria
+		   asks for. Static renderers are unaffected: ModelMeshStore was built
+		   for every frame in phase 1, but only non-static ones are submitted
+		   to the model pass here. */
+		if (!pRenderer->GetOwner()->IsStatic())
+		{
+			const VoxelMesher::Result mesh = ModelMeshStore::Get().EnsureMeshed(pFrame);
+
+			if (mesh.m_uiQuadCount > 0)
+			{
+				/* Shared with VoxFrameEmitter (DYNAMIC_MODELS_PLAN.md phase
+				   3) so the two can never disagree about where this
+				   renderer's model actually is - VoxelStamp.h. */
+				Vector3 worldOrigin(0.f);
+				Quaternion quat;
+				Vector3 scale(1.f);
+
+				/* Only the origin used to be checked here, and the rotation is
+				   the component this tree actually produces NaNs in - see
+				   CLAUDE.md's "Something produces NaN transforms", which is
+				   still open, and the uninitialised `Quaternion rotation;` in
+				   Monster::RangeAttack. A non-finite quaternion reached the
+				   vertex shader and drew garbage.
+
+				   It is repaired rather than rejected, and that distinction is
+				   the whole point: rejecting the instance makes the character
+				   *disappear*, which is a worse failure than one drawn
+				   unrotated for a frame and is far harder to trace back to a
+				   NaN. Reported once per entity, the way VoxelBaker reports the
+				   same class, so it stays a findable bug rather than a
+				   mystery. */
+				bool bSubmit = ComputeContinuousModelTransform(pRenderer, worldOrigin, quat, scale);
+
+				if (bSubmit && !std::isfinite(quat.x + quat.y + quat.z + quat.w))
+				{
+					ReportNonFiniteModelTransform(pRenderer, "rotation");
+					quat = Quaternion(1.f, 0.f, 0.f, 0.f);
+				}
+
+				if (bSubmit && !std::isfinite(scale.x + scale.y + scale.z))
+				{
+					ReportNonFiniteModelTransform(pRenderer, "scale");
+					scale = Vector3(1.f);
+				}
+
+				/* The origin has no sane repair - putting the model at the
+				   world centre would be a lie rather than a degradation - so
+				   this one still drops, loudly. */
+				if (bSubmit && !std::isfinite(worldOrigin.x + worldOrigin.y + worldOrigin.z))
+				{
+					ReportNonFiniteModelTransform(pRenderer, "position");
+					bSubmit = false;
+				}
+
+				if (bSubmit)
+				{
+					ModelInstanceData instance;
+					instance.Rotation = Vector4(quat.x, quat.y, quat.z, quat.w);
+					instance.Scale = scale;
+					instance.WorldOrigin = worldOrigin;
+					instance.OverrideColor = pRenderer->GetOverrideColor().inst.Color;
+					instance.Tag = VoxelStateTag(pRenderer->GetState(), pRenderer->IsEmissive());
+
+					const uint32_t uiInstanceIndex = m_pRenderContext->SubmitModelInstance(instance);
+					m_pRenderContext->SubmitModelQuads(uiInstanceIndex, mesh.m_uiFirstQuad, mesh.m_uiQuadCount);
+
+					static const bool s_bModelDebug = std::getenv("VOXAGINE_MODEL_DEBUG") != nullptr;
+					static int s_iPrinted = 0;
+					if (s_bModelDebug && s_iPrinted < 6)
+					{
+						s_iPrinted++;
+						const std::vector<uint32_t>& quads = ModelMeshStore::Get().GetQuads();
+						const uint32_t uiStoreTotal = ModelMeshStore::Get().GetTotalQuadCount();
+
+						fprintf(stderr, "[model] '%s' static=%d frame=%p firstQuad=%u count=%u storeTotal=%u instIdx=%u rot=(%.3f %.3f %.3f %.3f) origin=(%.2f %.2f %.2f) scale=(%.2f %.2f %.2f)\n",
+							pRenderer->GetOwner()->GetName().c_str(), pRenderer->GetOwner()->IsStatic(),
+							(const void*)pFrame, mesh.m_uiFirstQuad, mesh.m_uiQuadCount, uiStoreTotal, uiInstanceIndex,
+							quat.x, quat.y, quat.z, quat.w,
+							worldOrigin.x, worldOrigin.y, worldOrigin.z,
+							scale.x, scale.y, scale.z);
+
+						for (uint32_t q = mesh.m_uiFirstQuad; q < mesh.m_uiFirstQuad + std::min(mesh.m_uiQuadCount, 5u); q++)
+						{
+							const uint32_t w0 = quads[q * 3 + 0];
+							const uint32_t w1 = quads[q * 3 + 1];
+							const uint32_t w2 = quads[q * 3 + 2];
+
+							fprintf(stderr, "  quad %u: origin=(%u,%u,%u) axis=%u sign=%u extent=(%u,%u) colour=0x%08x\n",
+								q, w0 & 0xFFu, (w0 >> 8) & 0xFFu, (w0 >> 16) & 0xFFu,
+								(w0 >> 24) & 0x3u, (w0 >> 26) & 0x1u,
+								w1 & 0xFFu, (w1 >> 8) & 0xFFu, w2);
+						}
+					}
+				}
+			}
+		}
 
 		if (s_bCoverageAudit)
 		{
@@ -561,7 +697,23 @@ void RenderSystem::Render(const GameTimer& fixedTimer)
 		{
 			s_fElapsed += fixedTimer.GetElapsedSeconds();
 
-			if (s_fElapsed >= s_fAuditAfter)
+			/* The clock is a *floor*, not the trigger: the audit fires at the
+			   first frame after it at which the world has stopped streaming.
+			 *
+			 * CHUNK_STREAMING_PLAN.md phase 9 is why. This count is the oracle
+			 * that phase accepts against, and bounding a stamp moves work into
+			 * more frames - so a sliced run reaches any given instant with less
+			 * of the level written, and the shortfall looks exactly like lost
+			 * geometry, right down to scaling with the slice size. Taking the
+			 * reading on a wall clock made the `gpu_world_occupancy` gate read
+			 * 1,400,089 of Beat1's 2,706,535 and call it a regression.
+			 *
+			 * If the world never settles the audit never fires, and the gate
+			 * fails for having measured nothing - which is the honest outcome
+			 * rather than the race the old form had. */
+			const ChunkSystem* pChunkSystem = m_pWorld->GetChunkSystem();
+
+			if (s_fElapsed >= s_fAuditAfter && (pChunkSystem == nullptr || !pChunkSystem->IsStreaming()))
 			{
 				s_bDone = true;
 				AuditVoxelRepresentation();
@@ -575,9 +727,21 @@ void RenderSystem::Render(const GameTimer& fixedTimer)
 
 	m_bShouldUpdateVoxelWorld = bShouldUpdateVoxelWorld || pCamera->IsUpdated();
 
-	m_VoxelBaker.Bake();
+	/* Budgeted since phase 5, so this returns false while renderers are still
+	   waiting for a stamp.
 
-	m_bForcedUpdate = false;
+	   **The force is cleared only when the pass actually reached the end of the
+	   list**, and getting that wrong cost an hour: a force means "re-examine
+	   every renderer", the budgeted pass stops part-way, and clearing it anyway
+	   means every renderer past the stopping point is never examined at all. It
+	   has no UpdateRequested flag of its own - the force *was* its trigger - so
+	   it is simply never stamped. On Beat2 that left a third of the level's
+	   voxels unwritten and no error anywhere: the image is missing geometry,
+	   which reads as content. */
+	m_bVoxelBakesPending = !m_VoxelBaker.Bake();
+
+	if (!m_bVoxelBakesPending)
+		m_bForcedUpdate = false;
 
 	/* DESTRUCTION_PLAN.md P16: Render runs once per rendered frame and only on
 	   one that actually ran a fixed tick (Application.cpp gates the call on
@@ -593,7 +757,7 @@ void RenderSystem::OnWorldResumed(World* pWorld)
 {
 	/* Clear voxel world, make planes and force update */
 
-	if (!m_pRenderContext->ResizeWorldBuffer())
+	if (!m_pRenderContext->ResizeWorldBuffer(m_pWorld))
 		ClearVoxels();
 
 	if (!m_pWorld->GetApplication()->IsInEditor())
@@ -650,27 +814,42 @@ void RenderSystem::OnComponentAdded(Component* pComponent)
 		   When disabled, because the bake would only clear it again - and the
 		   bake can no longer be relied on to do that, since it now skips a
 		   renderer whose recorded stamp is still current. */
-		if (m_bStarted && !pRenderer->IsChunkInstanceLoaded() && pRenderer->IsEnabled())
+		/* DYNAMIC_MODELS_PLAN.md phase 3: a dynamic renderer is never stamped,
+		   here or in VoxelBaker::Bake - it renders through VoxelModelPass
+		   (phase 2) instead, from RenderSystem::PostTick's own continuous
+		   transform. bakeData above still gets recorded (WorldOffset,
+		   LastLocation/Rotation/Scale, IsEnabled) since CheckRendererChange
+		   still reads some of those fields regardless of IsStatic; only the
+		   voxel write is skipped. */
+		/* **This used to stamp, inline, right here** - 587 renderers and 3.1 M
+		   voxels in one PreTick at a world load, and 34.3 ms of the PreTick a
+		   window transition lands in (CHUNK_STREAMING_PLAN.md phase 5). A
+		   component registering is not a good moment to write three million
+		   voxels: it happens inside World::PreTick, once per admitted renderer,
+		   with no way to stop.
+
+		   It asks for a stamp instead, and VoxelBaker::Bake does it under
+		   StreamingBudgets::VoxelBaking. The condition is unchanged and every
+		   clause of it still matters:
+
+		     - **m_bStarted**, because Start() wipes the voxel buffer and every
+		       entity is added before it - the stamp was thrown away a moment
+		       later and the forced first bake redid all of it.
+		     - **!IsChunkInstanceLoaded()**, because a chunk that came back was
+		       restored from its encoded voxels, damage included, and stamping
+		       the pristine model over them is M7 exactly.
+		     - **IsEnabled()**, because the bake would only clear it again.
+		     - **IsStatic()**, because a dynamic renderer is never stamped at
+		       all - it renders through VoxelModelPass
+		       (DYNAMIC_MODELS_PLAN.md phase 3).
+
+		   bakeData above is still recorded either way (WorldOffset,
+		   LastLocation/Rotation/Scale, IsEnabled), since CheckRendererChange
+		   reads some of those regardless of IsStatic; only the voxel write
+		   moved. */
+		if (m_bStarted && !pRenderer->IsChunkInstanceLoaded() && pRenderer->IsEnabled() && pRenderer->GetOwner()->IsStatic())
 		{
-			/* Reported separately because it is *not* inside VoxelBaker::Bake,
-			   and that gap is misleading: this is where a world load's stamping
-			   actually happens - 587 renderers and 3.1 M voxels in 399.5 ms on
-			   Valley_Path_To_Castle_Beat1 - while the Bake timer next to it
-			   reads microseconds. Quoting Bake alone makes the load look free
-			   when two thirds of the cost simply never passed through it.
-			   RENDERING_PLAN.md phase 4c. */
-			const bool bProfiling = FrameProfiler::Get().IsEnabled();
-			const std::chrono::steady_clock::time_point start =
-				bProfiling ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
-
-			uint32_t* voxels = m_VoxelBaker.Occupy(pRenderer, &pRenderer->m_BakeData);
-			pRenderer->m_BakeData.Positions = voxels;
-
-			if (bProfiling)
-			{
-				FrameProfiler::Get().Report("CPU VoxelBaker::Occupy (added)",
-					std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
-			}
+			pRenderer->RequestUpdate();
 		}
 	}
 	else if (VoxAnimator* pAnimator = dynamic_cast<VoxAnimator*>(pComponent))
@@ -697,8 +876,20 @@ void RenderSystem::OnComponentDestroyed(Component* pComponent)
 
 		if (iter != m_VoxRenderers.end())
 		{
-			/* Remove old voxels if array is valid */
-			m_VoxelBaker.Clear(*iter);
+			/* A chunk unload is the one destruction that must not erase
+			   anything. It happens *after* the replacement window has been
+			   published (CHUNK_STREAMING_PLAN.md phase 1's US_COMMIT), so this
+			   renderer's recorded positions name addresses that now hold the
+			   geometry the window slid over. Clear shifts them by the offset
+			   delta and declines to erase a cell another renderer owns - which
+			   covers models, and covers neither the ground row nor settled
+			   debris, since neither has an owner. Its colours are safe in the
+			   departing chunk's own voxels; drop the stamp and touch nothing. */
+			if ((*iter)->IsChunkUnloading())
+				m_VoxelBaker.ForgetChunkStamp(*iter);
+			else
+				m_VoxelBaker.Clear(*iter);
+
 			m_VoxRenderers.erase(iter);
 		}
 	}
@@ -887,9 +1078,23 @@ void RenderSystem::AuditVoxelRepresentation()
 			++uiDeadOwners;
 	}
 
-	fprintf(stderr, "[voxel-audit] %llu active of %u (%zu B per CPU voxel + %zu B of owner slot)\n",
+	/* Whether the number above is a *settled* number, said out loud.
+	 *
+	 * This count is the oracle CHUNK_STREAMING_PLAN.md phase 9 accepts against -
+	 * a sliced stamp must reproduce the unsliced level's occupancy exactly - and
+	 * the one way to misread it is to take it while stamping is still going on.
+	 * Bounding a stamp moves work out of the worst frame and into more frames,
+	 * so a sliced run reaches any given wall-clock instant with *less* of the
+	 * level written, and the deficit looks exactly like lost geometry: it even
+	 * scales with slice size, which is the signature the phase notes name.
+	 * Measured six seconds into a Beat2 run, this reads 3.4 M against the
+	 * unsliced 4.9 M; at twenty-five seconds both read 4,930,065. */
+	const bool bStreaming = m_pWorld->GetChunkSystem() != nullptr && m_pWorld->GetChunkSystem()->IsStreaming();
+
+	fprintf(stderr, "[voxel-audit] %llu active of %u (%zu B per CPU voxel + %zu B of owner slot)%s\n",
 	        (unsigned long long)uiActive, dims.x * dims.y * dims.z,
-	        sizeof(Voxel), sizeof(uint16_t));
+	        sizeof(Voxel), sizeof(uint16_t),
+	        bStreaming ? " - STILL STREAMING, this count is not settled" : "");
 
 	fprintf(stderr, "[voxel-audit] owners: %llu set, %llu naming a dead entity, %llu on an inactive voxel, %llu on the reserved slot (%zu distinct slots of %zu allocated)\n",
 	        (unsigned long long)uiOwners, (unsigned long long)uiDeadOwners,
@@ -986,6 +1191,45 @@ void RenderSystem::AuditRepresentationSync()
 	uint64_t uiMissingFromCPU = 0;
 	uint32_t uiFirstBad = UINT32_MAX;
 
+	/* Classification of the CPU-only population, which is what turns the count
+	   into a diagnosis. Owned means a static VoxelBaker stamp put it there;
+	   unowned and occupied means VoxelEditBatch did, which for an occupied
+	   voxel is debris a particle baked on impact. */
+	uint64_t uiCPUOnlyOwned = 0;
+	uint64_t uiCPUOnlyLoose = 0;
+	uint32_t uiCPUOnlySamples = 0;
+
+	/* The registry is keyed in level space and stores cell-local offsets - the
+	   same arithmetic as AddLooseVoxel, asked in reverse. */
+	const Vector3 v3LooseOffset = grid.GetWorldOffset();
+
+	auto isLoose = [this, &v3LooseOffset](uint32_t x, uint32_t y, uint32_t z)
+	{
+		const Vector3 v3Level = Vector3((float)x, (float)y, (float)z) + v3LooseOffset;
+
+		if (v3Level.x < 0.f || v3Level.y < 0.f || v3Level.z < 0.f)
+			return false;
+
+		const UVector3 v3Voxel((uint32_t)v3Level.x, (uint32_t)v3Level.y, (uint32_t)v3Level.z);
+
+		const uint32_t uiKey =
+			(v3Voxel.x >> k_uiLooseCellShift) |
+			((v3Voxel.y >> k_uiLooseCellShift) << 10) |
+			((v3Voxel.z >> k_uiLooseCellShift) << 20);
+
+		std::unordered_map<uint32_t, LooseVoxelCell>::const_iterator it = m_LooseVoxelCells.find(uiKey);
+
+		if (it == m_LooseVoxelCells.end())
+			return false;
+
+		const uint16_t uiOffset = static_cast<uint16_t>(
+			(v3Voxel.x & (k_uiLooseCellSize - 1)) |
+			((v3Voxel.y & (k_uiLooseCellSize - 1)) << 5) |
+			((v3Voxel.z & (k_uiLooseCellSize - 1)) << 10));
+
+		return std::binary_search(it->second.Offsets.begin(), it->second.Offsets.end(), uiOffset);
+	};
+
 	for (uint32_t z = 0; z < dims.z; ++z)
 	for (uint32_t y = 0; y < dims.y; ++y)
 	for (uint32_t x = 0; x < dims.x; ++x)
@@ -1023,7 +1267,33 @@ void RenderSystem::AuditRepresentationSync()
 		   zero: it should track roughly the voxel count of the dynamic
 		   renderers on screen, and it should come back down when they leave. */
 		if ((uiCPU >> 24) != 0 && (uiGPU >> 24) == 0)
+		{
 			++uiMissingFromGPU;
+
+			/* The count alone says a defect exists; this says which one.
+			   Ownership splits the population in two, and the two have
+			   different causes: an owned voxel was written by a static
+			   VoxelBaker stamp, an unowned one by VoxelEditBatch - which for
+			   an occupied voxel means debris a particle baked on impact. The
+			   first few coordinates are what make it findable in the level. */
+			const bool bLoose = isLoose(x, y, z);
+
+			/* Disjoint, so the three buckets sum to the total: ownership is
+			   asked first because a static stamp over a previously loose cell
+			   makes the voxel that stamp's, whatever the registry still says. */
+			if (cell.GetSlot() != VoxelOwnerVolume::k_uiNoOwnerSlot)
+				++uiCPUOnlyOwned;
+			else if (bLoose)
+				++uiCPUOnlyLoose;
+
+			if (uiCPUOnlySamples < 8)
+			{
+				++uiCPUOnlySamples;
+
+				fprintf(stderr, "[sync-audit]   CPU-only at grid (%u %u %u) colour %08x slot %u loose %d\n",
+				        x, y, z, uiCPU, cell.GetSlot(), bLoose ? 1 : 0);
+			}
+		}
 		else if ((uiCPU >> 24) == 0 && (uiGPU >> 24) != 0)
 			++uiMissingFromCPU;
 
@@ -1038,6 +1308,11 @@ void RenderSystem::AuditRepresentationSync()
 	        (unsigned long long)uiColourDisagreements, dims.x * dims.y * dims.z,
 	        (unsigned long long)uiMissingFromGPU, (unsigned long long)uiMissingFromCPU,
 	        uiFirstBad, uiBrickDisagreements, uiWordCount, stageSpan.count());
+
+	if (uiMissingFromGPU > 0)
+		fprintf(stderr, "[sync-audit] of the CPU-only voxels: %llu carry a static owner slot, %llu are registered loose debris, %llu are neither\n",
+		        (unsigned long long)uiCPUOnlyOwned, (unsigned long long)uiCPUOnlyLoose,
+		        (unsigned long long)(uiMissingFromGPU - uiCPUOnlyOwned - uiCPUOnlyLoose));
 
 	if (m_pPhysicsSystem)
 		m_pPhysicsSystem->AuditParticlePool();

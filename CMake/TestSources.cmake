@@ -31,6 +31,19 @@ set(VOXAGINE_TEST_SOURCES
     ${VOXAGINE_TEST_DIR}/Harness/DestructionRun.cpp
     ${VOXAGINE_TEST_DIR}/Harness/WorldShapes.cpp
 
+    # A whole chunk-streaming world with no GPU: a real World with no
+    # RenderSystem, real Chunks, the real serializer, and the resident window
+    # as two vectors behind IVoxelWindow.
+    ${VOXAGINE_TEST_DIR}/Harness/StreamingHarness.cpp
+
+    # A reflected entity that exists only here, so a cross-chunk link and
+    # "did gameplay tick" are expressible at all - see StreamingProbe.h.
+    ${VOXAGINE_TEST_DIR}/Harness/StreamingProbe.cpp
+
+    # A .vox read without the engine's resource stack, so a test can place a
+    # real model at a real transform - see the header.
+    ${VOXAGINE_TEST_DIR}/Harness/VoxModelFile.cpp
+
     # Voxel storage: the grid, the brick grid, the harness that models both.
     ${VOXAGINE_TEST_DIR}/VoxelStorage/VoxelGridChecks.cpp
     ${VOXAGINE_TEST_DIR}/VoxelStorage/VoxelBrickGridChecks.cpp
@@ -61,6 +74,14 @@ set(VOXAGINE_TEST_SOURCES
     ${VOXAGINE_TEST_DIR}/Destruction/Scenarios/WindowEdges.cpp
     ${VOXAGINE_TEST_DIR}/Destruction/Scenarios/RandomizedWorlds.cpp
 
+    # Chunk streaming: the window commit transaction and what survives a slide.
+    ${VOXAGINE_TEST_DIR}/Streaming/WindowCommitChecks.cpp
+    ${VOXAGINE_TEST_DIR}/Streaming/ChunkReloadChecks.cpp
+    ${VOXAGINE_TEST_DIR}/Streaming/ChunkUnloadChecks.cpp
+    ${VOXAGINE_TEST_DIR}/Streaming/EntityStreamingChecks.cpp
+    ${VOXAGINE_TEST_DIR}/Streaming/WorldStreamingChecks.cpp
+    ${VOXAGINE_TEST_DIR}/Streaming/StreamingPerf.cpp
+
     # Connectivity: which geometry is still holding itself up.
     ${VOXAGINE_TEST_DIR}/Integrity/IntegrityCheckerChecks.cpp
     ${VOXAGINE_TEST_DIR}/Integrity/IntegrityPerf.cpp
@@ -70,8 +91,16 @@ set(VOXAGINE_TEST_SOURCES
     ${VOXAGINE_TEST_DIR}/Particles/ParticleLandingChecks.cpp
     ${VOXAGINE_TEST_DIR}/Particles/ParticlesPerf.cpp
 
+    # The renderer's CPU-side decisions - the parts that are reachable without
+    # a device. The GPU integration fixture in the same directory is a separate
+    # executable and is not part of this suite.
+    ${VOXAGINE_TEST_DIR}/Rendering/ModelMeshUploadChecks.cpp
+    ${VOXAGINE_TEST_DIR}/Rendering/VoxelStampChecks.cpp
+
     # Engine-wide primitives that are not about voxels at all.
+    ${VOXAGINE_TEST_DIR}/Foundation/GameTimerChecks.cpp
     ${VOXAGINE_TEST_DIR}/Foundation/JobManagerConfigChecks.cpp
+    ${VOXAGINE_TEST_DIR}/Foundation/ReferenceManagerChecks.cpp
     ${VOXAGINE_TEST_DIR}/Foundation/DateTimeChecks.cpp
     ${VOXAGINE_TEST_DIR}/Foundation/MathUtilsChecks.cpp
     ${VOXAGINE_TEST_DIR}/Foundation/AudioDecodeChecks.cpp

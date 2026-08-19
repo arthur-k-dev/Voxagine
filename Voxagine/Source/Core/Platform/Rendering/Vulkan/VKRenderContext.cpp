@@ -2,6 +2,7 @@
 #include "VKRenderContext.h"
 
 #include "Core/Application.h"
+#include "Core/LoggingSystem/LoggingSystem.h"
 #include "Core/Platform/Platform.h"
 #include "Core/Platform/Window/SDL/SDLWindowContext.h"
 #include "Core/Settings.h"
@@ -18,6 +19,14 @@
 
 #include <cstdio>
 
+namespace
+{
+void LogVulkanStartup(Platform* pPlatform, LogLevel level, const std::string& message)
+{
+	pPlatform->GetApplication()->GetLoggingSystem().Log(level, "Vulkan", message);
+}
+}
+
 VKRenderContext::VKRenderContext(Platform* pPlatform) : RenderContext(pPlatform)
 {
 }
@@ -29,11 +38,14 @@ VKRenderContext::~VKRenderContext()
 
 bool VKRenderContext::InitializeBackend()
 {
+	m_StartupError.clear();
 	SDLWindowContext* pWindow = static_cast<SDLWindowContext*>(m_pPlatform->GetWindowContext());
 
 	if (pWindow == nullptr)
 	{
 		fprintf(stderr, "[vulkan] no window context to present to\n");
+		m_StartupError = "No SDL window context is available.";
+		LogVulkanStartup(m_pPlatform, LOGLEVEL_CRITICAL_ERROR, "Startup failed: no SDL window context.");
 		return false;
 	}
 
@@ -56,13 +68,27 @@ bool VKRenderContext::InitializeBackend()
 		bValidation = (pEnv[0] != '0');
 
 	if (!m_Device.CreateInstance(pWindow->GetRequiredInstanceExtensions(), bValidation))
+	{
+		m_StartupError = "Failed to create the Vulkan instance: " + m_Device.GetStartupError();
+		LogVulkanStartup(m_pPlatform, LOGLEVEL_CRITICAL_ERROR,
+			m_StartupError);
 		return false;
+	}
 
 	if (!pWindow->CreateSurface(m_Device.GetInstance(), &m_Surface))
+	{
+		m_StartupError = "SDL could not create a Vulkan presentation surface.";
+		LogVulkanStartup(m_pPlatform, LOGLEVEL_CRITICAL_ERROR, m_StartupError);
 		return false;
+	}
 
 	if (!m_Device.CreateDevice(m_Surface))
+	{
+		m_StartupError = "Failed to create the Vulkan device: " + m_Device.GetStartupError();
+		LogVulkanStartup(m_pPlatform, LOGLEVEL_CRITICAL_ERROR,
+			m_StartupError);
 		return false;
+	}
 
 	m_Allocator.Initialize(&m_Device);
 
@@ -72,7 +98,11 @@ bool VKRenderContext::InitializeBackend()
 	   mailbox unconditionally. See the present-mode choice in VKSwapchain. */
 	if (!m_Swapchain.Create(&m_Device, m_Surface, size.x, size.y,
 	                        m_pPlatform->GetApplication()->GetSettings().IsVSyncEnabled()))
+	{
+		m_StartupError = "Vulkan swapchain creation failed.";
+		LogVulkanStartup(m_pPlatform, LOGLEVEL_CRITICAL_ERROR, m_StartupError);
 		return false;
+	}
 
 	/* The editor shows this; it used to come from the DXGI adapter. */
 	const std::string name = m_Device.GetDeviceName();
@@ -96,8 +126,14 @@ void VKRenderContext::Initialize()
 	if (!m_bBackendReady)
 	{
 		fprintf(stderr, "[vulkan] backend initialization failed; renderer is inert\n");
+		LogVulkanStartup(m_pPlatform, LOGLEVEL_CRITICAL_ERROR,
+			"Renderer is unavailable; world loading will not start.");
 		return;
 	}
+
+	/* What the renderer is set to, before a single frame - a frame rate quoted
+	   without this says nothing now that every one of them is a setting. */
+	LogRenderSettings();
 
 	/* Decided before any command engine is created: their Initialize()
 	   reads this to decide whether to allocate query pools at all.
@@ -130,6 +166,8 @@ void VKRenderContext::Initialize()
 		if (!pEngine->Initialize())
 		{
 			fprintf(stderr, "[vulkan] command engine '%s' failed\n", info.m_Name.c_str());
+			LogVulkanStartup(m_pPlatform, LOGLEVEL_CRITICAL_ERROR,
+				"Startup failed: command engine " + info.m_Name + " could not initialize.");
 			return;
 		}
 
@@ -145,6 +183,7 @@ void VKRenderContext::Initialize()
 	   caller once DX12RenderContext was deleted, which is why the renderer
 	   only ever cleared. */
 	InitializeRenderLoop();
+	LogVulkanStartup(m_pPlatform, LOGLEVEL_MESSAGE, "Renderer initialization complete.");
 }
 
 void VKRenderContext::Deinitialize()
@@ -364,6 +403,111 @@ bool VKRenderContext::OnResize(uint32_t uiWidth, uint32_t uiHeight)
 	}
 
 	return true;
+}
+
+/* The two render settings that are image sizes rather than shader constants -
+ * RenderContext::ApplyRenderSettings says which and why. Reached from
+ * Settings::RenderQualityChanged, so it runs on any quality change and does
+ * nothing for most of them, which is cheaper than working out which changed.
+ *
+ * Every Resize below idles the device before reallocating, so this is not
+ * something to call per frame. It is called when a human moves a menu row. */
+void VKRenderContext::ApplyRenderSettings()
+{
+	if (!m_bBackendReady)
+		return;
+
+	Settings& settings = m_pPlatform->GetApplication()->GetSettings();
+
+	const float fResolutionScale = settings.GetResolutionScale();
+	const UVector2 resolution = GetRenderResolution();
+
+	for (auto& entry : m_pRenderPasses)
+	{
+		PRenderPass* pPass = entry.second.get();
+
+		if (pPass == nullptr)
+			continue;
+
+		/* ResolutionScale. The Voxel and Particle passes carry a copy of it
+		   taken at construction, and it has to be updated as well as acted on -
+		   the window-resize path above re-reads it from the pass rather than
+		   from Settings, so a stale copy would undo this on the next resize. */
+		if (pPass->GetData().m_bFollowsResolutionScale)
+		{
+			pPass->SetRenderScale(fResolutionScale);
+
+			const UVector2 target(
+				static_cast<uint32_t>(resolution.x * fResolutionScale),
+				static_cast<uint32_t>(resolution.y * fResolutionScale));
+
+			pPass->Resize(target);
+
+			/* Logged for the same reason VKRenderPass logs the size it creates
+			   its attachments at: a pass time is only comparable against another
+			   if you know how many pixels each was. A resolution change that
+			   silently did not take is indistinguishable from one that did and
+			   bought nothing, and both look like "the setting does nothing". */
+			printf("[render] pass '%s' resized to %ux%u (scale %.3f)\n",
+			       pPass->GetData().m_Name.c_str(), target.x, target.y, fResolutionScale);
+		}
+	}
+
+	/* ShadowQuality, as the size of the map. Not skipped at SHQ_OFF: the pass
+	   is simply not drawn in that mode and the target it is not drawing into
+	   should be the small one.
+	 *
+	 * All three sun shadow targets, not just the world one - DYNAMIC_MODELS_PLAN.md
+	 * phase 4. SunShadowCombine.ps.hlsl samples "Sun Shadow" and "Sun Shadow
+	 * Models" texel for texel and only exists when shadows are enabled in the
+	 * first place, so the three have to stay the same size as each other or
+	 * the combine reads the wrong texels - and VoxelPass binds the combine
+	 * pass's own target as its shadow map, so that one has to resize too. */
+	for (const char* pShadowPassName : { "Sun Shadow", "Sun Shadow Models", "Sun Shadow Combine" })
+	{
+		auto shadowEntry = m_pRenderPasses.find(pShadowPassName);
+
+		if (shadowEntry == m_pRenderPasses.end() || shadowEntry->second == nullptr)
+			continue;
+
+		const uint32_t uiResolution = settings.GetSunShadowResolution();
+
+		shadowEntry->second->Resize(UVector2(uiResolution, uiResolution));
+
+		printf("[render] pass '%s' resized to %ux%u\n", pShadowPassName, uiResolution, uiResolution);
+	}
+
+	LogRenderSettings();
+}
+
+/* One line saying what the renderer is actually doing, on every change and once
+   at startup.
+ *
+ * It exists because a frame rate is meaningless without it. Every one of these
+ * is the player's to change now, so "13 fps" and "60 fps" can be the same build,
+ * the same device and the same scene - and on a phone the log is the only way to
+ * ask what a setting ended up as, since there is no console and the answer lives
+ * three layers down in PlayerPrefs. */
+void VKRenderContext::LogRenderSettings() const
+{
+	Settings& settings = m_pPlatform->GetApplication()->GetSettings();
+
+	static const char* const k_pShadow[] = { "off", "hard", "soft", "sharp" };
+	static const char* const k_pAmbient[] = { "off", "simple", "cone" };
+
+	const uint32_t uiShadow = static_cast<uint32_t>(settings.GetShadowQuality());
+	const uint32_t uiAmbient = static_cast<uint32_t>(settings.GetAmbientQuality());
+
+	printf("[render] shadows=%s (map %u) ao=%s bounce=%s reflections=%s fxaa=%s "
+	       "scale=%.2f vsync=%s\n",
+	       uiShadow < 4 ? k_pShadow[uiShadow] : "?",
+	       settings.GetSunShadowResolution(),
+	       uiAmbient < 3 ? k_pAmbient[uiAmbient] : "?",
+	       settings.IsBounceLightEnabled() ? "on" : "off",
+	       settings.IsReflectionEnabled() ? "on" : "off",
+	       settings.IsFXAAEnabled() ? "on" : "off",
+	       settings.GetResolutionScale(),
+	       settings.IsVSyncEnabled() ? "on" : "off");
 }
 
 void VKRenderContext::LoadShader(ShaderReference* pShaderReference)

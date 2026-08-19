@@ -2,7 +2,6 @@
 #include "VKTextureManager.h"
 
 #include "Core/Platform/Rendering/Vulkan/VKCommandEngine.h"
-#include "Core/Platform/Rendering/Vulkan/VKPassBindings.h"
 #include "Core/Platform/Rendering/Vulkan/VKRenderContext.h"
 #include "Core/Resources/Formats/TextureReference.h"
 
@@ -10,42 +9,40 @@
 
 uint32_t VKTextureManager::AcquireID()
 {
-	uint32_t uiID;
-
 	if (!m_FreeIDs.empty())
 	{
-		uiID = m_FreeIDs.back();
+		const uint32_t uiReused = m_FreeIDs.back();
 		m_FreeIDs.pop_back();
-	}
-	else
-	{
-		uiID = m_uiNextID++;
+
+		return uiReused;
 	}
 
-	/* The ID is a descriptor array index and the shader indexes the array with
-	   it unconditionally, so running off the end is not a missing texture but
-	   an out-of-bounds descriptor read - which hangs the GPU with no
-	   validation error to explain it. */
-	if (uiID >= VKPassBinding::m_uiBindlessCapacity)
-	{
-		static bool s_bWarned = false;
-
-		if (!s_bWarned)
-		{
-			s_bWarned = true;
-			fprintf(stderr, "[vulkan] out of bindless texture slots (%u); textures beyond this will not render\n",
-			        VKPassBinding::m_uiBindlessCapacity);
-		}
-
-		return UINT32_MAX;
-	}
-
-	return uiID;
+	/* No ceiling at m_uiBindlessCapacity any more, and that is the point of
+	   the change rather than an oversight.
+	 *
+	 * This used to refuse any ID past 96 because the ID *was* the descriptor
+	 * array index: the shader indexed the bindless array with whatever ID a
+	 * sprite carried, so an ID past the end was an out-of-bounds descriptor
+	 * read rather than a missing texture. 96 is a Metal limit on A12Z and
+	 * cannot be raised, so this project's 133 shipped textures simply could
+	 * not all be loaded at once - the 97th onwards got UINT32_MAX and never
+	 * rendered, which is what garbled in-game text.
+	 *
+	 * The array is now indexed by a per-frame slot instead
+	 * (RenderContext::PackBindlessTextures), so an ID is just an identity and
+	 * the only thing bounded is how many *distinct textures one frame draws*.
+	 * IDs may climb as far as the content needs.
+	 *
+	 * Still reused rather than handed out monotonically: m_pViews is keyed by
+	 * ID, so recycling keeps the range dense and the packer's scratch lookup -
+	 * a vector indexed by ID - proportional to the live set rather than to how
+	 * many textures have ever been loaded this session. */
+	return m_uiNextID++;
 }
 
 void VKTextureManager::ReleaseID(uint32_t uiID)
 {
-	if (uiID < VKPassBinding::m_uiBindlessCapacity)
+	if (uiID != UINT32_MAX)
 		m_FreeIDs.push_back(uiID);
 }
 

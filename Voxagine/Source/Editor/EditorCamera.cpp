@@ -5,6 +5,7 @@
 #include "Core/Application.h"
 #include "Core/ECS/Systems/Physics/HitResult.h"
 
+#include "Core/Platform/Input/SDL/SDLEventInput.h"
 #include "Core/Platform/Input/Temp/InputContextNew.h"
 #include "Core/ECS/World.h"
 #include <Core/Platform/Platform.h>
@@ -14,6 +15,13 @@
 #include "Editor/EditorWorld.h"
 #include "Core/ECS/Systems/Physics/VoxelGrid.h"
 #include "Core/ECS/Systems/Chunk/ChunkSystem.h"
+#include "Core/Platform/Rendering/RenderDefines.h"
+
+/* For the render resolution, which the pan needs to convert pixels of finger
+   movement into world units at the focus distance. */
+#include "Core/Platform/Rendering/RenderContext.h"
+
+#include <cmath>
 
 EditorCamera::EditorCamera(World * pWorld, Editor* pEditor)
 	: Camera(pWorld)
@@ -73,14 +81,65 @@ void EditorCamera::PostTick(float fDelta)
 	
 	m_AccumulateMouseDelta += m_pInputContext->GetMousePositionDelta();
 	m_fAccumulateScrollDelta += m_pInputContext->GetMouseWheelDelta();
-	
+
+	/* Touch gestures accumulate on the same schedule as the mouse, for the
+	   same reason: this runs once per frame and PostFixedTick may run any
+	   number of times, so a gesture read there directly would be applied twice
+	   in one frame or not at all. See SDLEventInput.h for the mapping. */
+	const SDLEventInput::Gesture& gesture = SDLEventInput::Get().GetGesture();
+
+	/* Routed by finger count here rather than in PostFixedTick, because the
+	   count can change between the two and a drag accumulated as an orbit must
+	   not be spent as a pan. */
+	if (gesture.Fingers == 2)
+		m_AccumulateOrbitDelta += gesture.Drag;
+	else if (gesture.Fingers == 3)
+		m_AccumulatePanDelta += gesture.Drag;
+
+	/* Multiplicative, because it is a ratio: two frames that each spread the
+	   fingers by 10% are a 21% spread, not 20%. */
+	m_fAccumulatePinchScale *= gesture.PinchScale;
 }
 
 void EditorCamera::PostFixedTick(const GameTimer& timer)
 {
 	Entity::PostFixedTick(timer);
 
-	GetWorld()->GetChunkSystem()->SetCameraLoadOffset(Vector3(0.f));
+	/* The resident window follows what the camera is *looking at*, not where it
+	   is. An editor camera is pitched down and set back, so centring the window
+	   on its position puts the three loaded chunks behind and below the ground
+	   you are actually working on - which is why chunks appeared to arrive late
+	   here and not in the game. The game does the same thing by another route:
+	   CameraMultiplayer's load offset is the players' midpoint minus the camera
+	   position, so its window has always been centred on the focus.
+
+	   Clamped to one chunk, because the offset moves the window and not the
+	   camera: a shallow look angle projects the ground hit hundreds of units
+	   away, and past a chunk and a half the camera itself falls outside the 3x3
+	   window - where picking and physics have nothing resident to hit. */
+	Vector3 chunkLoadOffset(0.f);
+
+	const Vector3 cameraPosition = GetTransform()->GetPosition();
+	const Vector3 cameraForward = GetTransform()->GetForward();
+
+	if (std::abs(cameraForward.y) > 0.0001f)
+	{
+		const float fGroundDistance = (R_GROUND_PLANE_HEIGHT - cameraPosition.y) / cameraForward.y;
+
+		if (fGroundDistance > 0.f && std::isfinite(fGroundDistance))
+		{
+			chunkLoadOffset = cameraForward * fGroundDistance;
+			chunkLoadOffset.y = 0.f;
+
+			const UVector2 chunkSize = GetWorld()->GetChunkSystem()->GetChunkSize();
+			const float fMaxOffset = static_cast<float>(std::min(chunkSize.x, chunkSize.y));
+
+			if (glm::length(chunkLoadOffset) > fMaxOffset)
+				chunkLoadOffset = glm::normalize(chunkLoadOffset) * fMaxOffset;
+		}
+	}
+
+	GetWorld()->GetChunkSystem()->SetCameraLoadOffset(chunkLoadOffset);
 
 	if (m_bFrameLock || GetEditor()->IsModifyingSelectedEntityTransform())
 	{
@@ -88,6 +147,9 @@ void EditorCamera::PostFixedTick(const GameTimer& timer)
 		Recalculate();
 		m_AccumulateMouseDelta = Vector2(0.f);
 		m_fAccumulateScrollDelta = 0.f;
+		m_AccumulateOrbitDelta = Vector2(0.f);
+		m_AccumulatePanDelta = Vector2(0.f);
+		m_fAccumulatePinchScale = 1.f;
 		return;
 	}
 
@@ -121,12 +183,37 @@ void EditorCamera::PostFixedTick(const GameTimer& timer)
 		Vector2 mouseDelta = m_AccumulateMouseDelta;
 		m_AccumulateMouseDelta = Vector2(0.f);
 
-		const bool bShouldUpdate = fMouseWheelDelta != 0 || ((bRightClicked) && (glm::length(mouseDelta) != 0 || glm::length(CamerTranslation) != 0));
+		/* Touch, drained here whether or not it is used, so a gesture made
+		   over an editor window does not queue up and fire the moment the
+		   cursor leaves it. */
+		const Vector2 orbitDelta = m_AccumulateOrbitDelta;
+		const Vector2 panDelta = m_AccumulatePanDelta;
+		const float fPinchScale = m_fAccumulatePinchScale;
+
+		m_AccumulateOrbitDelta = Vector2(0.f);
+		m_AccumulatePanDelta = Vector2(0.f);
+		m_fAccumulatePinchScale = 1.f;
+
+		/* Same gate the mouse paths use below: gestures over the panels belong
+		   to the panels. A two-finger drag there is a scroll (SDLImPlatform),
+		   not an orbit. */
+		const bool bTouchAllowed =
+			!GetEditor()->IsMouseHoveringEditorWindows() &&
+			!GetEditor()->IsModifyingSelectedEntityTransform();
+
+		const bool bTouching = bTouchAllowed &&
+			(glm::length(orbitDelta) != 0.f || glm::length(panDelta) != 0.f ||
+			 fPinchScale != 1.f);
+
+		const bool bShouldUpdate = fMouseWheelDelta != 0 || bTouching || ((bRightClicked) && (glm::length(mouseDelta) != 0 || glm::length(CamerTranslation) != 0));
 
 		if (!bShouldUpdate) {
 			Recalculate();
 			return;
 		}
+
+		if (bTouching)
+			ApplyTouchGesture(orbitDelta, panDelta, fPinchScale);
 
 		/* Translate position on mouse scroll */
 		if (fMouseWheelDelta != 0 && !GetEditor()->IsMouseHoveringEditorWindows() && !GetEditor()->IsModifyingSelectedEntityTransform())
@@ -162,6 +249,101 @@ void EditorCamera::PostFixedTick(const GameTimer& timer)
 		ApplyPositionalCorrection();
 		Recalculate();
 	}
+}
+
+float EditorCamera::GetFocusDistance() const
+{
+	/* How far away the thing being looked at is - which is what a gesture has
+	 * to be measured against, because a fixed world-units-per-pixel is exactly
+	 * the wrong behaviour at two different scales. Up close it flies past
+	 * everything; far out it barely moves, and the camera feels stuck.
+	 *
+	 * Where the view ray meets the ground is a good enough answer and costs
+	 * nothing: this is a voxel world sitting on a plane, and an editor camera
+	 * that is clamped above it (ApplyPositionalCorrection). A raycast into the
+	 * scene would be more accurate and would also make the zoom speed jump
+	 * whenever the ray happened to cross an edge.
+	 *
+	 * Looking level or upwards there is no intersection in front, so the
+	 * camera's own height stands in - it is the only scale available and it is
+	 * the right order of magnitude. */
+	const Vector3 position = GetTransform()->GetPosition();
+	const Vector3 forward = GetTransform()->GetForward();
+
+	float fDistance = position.y;
+
+	if (forward.y < -k_fMinDownwardComponent)
+		fDistance = position.y / -forward.y;
+
+	return glm::clamp(fDistance, k_fMinFocusDistance, k_fMaxFocusDistance);
+}
+
+void EditorCamera::ApplyTouchGesture(const Vector2& orbitDelta, const Vector2& panDelta,
+                                     float fPinchScale)
+{
+	/* The touch equivalents of what the mouse can do to this camera, and
+	 * deliberately not routed through synthetic mouse state to get there.
+	 * Faking a held right button would also fake it for the picking raycast,
+	 * the gizmo and every ImGui context menu.
+	 *
+	 * Direct manipulation rather than rates: unlike the mouse paths above,
+	 * none of this is multiplied by deltaTime. The world moves with the
+	 * fingers and stops when they stop, which is what makes a gesture feel
+	 * attached to the screen rather than driven by it. */
+	const float fFocusDistance = GetFocusDistance();
+
+	if (orbitDelta != Vector2(0.f))
+	{
+		/* Degrees per pixel, and deliberately not scaled by distance: turning
+		   your head is the same gesture wherever you are standing. */
+		const Vector2 rotation = orbitDelta * m_fTouchOrbitSpeed;
+
+		GetTransform()->Rotate(Vector3(0, rotation.x, 0));
+		GetTransform()->LocalRotate(Vector3(rotation.y, 0, 0));
+	}
+
+	if (panDelta != Vector2(0.f))
+	{
+		/* One-to-one with the fingers: the point under them should stay under
+		   them. A pixel covers (2 * distance * tan(fov/2) / height) world
+		   units at the focus distance, which is the exact conversion and the
+		   reason this needs the field of view rather than a tuned constant.
+		 *
+		 * Negated on both axes so the scene follows the fingers: dragging left
+		   moves the camera right, which reads as pushing the world left. */
+		const float fHalfFov = glm::radians(GetFieldOfView()) * 0.5f;
+		const float fViewportHeight =
+			static_cast<float>(GetWorld()->GetApplication()->GetPlatform()
+				.GetRenderContext()->GetRenderResolution().y);
+
+		const float fWorldPerPixel = fViewportHeight > 0.f
+			? (2.f * fFocusDistance * std::tan(fHalfFov)) / fViewportHeight
+			: 0.f;
+
+		const Vector3 movement =
+			GetTransform()->GetRight() * (-panDelta.x * fWorldPerPixel) +
+			GetTransform()->GetUp() * (panDelta.y * fWorldPerPixel);
+
+		GetTransform()->Translate(movement);
+	}
+
+	if (fPinchScale != 1.f)
+	{
+		/* Spreading the fingers by a factor brings the focus point that much
+		 * closer - pinch as a ratio, which is what it is everywhere else and
+		 * what makes it correct at every distance for free. Doubling the
+		 * finger separation halves the distance to what you are looking at,
+		 * whether that was two metres or two hundred.
+		 *
+		 * This is the part a pixels-per-unit zoom cannot do: it has one speed,
+		 * so it is either useless far out or uncontrollable up close. */
+		const float fClamped = glm::clamp(fPinchScale, k_fMinPinchStep, k_fMaxPinchStep);
+		const float fMovement = (fFocusDistance - fFocusDistance / fClamped) * m_fTouchZoomSpeed;
+
+		GetTransform()->Translate(GetTransform()->GetForward() * fMovement);
+	}
+
+	ApplyPositionalCorrection();
 }
 
 void EditorCamera::LockThisFrame(bool bLock)

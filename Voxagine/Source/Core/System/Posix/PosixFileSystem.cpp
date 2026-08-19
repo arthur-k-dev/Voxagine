@@ -8,7 +8,7 @@
 #include <cinttypes>
 #include <cstring>
 
-uint32_t PosixFileSystem::m_FileHandleCtr = INVALID_FH;
+std::atomic<uint32_t> PosixFileSystem::m_FileHandleCtr{ INVALID_FH };
 
 void PosixFileSystem::Initialize()
 {
@@ -17,12 +17,16 @@ void PosixFileSystem::Initialize()
 
 void PosixFileSystem::Deinitialize()
 {
+	std::lock_guard<std::mutex> lock(m_FileMapMutex);
+
 	std::unordered_map<FH, FileInfo>::iterator it;
 
 	for (it = m_FileMap.begin(); it != m_FileMap.end(); it++)
 	{
 		fclose(it->second.pFile);
 	}
+
+	m_FileMap.clear();
 
 	printf("POSIX file system Deinitialized\n");
 }
@@ -50,7 +54,11 @@ FH PosixFileSystem::OpenFile(const char* pFilePath, FSOpenFlags openFlags)
 
 	//Insert opened file to file handle storage
 	FH fileHandle = ++m_FileHandleCtr;
-	m_FileMap[fileHandle] = FileInfo(pFile, pFilePath, openFlags);
+
+	{
+		std::lock_guard<std::mutex> lock(m_FileMapMutex);
+		m_FileMap[fileHandle] = FileInfo(pFile, pFilePath, openFlags);
+	}
 
 	//Return file handle for future user operations
 	return fileHandle;
@@ -58,10 +66,22 @@ FH PosixFileSystem::OpenFile(const char* pFilePath, FSOpenFlags openFlags)
 
 FSResult PosixFileSystem::CloseFile(FH fileHandle)
 {
-	if (IsHandleValid(fileHandle))
+	FILE* pFile = nullptr;
+
 	{
-		fclose(m_FileMap[fileHandle].pFile);
-		m_FileMap.erase(fileHandle);
+		std::lock_guard<std::mutex> lock(m_FileMapMutex);
+
+		const std::unordered_map<FH, FileInfo>::iterator iter = m_FileMap.find(fileHandle);
+		if (iter != m_FileMap.end())
+		{
+			pFile = iter->second.pFile;
+			m_FileMap.erase(iter);
+		}
+	}
+
+	if (pFile != nullptr)
+	{
+		fclose(pFile);
 		return FSR_OK;
 	}
 
@@ -71,10 +91,11 @@ FSResult PosixFileSystem::CloseFile(FH fileHandle)
 
 FSResult PosixFileSystem::Read(FH fileHandle, void* pReadBuff, FSize elementSize, FSize length, FSize* pBytesRead)
 {
-	if (IsHandleValid(fileHandle))
+	FileInfo fileInfo;
+	if (TryGetFile(fileHandle, fileInfo))
 	{
-		FSOpenFlags flags = m_FileMap[fileHandle].OpenFlags;
-		FILE* pFile = m_FileMap[fileHandle].pFile;
+		FSOpenFlags flags = fileInfo.OpenFlags;
+		FILE* pFile = fileInfo.pFile;
 
 		if (flags & FSOpenFlags::FSOF_READ || flags & FSOpenFlags::FSOF_RDWR)
 		{
@@ -102,10 +123,11 @@ FSResult PosixFileSystem::Read(FH fileHandle, void* pReadBuff, FSize elementSize
 
 FSResult PosixFileSystem::Write(FH fileHandle, const void* pWriteBuff, FSize elementSize, FSize length)
 {
-	if (IsHandleValid(fileHandle))
+	FileInfo fileInfo;
+	if (TryGetFile(fileHandle, fileInfo))
 	{
-		FSOpenFlags flags = m_FileMap[fileHandle].OpenFlags;
-		FILE* pFile = m_FileMap[fileHandle].pFile;
+		FSOpenFlags flags = fileInfo.OpenFlags;
+		FILE* pFile = fileInfo.pFile;
 
 		if (flags & FSOpenFlags::FSOF_WRITE || flags & FSOpenFlags::FSOF_RDWR)
 		{
@@ -123,10 +145,11 @@ FSResult PosixFileSystem::Write(FH fileHandle, const void* pWriteBuff, FSize ele
 
 FSize PosixFileSystem::GetFileSize(FH fileHandle)
 {
-	if (IsHandleValid(fileHandle))
+	FileInfo fileInfo;
+	if (TryGetFile(fileHandle, fileInfo))
 	{
 		//Get file size
-		FILE* pFile = m_FileMap[fileHandle].pFile;
+		FILE* pFile = fileInfo.pFile;
 		fseek(pFile, 0, SEEK_END);
 		FSize size = ftell(pFile);
 		rewind(pFile);
@@ -140,9 +163,10 @@ FSize PosixFileSystem::GetFileSize(FH fileHandle)
 
 FSize PosixFileSystem::FileTell(FH fileHandle)
 {
-	if (IsHandleValid(fileHandle))
+	FileInfo fileInfo;
+	if (TryGetFile(fileHandle, fileInfo))
 	{
-		FILE* pFile = m_FileMap[fileHandle].pFile;
+		FILE* pFile = fileInfo.pFile;
 		return ftell(pFile);
 	}
 
@@ -152,9 +176,10 @@ FSize PosixFileSystem::FileTell(FH fileHandle)
 
 FSResult PosixFileSystem::FileSeek(FH fileHandle, FSize offset, FSSeekOrigin origin, FSize* pSeekPos)
 {
-	if (IsHandleValid(fileHandle))
+	FileInfo fileInfo;
+	if (TryGetFile(fileHandle, fileInfo))
 	{
-		FILE* pFile = m_FileMap[fileHandle].pFile;
+		FILE* pFile = fileInfo.pFile;
 
 		/* FSSeekOrigin is an engine enum; do not assume it matches SEEK_*. */
 		int iOrigin = SEEK_SET;
@@ -226,5 +251,18 @@ std::string PosixFileSystem::FlagsToOpenMode(FSOpenFlags openFlags)
 
 bool PosixFileSystem::IsHandleValid(FH fileHandle)
 {
+	std::lock_guard<std::mutex> lock(m_FileMapMutex);
 	return m_FileMap.find(fileHandle) != m_FileMap.end();
+}
+
+bool PosixFileSystem::TryGetFile(FH fileHandle, FileInfo& fileInfo) const
+{
+	std::lock_guard<std::mutex> lock(m_FileMapMutex);
+
+	const std::unordered_map<FH, FileInfo>::const_iterator iter = m_FileMap.find(fileHandle);
+	if (iter == m_FileMap.end())
+		return false;
+
+	fileInfo = iter->second;
+	return true;
 }

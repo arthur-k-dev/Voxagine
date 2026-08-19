@@ -47,6 +47,10 @@ public:
 	uint32_t GetPresentQueueFamily() const { return m_uiPresentFamily; }
 
 	const std::string& GetDeviceName() const { return m_DeviceName; }
+	/* Set by the failed creation stage. The render context reports this through
+	   LoggingSystem, so the capability report is equally available on every
+	   platform. */
+	const std::string& GetStartupError() const { return m_StartupError; }
 
 	/* RENDERING_PLAN.md Phase 0: whether vkCmdWriteTimestamp2 is usable on
 	   this device's graphics/compute queues, and the nanoseconds-per-tick
@@ -75,6 +79,7 @@ private:
 	uint32_t m_uiPresentFamily = UINT32_MAX;
 
 	std::string m_DeviceName;
+	std::string m_StartupError;
 	bool m_bValidationEnabled = false;
 
 	bool m_bTimestampsSupported = false;

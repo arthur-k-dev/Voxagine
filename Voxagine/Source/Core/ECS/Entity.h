@@ -1,6 +1,7 @@
 #pragma once
 #include <vector>
 #include "Core/Event.h"
+#include "Core/RTTRGlmTraits.h"
 
 #include <rttr/type>
 #include <rttr/registration_friend> 

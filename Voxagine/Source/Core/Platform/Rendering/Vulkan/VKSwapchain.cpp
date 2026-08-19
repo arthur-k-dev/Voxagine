@@ -1,6 +1,7 @@
 #include "VKSwapchain.h"
 
 #include "VKResource.h"
+#include "VKLegacySync.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -355,7 +356,7 @@ void VKSwapchain::TransitionImage(VkCommandBuffer cmd, VkImage image,
 	dependency.imageMemoryBarrierCount = 1;
 	dependency.pImageMemoryBarriers = &barrier;
 
-	vkCmdPipelineBarrier2(cmd, &dependency);
+	VKCmdPipelineBarrierLegacy(cmd, barrier);
 }
 
 bool VKSwapchain::ClearAndPresent(const float a_fColor[4])
@@ -590,7 +591,7 @@ bool VKSwapchain::BlitAndPresent(VKResource* pSource, VkSemaphore waitTimeline, 
 		clearDependency.imageMemoryBarrierCount = 1;
 		clearDependency.pImageMemoryBarriers = &clearBarrier;
 
-		vkCmdPipelineBarrier2(cmd, &clearDependency);
+		VKCmdPipelineBarrierLegacy(cmd, clearBarrier);
 	}
 
 	VkImageBlit region{};
@@ -614,45 +615,33 @@ bool VKSwapchain::BlitAndPresent(VKResource* pSource, VkSemaphore waitTimeline, 
 
 	vkEndCommandBuffer(cmd);
 
-	/* Two waits: the acquire (binary) and the render engine's timeline, so the
-	   blit cannot read a half-drawn frame. */
-	VkSemaphoreSubmitInfo waits[2]{};
-	waits[0].sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
-	waits[0].semaphore = frame.m_ImageAvailable;
-
-	/* ALL_COMMANDS, not BLIT. A semaphore wait only orders stages at and after
-	   the wait stage, and the first thing done to the acquired image is not the
-	   blit - it is the TRANSFER_DST layout transition, whose barrier uses
-	   TOP_OF_PIPE as its source scope and so runs before BLIT. Waiting at BLIT
-	   therefore left that transition free to execute before the presentation
-	   engine had finished with the image, which sync validation reports as
-	   "vkCmdPipelineBarrier2 writes to VkImage ... previously accessed by
-	   vkAcquireNextImageKHR". Widening the wait is free here: this submission
-	   does nothing but transition, clear and blit. */
-	waits[0].stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
-
-	waits[1].sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
-	waits[1].semaphore = waitTimeline;
-	waits[1].value = uiWaitValue;
-	waits[1].stageMask = VK_PIPELINE_STAGE_2_BLIT_BIT;
-
-	VkCommandBufferSubmitInfo commandInfo{};
-	commandInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
-	commandInfo.commandBuffer = cmd;
-
-	VkSemaphoreSubmitInfo signalInfo{};
-	signalInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
-	signalInfo.semaphore = m_RenderFinished[uiImageIndex];
-	signalInfo.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
-
-	VkSubmitInfo2 submitInfo{};
-	submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
-	submitInfo.waitSemaphoreInfoCount = waitTimeline != VK_NULL_HANDLE ? 2 : 1;
-	submitInfo.pWaitSemaphoreInfos = waits;
-	submitInfo.commandBufferInfoCount = 1;
-	submitInfo.pCommandBufferInfos = &commandInfo;
-	submitInfo.signalSemaphoreInfoCount = 1;
-	submitInfo.pSignalSemaphoreInfos = &signalInfo;
+	/* Wait for the acquired image and, when rendering used a command engine,
+	   for its timeline value. Legacy submission carries timeline values in its
+	   pNext structure and works on Vulkan 1.2/MoltenVK as well as 1.3. */
+	VkSemaphore waits[2] = { frame.m_ImageAvailable, waitTimeline };
+	VkPipelineStageFlags waitStages[2] = {
+		VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+		VK_PIPELINE_STAGE_TRANSFER_BIT
+	};
+	uint64_t waitValues[2] = { 0, uiWaitValue };
+	const uint32_t waitCount = waitTimeline != VK_NULL_HANDLE ? 2 : 1;
+	const uint64_t signalValue = 0;
+	VkTimelineSemaphoreSubmitInfo timelineInfo{};
+	timelineInfo.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+	timelineInfo.waitSemaphoreValueCount = waitCount;
+	timelineInfo.pWaitSemaphoreValues = waitValues;
+	timelineInfo.signalSemaphoreValueCount = 1;
+	timelineInfo.pSignalSemaphoreValues = &signalValue;
+	VkSubmitInfo submitInfo{};
+	submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+	submitInfo.pNext = &timelineInfo;
+	submitInfo.waitSemaphoreCount = waitCount;
+	submitInfo.pWaitSemaphores = waits;
+	submitInfo.pWaitDstStageMask = waitStages;
+	submitInfo.commandBufferCount = 1;
+	submitInfo.pCommandBuffers = &cmd;
+	submitInfo.signalSemaphoreCount = 1;
+	submitInfo.pSignalSemaphores = &m_RenderFinished[uiImageIndex];
 
 	VkPresentInfoKHR presentInfo{};
 	presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
@@ -669,7 +658,7 @@ bool VKSwapchain::BlitAndPresent(VKResource* pSource, VkSemaphore waitTimeline, 
 		   texture shares this queue. */
 		std::lock_guard<std::mutex> lock(m_pDevice->GetQueueMutex());
 
-		if (vkQueueSubmit2(m_pDevice->GetGraphicsQueue(), 1, &submitInfo, frame.m_InFlight) != VK_SUCCESS)
+		if (vkQueueSubmit(m_pDevice->GetGraphicsQueue(), 1, &submitInfo, frame.m_InFlight) != VK_SUCCESS)
 		{
 			fprintf(stderr, "[vulkan] blit submit failed\n");
 			return false;

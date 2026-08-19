@@ -5,7 +5,9 @@
 #include "Core/ECS/Systems/Physics/PhysicsSystem.h"
 
 #include "Core/ECS/Components/VoxRenderer.h"
+#include "Core/ECS/Systems/Chunk/StreamingCounters.h"
 #include "Core/ECS/Systems/Rendering/VoxelStamp.h"
+#include "Core/ECS/Systems/Chunk/StreamingBudgets.h"
 #include "Core/Resources/Formats/VoxModel.h"
 #include "Core/Application.h"
 #include "Core/Platform/Rendering/FrameProfiler.h"
@@ -27,7 +29,7 @@ void VoxelBaker::Init(RenderSystem* pRenderSystem, PhysicsSystem* pPhysicsSystem
 	m_pRenderContext = m_pRenderSystem->m_pRenderContext;
 }
 
-void VoxelBaker::Bake()
+bool VoxelBaker::Bake()
 {
 	/* RENDERING_PLAN.md Phase 0: the known main-thread cost this pass
 	   measures. Guarded so a disabled profiler pays nothing but this one
@@ -40,9 +42,85 @@ void VoxelBaker::Bake()
 
 	m_fRepairMilliseconds = 0.0;
 
+	/* DYNAMIC_MODELS_PLAN.md phase 0. The whole plan turns on how much of this
+	   pass is spent re-voxelizing things that move, and the aggregate counter
+	   above cannot say - a world load's static stamping and a walking
+	   character's per-frame re-stamp land in the same number.
+
+	   Counted as well as timed, and the counts are the ones to quote: they are
+	   exact and machine-independent, so they are valid on a busy machine and
+	   comparable between two builds. See FrameProfiler::ReportCount. */
+	double fStaticMs = 0.0;
+	double fDynamicMs = 0.0;
+
+	uint32_t uiStaticRenderers = 0;
+	uint32_t uiDynamicRenderers = 0;
+
+	uint32_t uiStaticVoxels = 0;
+	uint32_t uiDynamicVoxels = 0;
+
+	/* Phase 5. Whatever this pass does not reach keeps its flags and is picked
+	   up by the next one - see StreamingBudgets::VoxelBaking for why that is
+	   the resumption mechanism rather than a cursor. */
+	StreamingBudget::Scope budget(StreamingBudgets::Get().VoxelBaking);
+
+	bool bPending = false;
+
 	for (VoxRenderer* pRenderer : m_pRenderSystem->m_VoxRenderers)
 	{
+		/* DYNAMIC_MODELS_PLAN.md phase 3. A dynamic renderer is never stamped -
+		   RenderSystem::OnComponentAdded skips its initial Occupy the same
+		   way - so there is nothing here for it: no clear, no repair scan,
+		   none of the swap/generation bookkeeping below, which exists only to
+		   answer "does the voxel buffer still hold what was stamped" for a
+		   renderer that was in fact stamped. It renders through
+		   VoxelModelPass now (phase 2). Left with everything false/reset so a
+		   renderer that is *later* made static starts clean rather than
+		   inheriting a stale Updated flag. */
+		if (!pRenderer->GetOwner()->IsStatic())
+		{
+			pRenderer->m_BakeData.Updated = false;
+			pRenderer->m_bUpdateRequested = false;
+			continue;
+		}
+
 		bool bEnabled = pRenderer->IsEnabled();
+
+		/* Phase 9. A stamp that ran out of budget is half in the buffer, and the
+		   only thing that may happen to it is being finished. Every skip test
+		   below asks whether re-stamping this renderer would change anything,
+		   and for a half-stamped one the answer is "yes, the rest of the model" -
+		   which none of them can see, because the stamp key and the generation
+		   describe the stamp that is *running*. Clearing it again is worse still:
+		   the clear erases what has already been written and the resumed walk
+		   never goes back for it, which is exactly how the first attempt at this
+		   phase drew a level 580,000 voxels short.
+
+		   The partial is only meaningful while the buffer still holds it and the
+		   grid still means the same thing. A swap or a window slide voids it, and
+		   then the whole stamp has to start again - through the ordinary path,
+		   with an update requested so that nothing below skips a renderer whose
+		   voxels are half written. */
+		bool bResuming = false;
+
+		if (pRenderer->m_BakeData.OccupyInProgress)
+		{
+			/* bEnabled is part of it: a renderer disabled mid-stamp must reach
+			   the clear below rather than be finished, or the half of it that is
+			   already in the buffer stays there with nothing left to erase it. */
+			bResuming = bEnabled &&
+				pRenderer->m_BakeData.Generation == m_pRenderContext->GetVoxelGeneration() &&
+				pRenderer->m_BakeData.WorldOffset == grid.GetWorldOffset() &&
+				ComputeStampKey(pRenderer) == pRenderer->m_BakeData.Stamp;
+
+			if (!bResuming)
+			{
+				pRenderer->m_BakeData.OccupyInProgress = false;
+				pRenderer->RequestUpdate();
+
+				StreamingCounters::Get().VoxelStampRestarts.fetch_add(1, std::memory_order_relaxed);
+			}
+		}
 
 		bool bIsStaticChunkLoaded = pRenderer->IsChunkInstanceLoaded() && pRenderer->GetOwner()->IsStatic();
 
@@ -82,7 +160,7 @@ void VoxelBaker::Bake()
 			pRenderer->m_BakeData.WorldOffset != grid.GetWorldOffset() &&
 			!pRenderer->GetOwner()->IsStatic();
 
-		if (!bForced && !bSwapDropped && !pRenderer->UpdateRequested() && (!pRenderer->m_BakeData.Updated || bIsStaticChunkLoaded))
+		if (!bResuming && !bForced && !bSwapDropped && !pRenderer->UpdateRequested() && (!pRenderer->m_BakeData.Updated || bIsStaticChunkLoaded))
 			continue;
 
 		/* Everything above says a re-bake was *asked for*. This asks whether it
@@ -101,7 +179,7 @@ void VoxelBaker::Bake()
 
 		   Only meaningful while the buffer still holds the previous stamp,
 		   which is what Generation and WorldOffset establish above. */
-		if (bEnabled && bBakeCurrent && ComputeStampKey(pRenderer) == pRenderer->m_BakeData.Stamp)
+		if (!bResuming && bEnabled && bBakeCurrent && ComputeStampKey(pRenderer) == pRenderer->m_BakeData.Stamp)
 		{
 			pRenderer->m_BakeData.Updated = false;
 			pRenderer->m_bUpdateRequested = false;
@@ -110,12 +188,121 @@ void VoxelBaker::Bake()
 		}
 
 
-		/* Remove old voxels. A bake that is itself a repair does not start
-		   another one - see NotifyClearedRegion. */
-		const bool bRepairOnly = pRenderer->m_BakeData.RepairOnly;
-		pRenderer->m_BakeData.RepairOnly = false;
+		/* Past every skip above, so this renderer genuinely wants re-stamping -
+		   which is exactly the point at which the budget is worth consulting.
+		   Everything before here is comparisons; everything after is voxel
+		   writes, and conflating the two is what made this pass unbounded.
 
-		Clear(pRenderer, nullptr, !bRepairOnly);
+		   Nothing is recorded: the flags that got us here are still set, so the
+		   next frame's scan finds this renderer and every one behind it. That is
+		   the whole resumption mechanism. */
+		if (budget.Exhausted())
+		{
+			bPending = true;
+			break;
+		}
+
+		/* **Why is a renderer that was already stamped being stamped again?**
+		 *
+		 * VOXAGINE_CHUNK_IO_TIMINGS=1. Reported as: destroy a pillar, walk
+		 * closer, watch it come back. A re-stamp writes the *pristine* model, so
+		 * any re-stamp of damaged geometry restores it - that is M7, and M7's
+		 * guard (IsChunkInstanceLoaded) only covers the reload path. This names
+		 * the entity and the flag that let it through, which is the one thing
+		 * that separates "the chunk came back" from "something asked for an
+		 * update" from "the window slid and the stamp key check could no longer
+		 * apply". */
+		/* Resuming is not a re-stamp - it is the rest of one, and printing it
+		   buries the lines that matter under one per slice. */
+		if (bEnabled && !bResuming && pRenderer->m_BakeData.Positions != nullptr)
+		{
+			static const bool s_bWhy = std::getenv("VOXAGINE_CHUNK_IO_TIMINGS") != nullptr;
+
+			if (s_bWhy)
+			{
+				fprintf(stderr, "[bake] re-stamping '%s': forced %d, swapDropped %d, updateRequested %d, updated %d, resuming %d, chunkLoaded %d, bakeCurrent %d (offset %s)\n",
+					pRenderer->GetOwner() ? pRenderer->GetOwner()->GetName().c_str() : "?",
+					bForced ? 1 : 0, bSwapDropped ? 1 : 0,
+					pRenderer->UpdateRequested() ? 1 : 0,
+					pRenderer->m_BakeData.Updated ? 1 : 0,
+					bResuming ? 1 : 0,
+					pRenderer->IsChunkInstanceLoaded() ? 1 : 0,
+					bBakeCurrent ? 1 : 0,
+					pRenderer->m_BakeData.WorldOffset == grid.GetWorldOffset() ? "same" : "moved");
+			}
+		}
+
+		/* Its cost belongs to one side of the split. Recorded at both exits
+		   below - a disabled renderer clears without stamping, which is real
+		   work and would otherwise vanish from the count. */
+		const bool bRendererStatic = pRenderer->GetOwner()->IsStatic();
+
+		/* M7 (CHUNK_STREAMING_PLAN.md). A chunk that comes back is restored from
+		   its encoded voxels, which are what it looked like when it left - damage
+		   included. Re-stamping the pristine model over them is precisely
+		   "destroyed terrain comes back", and nothing said so until this counter
+		   existed. Counted here rather than asserted because it has to be
+		   visible to a Release headless run and to the perf gate. */
+		if (bRendererStatic && pRenderer->IsChunkInstanceLoaded())
+		{
+			StreamingCounters::Get().ChunkInstanceRestamps.fetch_add(1, std::memory_order_relaxed);
+
+			static const bool s_bAudit = std::getenv("VOXAGINE_CHUNK_IO_TIMINGS") != nullptr;
+
+			if (s_bAudit)
+			{
+				fprintf(stderr, "[chunk] re-stamping reloaded '%s' (updateRequested %d, updated %d, forced %d)\n",
+					pRenderer->GetOwner()->GetName().c_str(),
+					pRenderer->UpdateRequested() ? 1 : 0,
+					pRenderer->m_BakeData.Updated ? 1 : 0,
+					bForced ? 1 : 0);
+			}
+		}
+
+		const std::chrono::steady_clock::time_point rendererStart =
+			bProfiling ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
+
+		const auto fAccount = [&](uint32_t uiVoxels)
+		{
+			(bRendererStatic ? uiStaticRenderers : uiDynamicRenderers) += 1;
+			(bRendererStatic ? uiStaticVoxels : uiDynamicVoxels) += uiVoxels;
+
+			if (!bProfiling)
+				return;
+
+			const double fMs = std::chrono::duration<double, std::milli>(
+				std::chrono::steady_clock::now() - rendererStart).count();
+
+			(bRendererStatic ? fStaticMs : fDynamicMs) += fMs;
+
+			/* One renderer's stamp is the *atom* of the bake budget, so its
+			   worst case is the floor on any frame the bake touches. Naming the
+			   renderer is what says whether the remaining hitch is "too many
+			   renderers in a frame" (a budget problem, solved) or "one model is
+			   too big" (which needs a resumable Occupy - phase 5's notes). */
+			static const bool s_bReportSlow = std::getenv("VOXAGINE_CHUNK_IO_TIMINGS") != nullptr;
+
+			if (s_bReportSlow && fMs >= 5.0)
+			{
+				fprintf(stderr, "[bake] '%s' stamped %u voxels in %.2f ms\n",
+					pRenderer->GetOwner()->GetName().c_str(), uiVoxels, fMs);
+			}
+		};
+
+		/* Remove old voxels. A bake that is itself a repair does not start
+		   another one - see NotifyClearedRegion.
+
+		   Not for a resumed stamp: what is in the buffer is the first half of
+		   the stamp about to be finished, and erasing it is the one mistake
+		   this phase exists to not repeat. */
+		const bool bRepairOnly = pRenderer->m_BakeData.RepairOnly;
+
+		if (!bResuming)
+		{
+			pRenderer->m_BakeData.RepairOnly = false;
+
+			Clear(pRenderer, nullptr, !bRepairOnly);
+		}
 
 		if (!bEnabled)
 		{
@@ -124,34 +311,79 @@ void VoxelBaker::Bake()
 			pRenderer->m_BakeData.Updated = false;
 			pRenderer->m_bUpdateRequested = false;
 
+			fAccount(0);
+
 			continue;
 		}
 
 		/* Reset */
-		Vector3 pos = pRenderer->GetTransform()->GetPosition();
+		if (!bResuming)
+		{
+			Vector3 pos = pRenderer->GetTransform()->GetPosition();
 
-		pos.x = floor(pos.x);
-		pos.y = floor(pos.y);
-		pos.z = floor(pos.z);
+			pos.x = floor(pos.x);
+			pos.y = floor(pos.y);
+			pos.z = floor(pos.z);
 
-		pRenderer->m_BakeData.LastLocation = pos;
-		pRenderer->m_BakeData.LastRotation = pRenderer->GetTransform()->GetRotation();
-		pRenderer->m_BakeData.LastScale = pRenderer->GetTransform()->GetScale();
-		pRenderer->m_BakeData.WorldOffset = grid.GetWorldOffset();
+			pRenderer->m_BakeData.LastLocation = pos;
+			pRenderer->m_BakeData.LastRotation = pRenderer->GetTransform()->GetRotation();
+			pRenderer->m_BakeData.LastScale = pRenderer->GetTransform()->GetScale();
+			pRenderer->m_BakeData.WorldOffset = grid.GetWorldOffset();
+		}
 
 		pRenderer->m_BakeData.Updated = false;
 		pRenderer->m_bUpdateRequested = false;
 
-		/* Occupy new voxels if position is in bounds */
-		Occupy(pRenderer, &pRenderer->m_BakeData);
+		/* What this pass is accountable for is what it writes, which for a
+		   resumed stamp is the difference. Zero rather than the recorded Size
+		   for a fresh one: Occupy restarts the count, and the stale value is
+		   whatever the *previous* stamp wrote. */
+		const uint32_t uiSizeBefore = bResuming ? pRenderer->m_BakeData.Size : 0;
+
+		/* Occupy new voxels if position is in bounds. Phase 9's inner bound: one
+		   renderer is no longer the atom of this pass, because one of them is a
+		   140,640-voxel riverbed that costs 22 ms whatever the outer budget
+		   says. */
+		Occupy(pRenderer, &pRenderer->m_BakeData, StreamingBudgets::Get().VoxelBakingSamples.UnitsOrUnbounded());
+
+		/* A renderer left mid-stamp is the reason this pass reports itself
+		   unfinished: nothing else about it is set, and IsInitialWindowReady
+		   waits on exactly this (phase 5's R1). */
+		if (pRenderer->m_BakeData.OccupyInProgress)
+		{
+			bPending = true;
+
+			StreamingCounters::Get().VoxelStampSlices.fetch_add(1, std::memory_order_relaxed);
+		}
+
+		fAccount(pRenderer->m_BakeData.Size - uiSizeBefore);
+
+		budget.Consume();
 	}
 
 	if (bProfiling)
 	{
+		/* Counts and timings both go behind the same guard - the profiler's
+		   contract is that a disabled build reads no clock and calls no
+		   Report, and four string-keyed lookups a frame is exactly the cost it
+		   exists to avoid. What makes the counts more trustworthy than the
+		   timings is that they do not vary with what else the machine is
+		   doing, not that they are free. */
+		FrameProfiler::Get().ReportCount("Bake renderers (static)", uiStaticRenderers);
+		FrameProfiler::Get().ReportCount("Bake renderers (dynamic)", uiDynamicRenderers);
+		FrameProfiler::Get().ReportCount("Bake voxels (static)", uiStaticVoxels);
+		FrameProfiler::Get().ReportCount("Bake voxels (dynamic)", uiDynamicVoxels);
+
 		const double fMilliseconds =
 			std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
 
 		FrameProfiler::Get().Report("CPU VoxelBaker::Bake", fMilliseconds);
+
+		/* The two halves of that number. They do not sum to it - the skip tests
+		   above run for every renderer whether or not it is re-baked, and that
+		   remainder is the part DYNAMIC_MODELS_PLAN.md does *not* remove. */
+		FrameProfiler::Get().Report("CPU Bake (static)", fStaticMs);
+		FrameProfiler::Get().Report("CPU Bake (dynamic)", fDynamicMs);
 
 		/* Reported beside it rather than inside it: the repair scan is the one
 		   part of the bake whose cost is a function of how many renderers exist
@@ -159,6 +391,8 @@ void VoxelBaker::Bake()
 		   quietly with the level. */
 		FrameProfiler::Get().Report("CPU VoxelBaker::Bake (repair scan)", m_fRepairMilliseconds);
 	}
+
+	return !bPending;
 }
 
 namespace
@@ -199,7 +433,7 @@ VoxRenderer::BakeData::StampKey VoxelBaker::ComputeStampKey(VoxRenderer* pRender
 	return key;
 }
 
-uint32_t* VoxelBaker::Occupy(VoxRenderer* pRenderer, VoxRenderer::BakeData* pBakeData)
+uint32_t* VoxelBaker::Occupy(VoxRenderer* pRenderer, VoxRenderer::BakeData* pBakeData, uint32_t uiMaxSamples)
 {
 	const VoxFrame* pFrame = pRenderer->GetFrame();
 
@@ -225,8 +459,50 @@ uint32_t* VoxelBaker::Occupy(VoxRenderer* pRenderer, VoxRenderer::BakeData* pBak
 
 	uint32_t uiSolidVoxelCount = pFrame->GetSolidVoxelCount();
 
-	uint32_t* pBaked = new uint32_t[static_cast<size_t>(uiSolidVoxelCount * stamp.RoundedScale.x * stamp.RoundedScale.y * stamp.RoundedScale.z)];
-	uint32_t uiBakedID = 0;
+	/* Phase 9. Everything below is written so that a stamp interrupted by the
+	   budget is an ordinary state rather than a special case: the bookkeeping
+	   is set up before the first voxel is written and describes what is in the
+	   buffer *so far*, so a partial stamp can be cleared, resumed or abandoned
+	   by the same code that handles a whole one. The reverted first attempt
+	   recorded it at the end instead, which is what made a half-stamped
+	   renderer indistinguishable from a finished one. */
+	pBakeData = pBakeData ? pBakeData : &pRenderer->m_BakeData;
+
+	if (!pBakeData->OccupyInProgress)
+	{
+		delete[] pBakeData->Positions;
+
+		pBakeData->Positions = new uint32_t[static_cast<size_t>(
+			uiSolidVoxelCount * stamp.RoundedScale.x * stamp.RoundedScale.y * stamp.RoundedScale.z)];
+
+		pBakeData->Size = 0;
+		pBakeData->StampCursor = VoxelStampCursor();
+
+		pBakeData->StampDropped = 0;
+		pBakeData->StampPlaced = 0;
+
+		pBakeData->IsStatic = bIsStatic;
+
+		/* Recorded here rather than at the end because this is what says the
+		   buffer holds this stamp - and while a stamp is in flight it holds
+		   part of it, which is a truth Bake needs in order to decide between
+		   resuming and starting over. See RenderContext::GetVoxelGeneration. */
+		pBakeData->Generation = m_pRenderSystem->m_pRenderContext->GetVoxelGeneration();
+
+		FillStampKey(pRenderer, stamp, pBakeData->Stamp);
+
+		/* And the box it goes into, for the repair pass - see
+		   BakeData::StampMin. Derived from the stamp transform rather than from
+		   the voxels written, so it is already correct for a partial stamp. */
+		if (!ComputeStampedGridBounds(pRenderer, stamp, pBakeData->StampMin, pBakeData->StampMax))
+		{
+			pBakeData->StampMin = Vector3(1.f);
+			pBakeData->StampMax = Vector3(0.f);
+		}
+	}
+
+	uint32_t* pBaked = pBakeData->Positions;
+	uint32_t uiBakedID = pBakeData->Size;
 
 	uint64_t uiEntityID = pRenderer->GetOwner()->GetId();
 
@@ -235,12 +511,35 @@ uint32_t* VoxelBaker::Occupy(VoxRenderer* pRenderer, VoxRenderer::BakeData* pBak
 	   as well as an id does. See RENDERING_PLAN.md phase 4d. */
 	const uint16_t uiOwnerSlot = bIsStatic ? grid.AcquireOwnerSlot(uiEntityID) : VoxelOwnerVolume::k_uiNoOwnerSlot;
 
-	/* Counted so the drop below stops being silent. See the report after the
-	   loop for why this is worth four bytes of stack. */
-	uint32_t uiDropped = 0;
-	uint32_t uiPlaced = 0;
+	/* Counted so the drop below stops being silent, and accumulated on the
+	   bake data rather than here because one stamp may span several frames.
+	   See the report after the loop. */
+	uint32_t& uiDropped = pBakeData->StampDropped;
+	uint32_t& uiPlaced = pBakeData->StampPlaced;
 
-	ForEachStampedVoxel(pRenderer, stamp, [&](const Vector3& worldPosition, uint32_t uiColor)
+	/* VOXAGINE_CHUNK_IO_TIMINGS=1, and it answers a specific report: "I can see
+	   walls being regenerated but still walk through them".
+	 *
+	 * There are two writes in the loop below and only one of them is solid. The
+	 * bForceVoxel path writes the CPU voxel, the owner slot *and* the mapping,
+	 * which is geometry you collide with; the fallback writes the mapping alone,
+	 * which is geometry you can see and walk through. A re-stamp that lands on
+	 * cells it is not allowed to own takes the second path for every voxel, and
+	 * the result looks exactly like that report. */
+	uint32_t uiSolidWrites = 0;
+	uint32_t uiRenderOnlyWrites = 0;
+
+	VoxelStampVoxels voxels;
+	uint32_t uiStateTag = 0;
+	uint32_t uiOverrideColor = 0;
+	bool bHasOverrideColor = false;
+
+	DescribeVoxelStampVoxels(pRenderer, voxels, uiStateTag, uiOverrideColor, bHasOverrideColor);
+
+	const bool bComplete = ForEachStampedVoxelRange(
+		voxels, uiStateTag, bHasOverrideColor ? &uiOverrideColor : nullptr, stamp,
+		pBakeData->StampCursor, uiMaxSamples,
+		[&](const Vector3& worldPosition, uint32_t uiColor)
 	{
 		/* Written as an in-range test rather than a rejection test so a
 		   NaN is discarded too: every comparison against NaN is false,
@@ -339,17 +638,21 @@ uint32_t* VoxelBaker::Occupy(VoxRenderer* pRenderer, VoxRenderer::BakeData* pBak
 				cell.SetSlot(uiOwnerSlot);
 
 				m_pRenderSystem->m_pRenderContext->ModifyVoxelFast(uiWorldID, uiColor);
+
+				++uiSolidWrites;
 			}
 		}
 
 		// Bake color into world
-		if (
-			bForceVoxel || m_pRenderSystem->ModifyVoxel(
-				uiWorldID,
-				uiColor, false
-			)
-			)
+		if (bForceVoxel)
 		{
+			pBaked[uiBakedID] = uiWorldID;
+			uiBakedID++;
+		}
+		else if (m_pRenderSystem->ModifyVoxel(uiWorldID, uiColor, false))
+		{
+			++uiRenderOnlyWrites;
+
 			pBaked[uiBakedID] = uiWorldID;
 			uiBakedID++;
 		}
@@ -370,7 +673,7 @@ uint32_t* VoxelBaker::Occupy(VoxRenderer* pRenderer, VoxRenderer::BakeData* pBak
 	 * given entity is a level edit, and which ones are wrong is a judgement
 	 * nobody can make from in here. Once per renderer, because it happens every
 	 * time the thing is re-stamped. */
-	if (uiDropped > 0 && !pRenderer->m_BakeData.bWarnedClipped)
+	if (uiDropped > 0 && !pRenderer->m_BakeData.bWarnedClipped && bComplete)
 	{
 		pRenderer->m_BakeData.bWarnedClipped = true;
 
@@ -381,30 +684,22 @@ uint32_t* VoxelBaker::Occupy(VoxRenderer* pRenderer, VoxRenderer::BakeData* pBak
 		        uiPlaced == 0 ? " - nothing of it is drawn" : "");
 	}
 
-	pBakeData = pBakeData ? pBakeData : &pRenderer->m_BakeData;
-
-	if (pBakeData->Positions)
-		delete[] pBakeData->Positions;
-
-	pBakeData->Positions = pBaked;
-	pBakeData->IsStatic = bIsStatic;
-	pBakeData->Size = uiBakedID;
-
-	/* Recorded here rather than in Bake because this is where the voxels
-	   actually land, and OnComponentAdded reaches Occupy without going through
-	   Bake at all. See RenderContext::GetVoxelGeneration. */
-	pBakeData->Generation = m_pRenderSystem->m_pRenderContext->GetVoxelGeneration();
-
-	/* Recorded from the same stamp the walk above used, so a later bake can
-	   ask whether re-running it would write anything different. */
-	FillStampKey(pRenderer, stamp, pBakeData->Stamp);
-
-	/* And the box it went into, for the repair pass - see BakeData::StampMin. */
-	if (!ComputeStampedGridBounds(pRenderer, stamp, pBakeData->StampMin, pBakeData->StampMax))
 	{
-		pBakeData->StampMin = Vector3(1.f);
-		pBakeData->StampMax = Vector3(0.f);
+		static const bool s_bReport = std::getenv("VOXAGINE_CHUNK_IO_TIMINGS") != nullptr;
+
+		if (s_bReport && uiRenderOnlyWrites > 0)
+		{
+			fprintf(stderr, "[bake] '%s' wrote %u voxels you can walk through (%u solid) - static %d\n",
+				pRenderer->GetOwner() ? pRenderer->GetOwner()->GetName().c_str() : "?",
+				uiRenderOnlyWrites, uiSolidWrites, bIsStatic ? 1 : 0);
+		}
 	}
+
+	/* Positions, Size, Generation, the stamp key and the stamped box were all
+	   written before the first voxel of this stamp - see the top of the
+	   function. What is left is how far it got. */
+	pBakeData->Size = uiBakedID;
+	pBakeData->OccupyInProgress = !bComplete;
 
 	return pBaked;
 }
@@ -488,9 +783,48 @@ void VoxelBaker::NotifyClearedRegion(VoxRenderer* pCleared, const Vector3& v3Gri
 			std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
 }
 
+void VoxelBaker::ForgetChunkStamp(VoxRenderer* pRenderer)
+{
+	if (pRenderer == nullptr)
+		return;
+
+	VoxRenderer::BakeData& data = pRenderer->m_BakeData;
+
+	delete[] data.Positions;
+
+	data.Positions = nullptr;
+	data.Size = 0;
+	data.IsStatic = false;
+	data.Generation = 0;
+	data.Stamp = VoxRenderer::BakeData::StampKey();
+	data.StampMin = Vector3(1.f);
+	data.StampMax = Vector3(0.f);
+
+	data.OccupyInProgress = false;
+	data.StampCursor = VoxelStampCursor();
+}
+
 void VoxelBaker::Clear(VoxRenderer* pRenderer, VoxRenderer::BakeData* pBakeData, bool bNotify)
 {
 	if (pRenderer->GetWorld()->GetApplication()->IsShuttingDown())
+		return;
+
+	/* DYNAMIC_MODELS_PLAN.md phase 6. A dynamic renderer that has never been
+	   baked (which, since phase 3, is every dynamic renderer - VoxelBaker::Bake
+	   and RenderSystem::OnComponentAdded both skip Occupy for one) has nothing
+	   in the voxel buffer or the physics grid to remove. Without this,
+	   OnComponentDestroyed's call into here for a despawning dynamic renderer
+	   (a dead monster, a bullet) falls through to the "else" branch below and
+	   pays for a grid.GetChunk() scan of its whole bounding box to discover
+	   that, which it does on every dynamic despawn in the game. Guarded on
+	   Positions being null rather than IsStatic() alone so a renderer that was
+	   static and toggled dynamic still gets its real cleanup - OnComponentAdded's
+	   StaticPropertyChanged handler already runs this Clear while the renderer
+	   is still static, before the toggle, so Positions is null here precisely
+	   when there is truly nothing left to do. */
+	const VoxRenderer::BakeData& existingBakeData = pBakeData ? *pBakeData : pRenderer->m_BakeData;
+
+	if (!pRenderer->GetOwner()->IsStatic() && existingBakeData.Positions == nullptr)
 		return;
 
 	VoxelGrid& grid = m_pPhysicsSystem->m_VoxelGrid;
@@ -498,6 +832,15 @@ void VoxelBaker::Clear(VoxRenderer* pRenderer, VoxRenderer::BakeData* pBakeData,
 	Vector3 worldOffsetDiff = pRenderer->m_BakeData.WorldOffset - grid.GetWorldOffset();
 
 	pBakeData = pBakeData ? pBakeData : &pRenderer->m_BakeData;
+
+	/* Whatever this clear goes on to do, a stamp that was in flight cannot be
+	   resumed across it: the cursor names a walk whose first half this is about
+	   to erase, and continuing from it would leave the model with a hole in
+	   exactly the shape of what was already written. Phase 9. Every caller
+	   reaches this - a despawn, a disable, a static/dynamic toggle, the editor -
+	   so the flag is cleared here rather than at each of them. */
+	pBakeData->OccupyInProgress = false;
+	pBakeData->StampCursor = VoxelStampCursor();
 
 	/* A window slide voids a dynamic renderer's recorded positions outright,
 	 * and replaying them is destructive.
@@ -641,6 +984,16 @@ void VoxelBaker::Clear(VoxRenderer* pRenderer, VoxRenderer::BakeData* pBakeData,
 				}
 
 				continue;
+			}
+
+			/* Phase 12's invariant, counted at the write rather than at the
+			   rule above it: a mapping word zeroed while the CPU cell keeps a
+			   colour is exactly the "occupied only on the CPU" the sync audit
+			   reports, whatever reasoning led here. Must stay zero. */
+			if (!bStatic && cell && cell.IsActive())
+			{
+				StreamingCounters::Get().VoxelStampDivergingErases.fetch_add(
+					1, std::memory_order_relaxed);
 			}
 
 			m_pRenderSystem->m_pRenderContext->ModifyVoxelFast(chunkOffsetPosition, 0);

@@ -8,6 +8,7 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <thread>
 #include <vector>
 
 /* Coarse occupancy over the resident voxel window: one count of occupied
@@ -208,6 +209,46 @@ public:
 	/* Mirrors Mapper::SwapBuffer. */
 	void Swap();
 
+	/* --- The write journal (CHUNK_STREAMING_PLAN.md phase 12) ---------------
+	 * What the front buffer was told while the chunk worker was building the
+	 * back buffer, so that the commit can put it back.
+	 *
+	 * A window slide rebuilds the *whole* incoming window into the back buffer
+	 * from the chunks' CPU voxels and then swaps. Every voxel the main thread
+	 * writes between the start of that build and the swap therefore lands in
+	 * the buffer that is about to be retired: the CPU keeps it and the image
+	 * loses it. Destruction and debris landing are the two paths that write
+	 * during play, which is why the disagreement needs destruction to appear
+	 * and why it survives - nothing re-stamps an ownerless voxel.
+	 *
+	 * Ids only. What is replayed at the commit is the CPU voxel's *current*
+	 * colour, not the colour that was written, so a write the worker half-read
+	 * heals to the same answer.
+	 */
+	void BeginWriteJournal()
+	{
+		m_WriteJournal.clear();
+		m_bJournalWrites = true;
+	}
+
+	void EndWriteJournal()
+	{
+		m_bJournalWrites = false;
+		m_WriteJournal.clear();
+	}
+
+	/* Hands the journal over and disarms in one step. Replaying it writes
+	   voxels, and a write journals - so a replay that read the live vector
+	   would append to the container it is walking. */
+	void TakeWriteJournal(std::vector<uint32_t>& o_journal)
+	{
+		m_bJournalWrites = false;
+		o_journal.clear();
+		o_journal.swap(m_WriteJournal);
+	}
+
+	bool IsJournallingWrites() const { return m_bJournalWrites; }
+
 	/* Writes every count to its mirror. Only needed after a resize; the update
 	   paths keep the mirrors current themselves. */
 	void Flush();
@@ -225,8 +266,38 @@ public:
 	   one rebuild per cell that actually changed.
 
 	   Bricks are exempt and stay incremental: gameplay reads them through
-	   GetCount within the frame that wrote them. */
+	   GetCount within the frame that wrote them.
+
+	   **Front buffer only.** It used to walk both, which was a data race and
+	   the largest single hitch in a window slide: ChunkSystem's render job is
+	   producing the back buffer's dirty bits on a worker at the same moment,
+	   and rebuilding a hierarchy from half-written occupancy costs 68.8 ms in
+	   Release (CHUNK_STREAMING_PLAN.md M1) for an answer that is thrown away by
+	   the next region anyway. The back buffer is flushed by whoever owns it -
+	   see FlushDirtyBackBuffer. */
 	void FlushDirty();
+
+	/* The back buffer's half, for the thread that owns it. ChunkSystem's render
+	   job calls this at the end of its own body, after the last RenderChunk and
+	   before the main thread can swap - so the buffer is complete when it is
+	   published and nobody ever walks it concurrently.
+
+	   Not profiled: FrameProfiler has no mutex and this runs off the main
+	   thread. Its cost shows up as the render job taking longer, which is
+	   exactly where it should be. */
+	void FlushDirtyBackBuffer();
+
+	/* Who owns the back buffer, declared. ChunkSystem brackets its render job
+	   with these; anything that then walks the back buffer's dirty bits from
+	   another thread is M1 happening again, and FlushDirtyBuffer counts it in
+	   StreamingCounters::BackBufferFlushRaces and asserts in Debug (T5).
+
+	   The editor's Validate menu items are the reason this is a check rather
+	   than a comment: they legitimately flush the back buffer from the main
+	   thread, and they are legitimate only while no build is in flight. */
+	void BeginBackBufferBuild();
+	void EndBackBufferBuild();
+	bool IsBackBufferBuildActive() const { return m_bBackBuildActive.load(std::memory_order_acquire); }
 
 	/* Zeroes both buffers, CPU side and mirrors. */
 	void ClearAll();
@@ -309,6 +380,19 @@ public:
 
 	inline void SetVoxel(uint32_t uiVoxelID, uint32_t uiColor)
 	{
+		/* CHUNK_STREAMING_PLAN.md phase 12. Every main-thread write into the
+		   *front* voxel buffer passes through here - VoxelEditBatch::Write and
+		   RenderContext::ModifyVoxel/ModifyVoxelFast all call it, and all of
+		   them write the word beside it - so this is the one place that can
+		   record what a window commit is about to discard. Above the early-out
+		   below, because a colour change that does not move the occupancy bit
+		   is still a write the swap would lose.
+
+		   Off unless a back-buffer build is in flight, which is a predictable
+		   branch on a path that runs millions of times a world load. */
+		if (m_bJournalWrites)
+			m_WriteJournal.push_back(uiVoxelID);
+
 		const bool bIsOccupied = (uiColor >> 24) != 0;
 
 		if (uiVoxelID >= m_uiVoxelCount || IsOccupied(uiVoxelID) == bIsOccupied)
@@ -579,6 +663,7 @@ private:
 	void ZeroColors();
 	void ZeroOccupancy();
 	void ClearDirty();
+	void FlushDirtyBuffer(uint32_t uiBuffer);
 
 	static void ReportUnderflow(uint32_t uiLevel, uint32_t uiCellID);
 	static void ReportUnalignedRegion(uint32_t uiLevel, const UVector3& v3Min, const UVector3& v3Size);
@@ -590,6 +675,10 @@ private:
 	uint32_t m_uiWordCount = 0;
 
 	uint32_t m_uiFront = 0;
+
+	/* See BeginWriteJournal. Main thread only, like every front-buffer write. */
+	std::vector<uint32_t> m_WriteJournal;
+	bool m_bJournalWrites = false;
 
 	/* Cached rather than recomputed: LevelCellID runs per voxel per level on
 	   the stamp path. The values are still derived by the ceil-div the shader
@@ -639,4 +728,9 @@ private:
 	std::vector<ImageRegion> m_DensityRegions;
 	uint32_t m_uiLastDensityBrick = UINT32_MAX;
 	bool m_bDensityFull[2] = { true, true };
+
+	/* See BeginBackBufferBuild. The thread id is written before the flag is
+	   released and read after it is acquired, so the pair needs no lock. */
+	std::atomic<bool> m_bBackBuildActive{ false };
+	std::thread::id m_BackBuildThread;
 };

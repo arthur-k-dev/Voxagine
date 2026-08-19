@@ -83,6 +83,63 @@ jobs:
         run: ctest --output-on-failure
 
   # ---------------------------------------------------------------------------
+  # The same suite under AddressSanitizer and UndefinedBehaviorSanitizer.
+  #
+  # Docs/CHUNK_STREAMING_PLAN.md T3. Streaming is where this tree's remaining
+  # memory-safety risk lives - raw Entity* held across frame boundaries, chunk
+  # storage freed on a worker while the grid still points at it - and the
+  # streaming plan makes a sanitizer pass a precondition for every phase. A lane
+  # that only runs when somebody remembers is a lane that rots, so it runs here.
+  #
+  # Debug only: the suite is ~4 s unsanitized and ~4 minutes under ASan, and
+  # running both configurations would buy nothing the Debug one does not say.
+  # detect_leaks is off because the harnesses deliberately leave their worlds
+  # and entities to the process exit; leak-clean teardown is a separate piece of
+  # work and turning it on now would just make the lane red for a reason that is
+  # not what it is watching for.
+  sanitizers:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libvulkan-dev \
+                                  libwayland-dev libxkbcommon-dev libx11-dev \
+                                  libxrandr-dev libxi-dev libxcursor-dev
+
+      - name: Build SDL3
+        run: |
+          SDL_TAG=$(sed -n 's/^set(VOXAGINE_SDL3_TAG "\([^"]*\)".*/\1/p' CMake/SDL3.cmake)
+          git clone --depth 1 --branch "$SDL_TAG" https://github.com/libsdl-org/SDL.git sdl3
+          cmake -S sdl3 -B sdl3/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DSDL_SHARED=ON -DSDL_STATIC=OFF
+          cmake --build sdl3/build
+          sudo cmake --install sdl3/build
+
+      - name: Configure
+        run: |
+          cmake -S . -B Build/ci-asan -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DVOXAGINE_BUILD_ENGINE=ON \
+            -DVOXAGINE_BUILD_BRINGUP=OFF \
+            -DVOXAGINE_BUILD_TESTS=ON \
+            -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+
+      - name: Build
+        run: cmake --build Build/ci-asan
+
+      - name: Test
+        working-directory: Build/ci-asan
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: ctest --output-on-failure --timeout 900
+
+  # ---------------------------------------------------------------------------
   # Android, compile only.
   #
   # Same philosophy as the Linux job: no GPU, no display, no device - this

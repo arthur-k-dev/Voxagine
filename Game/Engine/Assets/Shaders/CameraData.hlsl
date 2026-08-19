@@ -60,4 +60,33 @@ CONSTANT_BUFFER Data : register(b0)
 	float4 shadowBitangent;
 	float4 shadowRect;
 	float4 shadowDepth;
+
+	/* --- Render quality, from Settings ---------------------------------------
+	   The player-facing graphics settings, uploaded every frame so that changing
+	   one takes effect on the next without a pipeline rebuild. Defines.hlsl
+	   wraps each component in a named accessor - read those rather than these.
+
+	     x  ShadowQuality  0 off, 1 hard, 2 soft (PCSS)
+	     y  AmbientQuality 0 off, 1 neighbour test, 2 neighbour test + cones
+	     z  a bitmask of QUALITY_FLAG_*: bounce light, reflections, FXAA
+	     w  side of the sun shadow map in texels, which follows x
+
+	   Floats rather than a uint4 because w is a resolution the UV maths divides
+	   by, and every other value is a small integer that a float holds exactly -
+	   so this is one register instead of two.
+
+	   Appended, never inserted - see farFieldSize. */
+	float4 renderQuality;
+
+	/* Room for the quality values that do not fit in the four components above.
+	   Appended, never inserted - see farFieldSize.
+
+	     x  SHQ_RAY's maximum shadow ray length in world units, 0 for unbounded
+	     yzw unused
+
+	   A second register rather than repacking the first: the components of
+	   renderQuality are read by name all over the shaders and shifting them to
+	   make room is the kind of change that compiles and then draws the wrong
+	   thing. */
+	float4 renderTuning;
 };

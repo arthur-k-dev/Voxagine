@@ -3,6 +3,7 @@
 
 #include "../Platform.h"
 #include "Core/Application.h"
+#include "Core/LaunchOptions.h"
 #include "Core/LoggingSystem/LoggingSystem.h"
 #include "Core/Resources/Formats/SoundReference.h"
 
@@ -101,8 +102,19 @@ void MiniaudioContext::Initialize()
 {
 	m_pEngine = new Engine();
 
-	const char* pNullDevice = std::getenv("VOXAGINE_AUDIO_NULL_DEVICE");
-	m_bNullDevice = pNullDevice != nullptr && pNullDevice[0] != '\0' && pNullDevice[0] != '0';
+	/* A hidden window means a headless run - a capture, a benchmark, a CI job -
+	   and a headless run has no business taking the machine's sound device.
+	   Every --hidden measurement taken before this played the game's music out
+	   loud on whatever the developer was listening to.
+
+	   It is an implication rather than a rule, so VOXAGINE_AUDIO_NULL_DEVICE
+	   still decides when it is set, in *both* directions: `=0` alongside
+	   --hidden gets a real device back (for confirming a sound by ear without a
+	   window in the way), and `=1` without --hidden gets the null one. */
+	m_bNullDevice = LaunchOptions::Get().IsHidden();
+
+	if (const char* pNullDevice = std::getenv("VOXAGINE_AUDIO_NULL_DEVICE"))
+		m_bNullDevice = pNullDevice[0] != '\0' && pNullDevice[0] != '0';
 
 	ma_engine_config config = ma_engine_config_init();
 
@@ -118,7 +130,7 @@ void MiniaudioContext::Initialize()
 			m_pEngine->bContextInitialized = true;
 			config.pContext = &m_pEngine->context;
 
-			printf("[audio] VOXAGINE_AUDIO_NULL_DEVICE: mixing to the null device\n");
+			printf("[audio] mixing to the null device - nothing reaches a speaker\n");
 		}
 	}
 

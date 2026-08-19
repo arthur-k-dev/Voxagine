@@ -5,6 +5,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <sstream>
+#include <vector>
 
 LaunchOptions& LaunchOptions::Get()
 {
@@ -37,42 +39,68 @@ namespace
 
 bool LaunchOptions::Parse(int argc, char** argv)
 {
-	for (int i = 1; i < argc; ++i)
+	auto ParseArguments = [this](int iArgc, char** ppArgv)
 	{
-		const bool bHasValue = (i + 1) < argc;
+		for (int i = 1; i < iArgc; ++i)
+		{
+			const bool bHasValue = (i + 1) < iArgc;
 
-		if (strcmp(argv[i], "--map") == 0 && bHasValue)
-		{
-			m_Map = argv[++i];
-		}
-		else if (strcmp(argv[i], "--frames") == 0 && bHasValue)
-		{
-			m_uiFrames = static_cast<uint32_t>(strtoul(argv[++i], nullptr, 10));
-		}
-		else if (strcmp(argv[i], "--hidden") == 0)
-		{
-			m_bHidden = true;
-		}
-		else if (strcmp(argv[i], "--uncapped") == 0)
-		{
-			m_bUncapped = true;
-		}
-		else if (strcmp(argv[i], "--size") == 0 && bHasValue)
-		{
-			if (!ParseSize(argv[++i], m_uiWidth, m_uiHeight))
-				fprintf(stderr, "[args] --size wants WxH, e.g. 1920x1080\n");
-		}
-		else if (strcmp(argv[i], "--screenshot") == 0 && bHasValue)
-		{
-			m_Screenshot = argv[++i];
-		}
-		else if (strcmp(argv[i], "--screenshot-pass") == 0 && bHasValue)
-		{
-			m_ScreenshotPass = argv[++i];
-		}
-		else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0)
-		{
-			printf(
+			if (strcmp(ppArgv[i], "--map") == 0 && bHasValue)
+			{
+				m_Map = ppArgv[++i];
+			}
+			else if (strcmp(ppArgv[i], "--frames") == 0 && bHasValue)
+			{
+				m_uiFrames = static_cast<uint32_t>(strtoul(ppArgv[++i], nullptr, 10));
+			}
+			else if (strcmp(ppArgv[i], "--editor-play") == 0 && bHasValue)
+			{
+				m_uiEditorPlayFrame = static_cast<uint32_t>(atoi(ppArgv[++i]));
+			}
+			else if (strcmp(ppArgv[i], "--hidden") == 0)
+			{
+				m_bHidden = true;
+			}
+			else if (strcmp(ppArgv[i], "--uncapped") == 0)
+			{
+				m_bUncapped = true;
+			}
+			else if (strcmp(ppArgv[i], "--size") == 0 && bHasValue)
+			{
+				if (!ParseSize(ppArgv[++i], m_uiWidth, m_uiHeight))
+					fprintf(stderr, "[args] --size wants WxH, e.g. 1920x1080\n");
+			}
+			else if (strcmp(ppArgv[i], "--screenshot") == 0 && bHasValue)
+			{
+				m_Screenshot = ppArgv[++i];
+			}
+			else if (strcmp(ppArgv[i], "--screenshot-pass") == 0 && bHasValue)
+			{
+				m_ScreenshotPass = ppArgv[++i];
+			}
+			else if (strcmp(ppArgv[i], "--ui-script") == 0 && bHasValue)
+			{
+				m_UIScript = ppArgv[++i];
+			}
+			else if (strcmp(ppArgv[i], "--ui-script-interval") == 0 && bHasValue)
+			{
+				m_uiUIScriptInterval = std::max(1u,
+					static_cast<uint32_t>(strtoul(ppArgv[++i], nullptr, 10)));
+			}
+			else if (strcmp(ppArgv[i], "--render-quality") == 0 && bHasValue)
+			{
+				const char* pValue = ppArgv[++i];
+
+				if (strcmp(pValue, "low") == 0)
+					m_QualityPreset = QualityPreset::E_LOW;
+				else if (strcmp(pValue, "high") == 0)
+					m_QualityPreset = QualityPreset::E_HIGH;
+				else
+					fprintf(stderr, "[args] --render-quality wants 'low' or 'high', not '%s'\n", pValue);
+			}
+			else if (strcmp(ppArgv[i], "--help") == 0 || strcmp(ppArgv[i], "-h") == 0)
+			{
+				printf(
 				"Voxagine / Bit Buster\n"
 				"\n"
 				"  --map <path>            world to load instead of ProjectSettings' DefaultMap\n"
@@ -86,17 +114,62 @@ bool LaunchOptions::Parse(int argc, char** argv)
 				"  --screenshot <path>     write the last frame as a binary PPM and exit\n"
 				"  --screenshot-pass <name>  which pass's target to capture\n"
 				"                          (default \"Post Processing\"; try \"Voxel\", \"Sun Shadow\")\n"
+				"  --ui-script <seq>       comma-separated menu presses fed through SDL, one per\n"
+				"                          --ui-script-interval frames: up down left right confirm\n"
+				"                          back wait fire forward-on/-off backward-on/-off.\n"
+				"                          Also traces focus and input-map changes\n"
+				"  --ui-script-interval <n>  frames between presses (default 30)\n"
+				"  --render-quality <p>    'low' (the mobile defaults) or 'high' (the full suite),\n"
+				"                          instead of whatever the player last chose. Does not\n"
+				"                          touch ResolutionScale - use --size for pixel count\n"
 				"\n"
 				"A benchmark or a look, without touching any file or taking the display:\n"
 				"  BitBuster --hidden --uncapped --size 3840x2160 --frames 600 --map Content/Worlds/...\n");
 
-			return false;
+				return false;
+			}
+			else
+			{
+				fprintf(stderr, "[args] ignoring unrecognised argument '%s'\n", ppArgv[i]);
+			}
 		}
-		else
+
+		return true;
+	};
+
+	if (!ParseArguments(argc, argv))
+		return false;
+
+#if defined(VOXAGINE_MOBILE)
+	/* UIKit launches SDL applications without the command line supplied by
+	   Xcode's device runner. Keep the regular CLI as the desktop interface, but
+	   accept its whitespace-delimited equivalent through the launch environment
+	   so captures and repeatable device measurements remain possible. */
+	if (const char* pMobileArguments = std::getenv("VOXAGINE_LAUNCH_ARGUMENTS"))
+	{
+		std::istringstream stream(pMobileArguments);
+		std::vector<std::string> arguments{ "VOXAGINE_LAUNCH_ARGUMENTS" };
+		std::string argument;
+
+		while (stream >> argument)
+			arguments.push_back(std::move(argument));
+
+		if (arguments.size() > 1)
 		{
-			fprintf(stderr, "[args] ignoring unrecognised argument '%s'\n", argv[i]);
+			std::vector<char*> pointers;
+			pointers.reserve(arguments.size());
+
+			for (std::string& item : arguments)
+				pointers.push_back(item.data());
+
+			fprintf(stderr, "[args] applying %zu mobile launch arguments from VOXAGINE_LAUNCH_ARGUMENTS\n",
+			        pointers.size() - 1);
+
+			if (!ParseArguments(static_cast<int>(pointers.size()), pointers.data()))
+				return false;
 		}
 	}
+#endif
 
 	/* A capture with no frame limit would never fire: the capture happens on
 	   the last frame. Default to one long enough for a world to finish

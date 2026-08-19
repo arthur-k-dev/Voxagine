@@ -8,6 +8,44 @@
 # reported rather than enforced unless --strict is passed.
 #
 # <system>/<benchmark>/<metric>  <value>  <kind>  [unit]
+#
+# Re-recorded 2026-08-09: VoxelBrickGrid::k_uiBrickShift went 3 -> 2, so a
+# brick is 4^3 voxels rather than 8^3 and eight times as many of them cover
+# the same volume. Exactly 8x, and set-writes/clear-writes did not move - the
+# same voxels are written, the counter's unit shrank. Not a work regression.
+#
+# Re-recorded 2026-08-13 (chunk streaming phase 2). Three streaming changes,
+# all deliberate: the 5x5 fixture gained a static VoxRenderer root per chunk,
+# so that a chunk-restored renderer's re-stamp request - ledger M7 - is
+# expressible at all; and the bounded unload added roots-per-unload-slice,
+# encode-runs-per-slice, chunk-storage-reused/allocated and
+# chunk-instance-restamps. The first two are the benchmark's own unit budgets,
+# exactly, and are the assertion that a budgeted loop honours them.
+#
+# Re-recorded 2026-08-13 (chunk streaming phase 3). `roots-per-entity-pass` is
+# gone rather than ratcheted: the uninterrupted pass it measured no longer
+# exists. Loading a chunk's entities is two budgeted halves now and each has its
+# own exact number. `gameplay-roots-per-admission` is the odd one out and the
+# important one: it is deliberately unbounded and a *drop* in it is the
+# regression, because every non-static root of the incoming window entering
+# together is what makes a cross-chunk gameplay link impossible to observe
+# half-made (ledger E3).
+#
+# Re-recorded 2026-08-13 (chunk streaming phase 4). The initial window streams
+# through the update group machine now instead of being built synchronously
+# inside World::Initialize, so it is a commit and nine chunk regions like any
+# other window - and StreamingHarness settles it and resets the counters before
+# handing the world over, so every number here means the benchmark's own two
+# slides. chunk-regions-written 19 -> 18 and chunk-storage-allocated 3 -> 0 for
+# exactly that reason: the initial load's region and its three allocations are
+# no longer inside the measurement, and the pool is warm by the time it starts.
+#
+# Re-recorded 2026-08-13 (chunk streaming phase 12). Three new work entries, all
+# zero and all meant to stay zero *for this benchmark*: it writes no voxels of
+# its own, so a slide over a world nobody wrote to must republish nothing. The
+# non-zero case - a write made while the back buffer was being built - is
+# Streaming/AVoxelWrittenWhileTheWindowIsBuildingSurvivesTheSwap, which asserts
+# the exact number rather than a bound.
 
 Destruction/BurstIntoSolidRock/bursts                                 49.0000  work
 Destruction/BurstIntoSolidRock/integrity-seeds                    205898.0000  work
@@ -37,11 +75,33 @@ Particles/SimulationSweep/baked-50000                                  0.0000  w
 Particles/SimulationSweep/peak-alive-150000                       150000.0000  work
 Particles/SimulationSweep/peak-alive-5000                           5000.0000  work
 Particles/SimulationSweep/peak-alive-50000                         50000.0000  work
+Streaming/WindowSlideAndReturn/back-buffer-flush-races                 0.0000  work
+Streaming/WindowSlideAndReturn/chunk-instance-restamps                 0.0000  work
+Streaming/WindowSlideAndReturn/chunk-regions-written                  18.0000  work
+Streaming/WindowSlideAndReturn/chunk-storage-allocated                 3.0000  work
+Streaming/WindowSlideAndReturn/chunk-storage-reused                    3.0000  work
+Streaming/WindowSlideAndReturn/commits                                 2.0000  work
+Streaming/WindowSlideAndReturn/committed-groups                        2.0000  work
+Streaming/WindowSlideAndReturn/encode-runs-per-slice                  64.0000  work
+Streaming/WindowSlideAndReturn/gameplay-roots-per-admission            6.0000  work
+Streaming/WindowSlideAndReturn/occupancy-disagreements                 0.0000  work
+Streaming/WindowSlideAndReturn/pending-world-links                     0.0000  work
+Streaming/WindowSlideAndReturn/publishes-outside-commit                0.0000  work
+Streaming/WindowSlideAndReturn/resident-chunks                         9.0000  work
+Streaming/WindowSlideAndReturn/roots-per-admission-slice               1.0000  work
+Streaming/WindowSlideAndReturn/roots-per-staging-slice                 2.0000  work
+Streaming/WindowSlideAndReturn/roots-per-unload-slice                  2.0000  work
+Streaming/WindowSlideAndReturn/staged-roots-high-water                 3.0000  work
+Streaming/WindowSlideAndReturn/staged-roots-outliving-systems          0.0000  work
+Streaming/WindowSlideAndReturn/staged-roots-rejected                   0.0000  work
+Streaming/WindowSlideAndReturn/voxel-stamp-diverging-erases            0.0000  work
+Streaming/WindowSlideAndReturn/voxel-words-written                589824.0000  work
+Streaming/WindowSlideAndReturn/window-commit-writes-lost               0.0000  work
+Streaming/WindowSlideAndReturn/window-commit-writes-replayed           0.0000  work
+Streaming/WindowSlideAndReturn/window-swaps                            2.0000  work
+Streaming/WindowSlideAndReturn/world-links-abandoned                   0.0000  work
+Streaming/WindowSlideAndReturn/world-links-source-lost                 0.0000  work
 VoxelEditing/ScatteredWrites/clear-writes                         400000.0000  work
-# Re-recorded 2026-08-09: VoxelBrickGrid::k_uiBrickShift went 3 -> 2, so a
-# brick is 4^3 voxels rather than 8^3 and eight times as many of them cover
-# the same volume. Exactly 8x, and set-writes/clear-writes did not move - the
-# same voxels are written, the counter's unit shrank. Not a work regression.
 VoxelEditing/ScatteredWrites/dirty-bricks                          16384.0000  work
 VoxelEditing/ScatteredWrites/representation-disagreements              0.0000  work
 VoxelEditing/ScatteredWrites/set-writes                           400000.0000  work

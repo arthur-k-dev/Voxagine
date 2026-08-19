@@ -21,7 +21,19 @@ CONSTANT_BUFFER bakeCommand : register(b0)
 };
 
 VOXEL_RW_BUFFER voxelWorldData : register(u0);
-VOXEL_BUFFER modelData[] : register(t0);
+
+/* Sized, not unbounded, and the size has to stay equal to
+   VKPassBinding::m_uiBindlessCapacity - that is how many descriptors the pass
+   layout actually reserves for this range.
+
+   An unbounded `modelData[]` is what DXC wants, but glslang's HLSL front end
+   does not implement runtime descriptor arrays: instead of failing it emits
+   OpTypeArray of length *one*, so every bake with MapperID > 0 sampled model 0.
+   On device that showed up as the voxel pass drawing only partly correct
+   geometry, and it is silent - nothing in the build or at runtime says the
+   array was truncated. */
+static const uint BindlessModelCapacity = 96;
+VOXEL_BUFFER modelData[BindlessModelCapacity] : register(t0);
 
 [numthreads(1, 1, 1)]
 void main(uint3 dispatchID : SV_DispatchThreadID)

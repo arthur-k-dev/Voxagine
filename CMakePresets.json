@@ -47,7 +47,7 @@
         {
             "name": "editor",
             "displayName": "Editor (Debug)",
-            "description": "BitBuster with the editor. EDITOR is defined on the library, not just the executable.",
+            "description": "The Voxagine editor. EDITOR is defined on the library, not just the executable, so this is a different compilation of it rather than an extra binary - hence a separate build tree and a separate target. On macOS it produces Voxagine.app, which finds its assets inside the bundle; elsewhere a plain Voxagine executable to run from Game/.",
             "inherits": "engine",
             "binaryDir": "${sourceDir}/Build/${hostSystemName}/Editor/Debug",
             "cacheVariables": {
@@ -107,8 +107,8 @@
         },
         {
             "name": "ios",
-            "displayName": "iOS (Debug) - UNVERIFIED",
-            "description": "Needs macOS, Xcode and a MoltenVK install (-DVOXAGINE_MOLTENVK_DIR). Never configured; see Docs/MOBILE_PORT_LOG.md.",
+            "displayName": "iOS (Debug)",
+            "description": "BitBuster for iPad/iPhone. Needs macOS and Xcode; MoltenVK comes from External/. Set VOXAGINE_IOS_DEVELOPMENT_TEAM and build with `xcodebuild -allowProvisioningUpdates` to install on a device.",
             "generator": "Xcode",
             "binaryDir": "${sourceDir}/Build/iOS/Game/Debug",
             "cacheVariables": {
@@ -119,6 +119,26 @@
                 "VOXAGINE_BUILD_EDITOR": "OFF",
                 "VOXAGINE_BUILD_BRINGUP": "OFF",
                 "CMAKE_BUILD_TYPE": "Debug"
+            }
+        },
+        {
+            "name": "ios-editor",
+            "displayName": "iOS Editor (Debug)",
+            "description": "The Voxagine editor as its own iPad app, separate from the game's bundle identifier. Touch drives the pointer and the camera; a Magic Keyboard or trackpad works as it does on desktop. Same signing story as the ios preset.",
+            "inherits": "ios",
+            "binaryDir": "${sourceDir}/Build/iOS/Editor/Debug",
+            "cacheVariables": {
+                "VOXAGINE_BUILD_EDITOR": "ON"
+            }
+        },
+        {
+            "name": "ios-editor-release",
+            "displayName": "iOS Editor (Release)",
+            "description": "As above, optimised and without the Vulkan validation layers.",
+            "inherits": "ios-editor",
+            "binaryDir": "${sourceDir}/Build/iOS/Editor/Release",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release"
             }
         }
     ],
@@ -160,8 +180,18 @@
         },
         {
             "name": "ios",
-            "displayName": "iOS (Debug) - UNVERIFIED",
+            "displayName": "iOS (Debug)",
             "configurePreset": "ios"
+        },
+        {
+            "name": "ios-editor",
+            "displayName": "iOS Editor (Debug)",
+            "configurePreset": "ios-editor"
+        },
+        {
+            "name": "ios-editor-release",
+            "displayName": "iOS Editor (Release)",
+            "configurePreset": "ios-editor-release"
         }
     ]
 }

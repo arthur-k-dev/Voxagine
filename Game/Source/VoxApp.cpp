@@ -16,8 +16,9 @@ void VoxApp::OnCreate()
 	// Randomness
 	srand(time(nullptr));
 
-	// Initialize PlayerPrefs
-	m_PlayerPrefs.Initialize(&m_Serializer, "PlayerPrefs.vgprefs");
+	/* PlayerPrefs is initialized by Application::Run now, before LoadSettings -
+	   the player's render settings live in it and have to be restored before
+	   Platform::Initialize builds the render passes from them. */
 
 #if !defined(EDITOR)
 	auto projectSettings = ProjectSettings();

@@ -6,6 +6,7 @@
 
 #include "Core/ECS/Systems/Rendering/Buffers/RenderBuffer.h"
 #include "Core/ECS/Systems/Rendering/Buffers/Structures/StructuredVoxelBuffer.h"
+#include "Core/ECS/Systems/Rendering/Buffers/Structures/ModelInstanceData.h"
 
 #include "Core/Platform/Rendering/RenderDefines.h"
 #include "Core/Platform/Rendering/Managers/ModelManagerInc.h"
@@ -18,6 +19,7 @@
 #include "Core/VColors.h"
 
 #include <stdint.h>
+#include <cstddef>
 #include <string>
 #include <memory>
 #include <unordered_map>
@@ -34,12 +36,15 @@
 #include "Core/Platform/Rendering/RenderAlignment.h"
 #include "Core/Platform/Rendering/VoxelBrickGrid.h"
 #include "Core/Platform/Rendering/FarFieldVolume.h"
+#include "Core/ECS/Systems/Chunk/FarFieldBaker.h"
+#include "Core/Voxels/VoxelWindow.h"
 
 class Platform;
 class WindowContext;
 class RenderPass;
 
 class ParticlePass;
+class VoxelModelPass;
 
 class Settings;
 class Camera;
@@ -141,6 +146,22 @@ struct SpriteData {
 	uint32_t padding;
 };
 
+// GPU structured-buffer ABI. UIRenderer.vs.hlsl deliberately spells vector
+// members as scalars so every backend uses these packed offsets and stride.
+static_assert(sizeof(SpriteData) == 144, "SpriteData GPU stride changed");
+static_assert(offsetof(SpriteData, TextureID) == 64, "SpriteData TextureID offset changed");
+static_assert(offsetof(SpriteData, Color) == 68, "SpriteData Color offset changed");
+static_assert(offsetof(SpriteData, Offset) == 84, "SpriteData Offset offset changed");
+static_assert(offsetof(SpriteData, Size) == 92, "SpriteData Size offset changed");
+static_assert(offsetof(SpriteData, Alignment) == 100, "SpriteData Alignment offset changed");
+static_assert(offsetof(SpriteData, ScreenAlignment) == 104, "SpriteData ScreenAlignment offset changed");
+static_assert(offsetof(SpriteData, IsScreen) == 108, "SpriteData IsScreen offset changed");
+static_assert(offsetof(SpriteData, Layer) == 112, "SpriteData Layer offset changed");
+static_assert(offsetof(SpriteData, TextureRepeat) == 116, "SpriteData TextureRepeat offset changed");
+static_assert(offsetof(SpriteData, cullStart) == 124, "SpriteData cullStart offset changed");
+static_assert(offsetof(SpriteData, cullEnd) == 132, "SpriteData cullEnd offset changed");
+static_assert(offsetof(SpriteData, padding) == 140, "SpriteData padding offset changed");
+
 struct ParticleMapperData {
 	ParticleMapperData(Mapper* pMapper, uint32_t uiCount) : m_pMapper(pMapper), m_uiCount(uiCount) {}
 	Mapper* m_pMapper = nullptr;
@@ -149,13 +170,18 @@ struct ParticleMapperData {
 
 struct TextureReadData
 {
-	~TextureReadData() { delete[] m_Data; }
+	/* Defined in TextureManager.cpp, next to the decoder that allocates
+	   m_Data - the free has to match stbi's allocator, not operator new[]. */
+	~TextureReadData();
 
 	uint32_t* m_Data = nullptr;
 	UVector2 m_Dimensions = UVector2(0, 0);
 };
 
-class RenderContext
+/* IVoxelWindow is the seam chunk streaming reaches the resident window through
+   - see Core/Voxels/VoxelWindow.h. It carries no state and adds no cost here;
+   what it buys is a ChunkSystem that can be driven with no device behind it. */
+class RenderContext : public IVoxelWindow
 {
 public:
 	friend class TextureReference;
@@ -169,19 +195,23 @@ public:
 	// Maximum queued frames on the GPU
 	static const uint32_t m_uiFrameCount = 2;
 
-	/* Side of the square sun shadow map - RENDERING_PLAN.md 7.1a.
+	/* The side of the square sun shadow map is Settings::GetSunShadowResolution
+	   now, not a constant here - RENDERING_PLAN.md 7.1a, and Settings.h's
+	   ShadowQuality for the two sizes and why there are two.
+
+	   The sizing argument that used to live here, kept because it is what
+	   picked those numbers: the 768x128x768 window projects to roughly
+	   1065 x 877 world units perpendicular to the light, so 1024 is close to one
+	   texel per voxel and 512 is one per two. A depth map records the nearest
+	   blocker per texel, so a coarser map makes a one-voxel post cast a shadow
+	   wider than itself rather than losing it - erring thick, which is the right
+	   direction here (phase 6.2 could not make thin occluders read at all).
+
 	   Its cost is one brick-DDA march per texel and is *independent of screen
 	   resolution*, which is the whole reason the sun stopped being a per-pixel
 	   ray: at 3840x2160 a single shadow ray per pixel measures ~9.45 ms, and
-	   the entire lighting budget is 3 ms.
-
-	   Sizing: the 768x128x768 window projects to roughly 1065 x 877 world units
-	   perpendicular to the light, so 1024 is close to one texel per voxel and
-	   512 is one per two. A depth map records the nearest blocker per texel, so
-	   a coarser map makes a one-voxel post cast a shadow wider than itself
-	   rather than losing it - erring thick, which is the right direction here
-	   (phase 6.2 could not make thin occluders read at all). */
-	static constexpr uint32_t k_uiSunShadowResolution = 1024;
+	   the entire lighting budget is 3 ms. It is also why the map's size is the
+	   only thing that moves its cost, and so why it is a setting. */
 
 	virtual ~RenderContext();
 
@@ -190,12 +220,25 @@ public:
 	virtual void Initialize();
 	virtual void Deinitialize() {};
 
+	/* The render loop owns the voxel mapper consumed by world and physics
+	   startup. A backend can create a window yet fail before that loop exists;
+	   callers must be able to stop cleanly instead of dereferencing it. */
+	bool IsReady() const { return m_pVoxelMapper != nullptr; }
+	/* A backend-specific explanation for a failed startup. Kept on the common
+	   interface so Application can report it without knowing Vulkan/Metal/DX. */
+	virtual std::string GetStartupError() const { return {}; }
+
 	PRenderContext* Get();
 
 	virtual TextureReadData* ReadTexture(const std::string& texturePath);
 	virtual void DestroyShader(const ShaderReference* pTextureReference) = 0;
 
 	virtual void WaitForGPU();
+
+	/* Drain only the VDirect engine - the one that reads the voxel-side
+	   buffers. Host writes to a buffer a submission may still be fetching from
+	   need this; a full WaitForGPU is a much wider stall for the same effect. */
+	void WaitForVoxelReaders();
 
 	/* Submit data to the draw list */
 	virtual void Submit(const RenderData& renderData);
@@ -206,7 +249,25 @@ public:
 
 	virtual void Submit(const SpriteData& renderData);
 
+	/* This frame's bindless texture working set: packed slot -> TextureManager
+	   ID. The descriptor writer fills slot N from entry N; a sprite's
+	   TextureID as uploaded is the slot, not the ID. See m_BindlessTextureIDs
+	   for why the two are no longer the same thing. */
+	const std::vector<uint32_t>& GetBindlessTextureIDs() const { return m_BindlessTextureIDs; }
+
 	virtual void Submit(StructuredVoxelBuffer& renderData);
+
+	/* DYNAMIC_MODELS_PLAN.md phase 2. One dynamic (non-static) VoxRenderer's
+	   continuous world transform this frame - see ModelInstanceData.h for why
+	   it is not VoxelStamp.h's quantized VoxelStampTransform. Returns the
+	   index SubmitModelQuads needs to reference it; both lists are cleared
+	   once a frame the same way m_AABBList already is. */
+	uint32_t SubmitModelInstance(const ModelInstanceData& instance);
+
+	/* Expands ModelMeshStore's [uiFirstQuad, uiFirstQuad + uiQuadCount) into
+	   this frame's quad-instance list, each entry naming uiInstanceIndex - the
+	   return value of the SubmitModelInstance call for the same renderer. */
+	void SubmitModelQuads(uint32_t uiInstanceIndex, uint32_t uiFirstQuad, uint32_t uiQuadCount);
 
 	void SortAABBs();
 
@@ -221,7 +282,12 @@ public:
 	   by the black bar; identity when nothing is locked. */
 	Vector2 WindowToRenderNormalized(const Vector2& v2WindowPoint) const;
 
-	bool ResizeWorldBuffer();
+	/* Sizes the resident voxel window to a world's grid. **Pass the world being
+	   sized, not the visible one** - since CHUNK_STREAMING_PLAN.md phase 8 they
+	   are different things while a level comes up behind the loading screen, and
+	   getting it from the world manager put a menu world's dimensions on a level.
+	   See the definition. */
+	bool ResizeWorldBuffer(World* pWorld);
 	inline bool ModifyVoxel(uint32_t uiID, uint32_t uiColor, bool bOverwrite = true)
 	{
 		/* The callers derive this ID from float world positions, so a bad
@@ -286,10 +352,46 @@ public:
 	Mapper* GetVoxelMapper() const { return m_pVoxelMapper; }
 	void ClearVoxels();
 
+	/* --- IVoxelWindow --------------------------------------------------------
+	   Forwarders, deliberately: the names above are what the rest of the engine
+	   has always called these and renaming 60 call sites to land a test seam
+	   would be the tail wagging the dog. */
+	uint32_t* GetFrontData() override { return GetVoxelData(); }
+	uint32_t* GetBackData() override { return GetVoxelBackData(); }
+	uint32_t GetWordCount() const override { return GetVoxelDataSize(); }
+	void WaitForReaders() override { WaitForVoxelReaders(); }
+	/* The brick grid, the brick mapper and the pyramid staging buffer all flip
+	   with the voxel mapper already - see the BufferSwapped subscriber in
+	   Initialize, which exists so that the four cannot get out of lockstep from
+	   a call site. So this really is just the one call. */
+	/* **A swap bumps the voxel generation, and leaving that out cost a level
+	   8% of its geometry.** The generation means exactly one thing - "the
+	   buffer no longer holds what you stamped" (see GetVoxelGeneration) - and
+	   reversing the two buffers is the purest possible instance of it: every
+	   renderer stamped into the old front buffer now has its voxels in the
+	   buffer nothing draws.
+
+	   It went unnoticed because on a window *slide* the world offset changes in
+	   the same transaction, and VoxelBaker::Bake's bBakeCurrent test fails on
+	   the offset before it ever looks at the generation. The initial window is
+	   the one commit that swaps with the offset *unchanged* - so the chunk the
+	   camera starts in, whose renderers JsonSerializer::DeserializeWorld
+	   admitted and the first PreTick stamped, kept bBakeCurrent true forever and
+	   was never re-stamped. Measured on Fishing_Village_Beat1: 2,706,535 active
+	   voxels before chunk streaming phase 4, 2,493,640 after.
+
+	   This costs nothing on a slide, where every renderer is re-examined
+	   already. */
+	void Swap() override
+	{
+		m_pVoxelMapper->SwapBuffer();
+		++m_uiVoxelGeneration;
+	}
+
 	/* Coarse occupancy over the same window, for the marcher's outer walk.
 	   Kept current by ModifyVoxel/ModifyVoxelFast above and, in bulk, by
 	   ChunkSystem::RenderChunk. See VoxelBrickGrid. */
-	VoxelBrickGrid& GetBrickGrid() { return m_BrickGrid; }
+	VoxelBrickGrid& GetBrickGrid() override { return m_BrickGrid; }
 	Mapper* GetBrickMapper() const { return m_pBrickMapper; }
 
 	/* Double-buffered per DESTRUCTION_PLAN.md P16: PhysicsSystem writes each
@@ -308,6 +410,16 @@ public:
 	   the engine that records the voxel pass and before it opens - the pass
 	   samples the result. See m_pPyramidView. */
 	void UploadVoxelPyramid(PCommandEngine* pEngine);
+
+	/* DYNAMIC_MODELS_PLAN.md phase 2. Grows m_pModelMeshMapper to match
+	   ModelMeshStore's current quad count and re-uploads it, but only when
+	   that count has grown since the last call - the common case once a
+	   level's dynamic models have all been seen once. Called from Present
+	   inside the same "GPU is not still reading last frame's data" guard the
+	   AABB buffer's own per-frame rebuild already relies on (RenderContext.cpp,
+	   "AABB buffer" comment) - a plain CPU write into mapped memory, so unlike
+	   UploadVoxelPyramid it needs no command engine. */
+	void SyncModelMeshStore();
 
 	/* Reads the coverage texture back and checks it against the mirror the CPU
 	   maintains, plus every coarser mip against the average of its children.
@@ -330,6 +442,26 @@ public:
 	/* Rebuilds the volume for pWorld's level and pushes it to the GPU. Sizes
 	   the mappers, so it must run before anything samples them. */
 	void BuildFarField(class World* pWorld);
+
+	/* The same build in budgeted slices - CHUNK_STREAMING_PLAN.md phase 4.
+	   `BuildFarField` is 447 ms for Beat2 and it ran inside World::Initialize,
+	   off the frame loop, where a loading screen cannot animate over it.
+	   ChunkSystem::Tick drives these; the volume reports itself unbuilt (and so
+	   is never sampled) until Continue returns true. */
+	void BeginFarFieldBuild(class World* pWorld);
+	bool ContinueFarFieldBuild(StreamingBudget::Scope& budget);
+	void CancelFarFieldBuild();
+	bool IsFarFieldBuilding() const { return m_FarFieldBuild.bActive; }
+
+private:
+	/* Everything after the stamping: resize the brick grid, grow the two
+	   mappers, flush the volume into them and build its pyramid once. Shared by
+	   the one-shot and the incremental build so the two cannot diverge on the
+	   order, which matters - the grid drops its mirror before the mapper
+	   reallocates and is re-supplied after. */
+	void PublishFarField();
+
+public:
 
 	/* The cell grid the shader marches, or (0,0,0) when there is no far field -
 	   which is what a level whose window already covers it reports, and what
@@ -357,6 +489,12 @@ public:
 	/* Clear the screen */
 	virtual void Clear();
 	virtual void FixedClear();
+
+	/* Builds m_PackedSpriteList and m_BindlessTextureIDs from m_SpriteList.
+	   Call once per frame, immediately before the sprite buffer is uploaded -
+	   the upload and the descriptor write both depend on the result and must
+	   see the same one. */
+	void PackBindlessTextures();
 
 	/* Present all the gathered data to the screen */
 	virtual bool Present();
@@ -409,6 +547,22 @@ public:
 
 	/* Resizes the context, buffers and window */
 	virtual bool OnResize(uint32_t uiWidth, uint32_t uiHeight);
+
+	/* Re-applies the render settings to things a per-frame uniform cannot
+	   carry. Subscribed to Settings::RenderQualityChanged in Initialize, so
+	   nothing has to remember to call it.
+
+	   Almost every render setting reaches the shaders through the camera
+	   constant buffer and needs nothing here - see CameraData.hlsl's
+	   renderQuality. Exactly two are sizes of GPU images and so cannot:
+	   ShadowQuality decides how large the sun shadow map is, and
+	   ResolutionScale decides how large the Voxel and Particle targets are.
+	   Both mean reallocating attachments, which means idling the device, which
+	   is why this is an event on a settings change rather than a per-frame
+	   comparison.
+
+	   The base does nothing: a context with no passes has nothing to resize. */
+	virtual void ApplyRenderSettings() {}
 
 	/* The app is about to lose (or has just regained) the window/surface -
 	   Android's onPause/onResume. Desktop never calls these; the default does
@@ -495,6 +649,7 @@ protected:
 	Mapper* m_pFarFieldMapper = nullptr;
 	Mapper* m_pFarFieldBrickMapper = nullptr;
 	FarFieldVolume m_FarField;
+	FarFieldBaker::Progress m_FarFieldBuild;
 	VoxelBrickGrid m_FarFieldBricks;
 
 	bool m_bFaderUpdated = false;
@@ -502,8 +657,83 @@ protected:
 	// Frontend resources
 	std::vector<StructuredVoxelBuffer> m_AABBList;
 
+	/* DYNAMIC_MODELS_PLAN.md phase 2. This frame's dynamic-renderer transforms
+	   and the quads that reference them - filled by SubmitModelInstance/
+	   SubmitModelQuads, cleared once a frame the same place m_AABBList is,
+	   uploaded to pModelInstanceBuffer/pModelQuadInstanceBuffer in Present the
+	   same way m_AABBList is uploaded to the AABB buffer. */
+	std::vector<ModelInstanceData> m_ModelInstances;
+	std::vector<ModelQuadInstance> m_ModelQuadInstances;
+
+	/* The shared greedy-mesh quad store (ModelMeshStore, VoxelMesher.h) mirrored
+	   to the GPU. Grows across a session as new model frames are first meshed,
+	   never shrinks - SyncModelMeshStore in Present appends the new range only
+	   when ModelMeshStore's own count has grown since the last sync, which is
+	   rare after the first few seconds of a level.
+
+	   The capacity is tracked separately from the used length because the
+	   allocation is grown geometrically: Mapper::Resize destroys the VkBuffer
+	   in-flight submissions are reading from, so it has to be rare and drained,
+	   not once per newly meshed animation frame. */
+	Mapper* m_pModelMeshMapper = nullptr;
+	uint32_t m_uiModelMeshUploadedQuads = 0;
+	uint32_t m_uiModelMeshCapacityWords = 0;
+
+	VoxelModelPass* m_pVoxelModelPass = nullptr;
+
 	std::vector<RenderData> m_RenderList;
 	std::vector<SpriteData> m_SpriteList;
+
+	/* The bindless texture array, packed by what this frame actually draws.
+	 *
+	 * The array used to be indexed by TextureManager ID directly, which made
+	 * its required size the *highest live ID* rather than the number of
+	 * textures a frame references. Those are very different numbers: this
+	 * project ships 133 PNGs and a level keeps well over a hundred of them
+	 * resident, while a frame of UI samples a few dozen. The array cannot
+	 * simply be grown to fit - 96 is a hard limit on A12Z hardware, where
+	 * MoltenVK binds the set through a Metal indirect argument buffer and
+	 * Metal refuses one with more than 96 textures in it (see
+	 * VKPassBinding::m_uiBindlessCapacity for the exact error). So every
+	 * texture whose ID landed past 96 sampled whatever occupied the last slot,
+	 * which is why in-game text garbled while the main menu - far fewer
+	 * textures loaded - looked correct.
+	 *
+	 * Packing decouples the two. IDs stay whatever TextureManager hands out
+	 * and can climb as far as the content needs; the descriptor index a sprite
+	 * carries is a slot in this frame's working set, assigned in first-seen
+	 * order. Overflow now needs more than 96 *distinct textures in one frame*,
+	 * which the content does not do.
+	 *
+	 * Both halves of the frame read this: PackBindlessTextures rewrites the
+	 * sprite copy that is uploaded, and VKRenderPass::WriteDescriptors fills
+	 * slot N with m_BindlessTextureIDs[N]. They have to agree, which is why
+	 * the packing happens in Present immediately before the sprite upload and
+	 * not, say, at submission time. */
+	std::vector<uint32_t> m_BindlessTextureIDs;
+
+	/* The sprite list as uploaded, with TextureID replaced by its packed slot.
+	 *
+	 * A copy rather than a rewrite of m_SpriteList, because the sprite list is
+	 * rebuilt on the *fixed* tick and Present runs on the render tick: a frame
+	 * where no fixed tick happened would otherwise re-pack IDs that were
+	 * already slots, and bind a completely different set of textures. */
+	std::vector<SpriteData> m_PackedSpriteList;
+
+	/* Scratch for the packing: TextureManager ID -> slot this frame, or
+	   k_uiUnpackedTexture. Kept as a member only to avoid reallocating it
+	   every frame; it is reset before it is read again. */
+	std::vector<uint32_t> m_BindlessSlotForTexture;
+
+	/* Most distinct textures any one frame has referenced this session. Only
+	   interesting as it approaches m_uiBindlessCapacity, which is what it is
+	   reported for. */
+	size_t m_uiPeakBindlessWorkingSet = 0;
+
+	bool m_bWarnedBindlessWorkingSet = false;
+
+	// Present drops non-finite model instances; said once, not once a frame.
+	bool m_bWarnedInvalidModelQuads = false;
 
 #if defined(EDITOR) || defined(_DEBUG)
 	static const int m_iSphereResolution = 30;
